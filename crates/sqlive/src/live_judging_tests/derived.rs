@@ -550,3 +550,53 @@ INSERT INTO t VALUES (1,1),(2,2)",
     .await;
     db.close();
 }
+
+/// A deck's list names its cards, each found row a card, and each label a
+/// found row. Two decks, `a` and `b`, each with 60 cards, each of which one
+/// row found.
+const DECKS: &str = "CREATE TABLE lists(list INTEGER PRIMARY KEY, owner TEXT NOT NULL);
+CREATE TABLE cards(list INTEGER NOT NULL, card INTEGER NOT NULL, PRIMARY KEY (list, card));
+CREATE TABLE found(id INTEGER PRIMARY KEY, card INTEGER NOT NULL);
+INSERT INTO lists VALUES (1, 'a'), (2, 'b');
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 60)
+INSERT INTO cards SELECT l.list, l.list * 1000 + n.i FROM lists AS l, n;
+CREATE TABLE labels(id INTEGER PRIMARY KEY, found INTEGER NOT NULL);
+INSERT INTO found SELECT card, card FROM cards";
+
+/// A subquery gives its found rows' card under eight names, each joined to
+/// the same column of a partner. Each join passes into `found`, and gives it
+/// one condition. A question about a changed label reads the found rows in
+/// their scope, where eight copies of the condition would take it past its
+/// steps, and then a label of the other deck's found row would run the query
+/// again.
+#[tokio::test]
+async fn a_column_passed_on_under_several_names_takes_each_condition_once() {
+    let db = TestDatabase::open(DECKS);
+    let counter = crate::ConnectionWorkCounter::new();
+    db.track_work(&counter);
+    follows(
+        &db,
+        "SELECT group_concat(shown.id) FROM lists AS deck \
+         JOIN cards AS held ON held.list = deck.list \
+         JOIN (SELECT label.id, found.card AS c1, found.card AS c2, found.card AS c3, \
+                      found.card AS c4, found.card AS c5, found.card AS c6, \
+                      found.card AS c7, found.card AS c8 \
+               FROM found JOIN labels AS label ON label.found = found.id) AS shown \
+           ON shown.c1 = held.card AND shown.c2 = held.card AND shown.c3 = held.card \
+              AND shown.c4 = held.card AND shown.c5 = held.card AND shown.c6 = held.card \
+              AND shown.c7 = held.card AND shown.c8 = held.card \
+         WHERE deck.owner = ?1",
+        vec![crate::SqlValue::Text("a".into())],
+        &[
+            ("INSERT INTO labels VALUES (1, 2001)", false),
+            ("INSERT INTO labels VALUES (2, 1001)", true),
+        ],
+    )
+    .await;
+    assert_eq!(
+        counter.take().stopped_questions,
+        0,
+        "no question about a changed row ran past its steps"
+    );
+    db.close();
+}

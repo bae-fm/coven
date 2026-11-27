@@ -16,7 +16,7 @@ use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, Name};
 
 /// `member`'s column equals a value of `partner`'s rows.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Edge {
     /// The column that takes values from `partner`.
     pub(crate) member: Member,
@@ -451,7 +451,7 @@ impl Planner<'_> {
 /// What sqlive narrows one of a core's sources by: a table's or a derived
 /// item's column that sqlive gives an affinity, or an expression over a
 /// table's own columns.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Member {
     pub(crate) item: usize,
     pub(crate) value: MemberValue,
@@ -477,7 +477,7 @@ impl From<MemberColumn> for Member {
 }
 
 /// What an edge compares of its member's rows.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum MemberValue {
     /// One of its columns, lowercase.
     Column(String),

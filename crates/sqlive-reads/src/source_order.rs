@@ -69,12 +69,7 @@ impl Planner<'_> {
                 // goes without the values of partners not placed yet.
                 (None, None) => remaining[0],
             };
-            let taken: Vec<Edge> = edges.by_member[next]
-                .iter()
-                .map(|edge| &self.edges[*edge])
-                .filter(|edge| edge.placed(&placed))
-                .cloned()
-                .collect();
+            let taken = self.taken(&edges, next, &placed);
             for edge in &taken {
                 self.items[next].source.memberships.push(Membership::of(edge));
             }
@@ -99,6 +94,22 @@ impl Planner<'_> {
             sorted,
             windows,
         }
+    }
+
+    /// The edges `item` takes as it is placed, each once: those whose
+    /// partners are placed. An equality that reaches a column through several
+    /// columns of a derived item gives the planner an edge for each, and a
+    /// second membership of one edge would pass no row the first doesn't,
+    /// while a lookup that reads the item would read the edge's partner once
+    /// more.
+    fn taken(&self, edges: &EdgesOfItems, item: usize, placed: &[bool]) -> Vec<Edge> {
+        let mut taken: Vec<Edge> = Vec::new();
+        for edge in edges.by_member[item].iter().map(|edge| &self.edges[*edge]) {
+            if edge.placed(placed) && !taken.contains(edge) {
+                taken.push(edge.clone());
+            }
+        }
+        taken
     }
 
     /// The item to place next when none that waited has stopped: one of the

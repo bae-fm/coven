@@ -99,7 +99,7 @@ of its partner's (`MemberValue`, `PartnerValue`). -/
 inductive PValue where
   | column (c : Nat)
   | expr (e : Expr)
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, DecidableEq
 
 /-- The value a row gives. -/
 def PValue.eval (r : Row) : PValue → Value
@@ -179,7 +179,7 @@ structure Edge where
   /-- Whether the planner passed the edge into a derived item's arm from an
   edge of the derived item. -/
   pushed : Bool := false
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, DecidableEq
 
 /-- One side of an OR as it narrows one item: terms on the item's row and
 edges from it, which all hold where the side does (`Side`). -/

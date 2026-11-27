@@ -128,8 +128,12 @@ def waiting (s : Statement) (st : PState) (order remaining : List Nat) : List Na
     remaining.length alone
 
 /-- Place the items one by one, each taking as memberships its edges to
-items placed before it, through derived items placed before it, and passing
-them into it when it is derived (`Planner::ordered`). -/
+items placed before it, through derived items placed before it, each of them
+once, and passing them into it when it is derived (`Planner::ordered`). An
+equality can reach a column through several columns of a derived item, which
+gives the planner an edge for each: a second membership of the same edge
+passes no row the first doesn't, and would write the partner's scope into
+the lookup again. -/
 def ordered (s : Statement) (st : PState) : PState × List Nat :=
   let all := s.cores.length |> List.range |>.flatMap fun k => (s.core k).items
   go all.length all st [] []
@@ -162,7 +166,7 @@ where
               |>.orElse (fun _ => candidates.find? readWhole)
               |>.getD first
           | none, [] => r
-        let taken := st.edges.filter fun e => e.member == next && e.placedIn order
+        let taken := (st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups
         let either := (st.items next).ors.filter fun sides =>
           sides.all fun side => side.edges.all fun e => e.placedIn order
         let st := st.update next fun p => { p with memberships := p.memberships ++ taken, either }

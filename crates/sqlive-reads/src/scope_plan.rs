@@ -257,7 +257,7 @@ impl Membership {
 }
 
 /// What a membership compares with.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PartnerValue {
     /// One of the partner's columns, lowercase, of the same affinity.
     Column(String),

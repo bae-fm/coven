@@ -1100,6 +1100,13 @@ nothing either.
 
 ### What a lookup costs
 
+A table takes each condition once. One equality can reach a table's column
+through several columns of a subquery, CTE or view (section 8), as when a CTE
+returns a card's id under two names and a join compares both with the card
+list's. A lookup that held a copy of the condition for each would read the
+partner's scope once for each, and a few nested CTEs can make a dozen copies,
+which would take the lookup past its steps on rows another condition rules out.
+
 A lookup's cost depends on the app's indexes. One no index serves reads its
 partner row by row, so it could cost a write as much as reading the whole table.
 A lookup stops after 1,000 of SQLite's steps instead, and the query runs again
@@ -2023,6 +2030,7 @@ the model and states its assumptions.
 | A statement whose own query is one SELECT with an ORDER BY, a LIMIT and no OFFSET, whose run returned as many rows as its LIMIT, returns the same rows from two databases whose bindings that sort at or before the last row, and whose other queries' bindings, hold rows that pass their tests | `limit_restricted` | `proofs/SqliveNarrowing/Restrict.lean` | 6 |
 | A placed item's scope reads the scopes of the items placed before it, and passes a row of which its terms and carried terms hold, whose value each membership's partner gives from a row in the partner's scope, and whose values of the memberships that join one partner in the same join one row of the partner gives together, that a side of each OR it keeps passes, and that its LIMIT bound passes | `scopes_eq`, `scopeAt_passes`, `groupScopes_passes`, `joinedAll_passes_joined`, `membershipScope_passes`, `equalValues_passes`, `sideScope_passes`, `bind_passes` | `proofs/SqliveNarrowing/Scopes.lean` | 7 |
 | The planned state holds an ON narrowing back only for an item a LEFT JOIN adds; each edge the planner passes into a derived item's arms comes from an edge the derived item holds, through the result column an arm passes the target's column on to, and makes the target an inner join's; the planner places each item once, and every item of every core; and each edge of the planned state whose partner is a subquery's source has its partner in an arm of some core's subquery, and each item's memberships are edges from it; and each item's memberships and the ORs it keeps take values from items placed before it, and through FROM subqueries and CTEs placed before it | `plan_leftOn`, `plan_pushed`, `plan_order`, `plan_nestedOK`, `plan_before`, `plan_placedBefore` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
+| No item of the planned state has a membership twice | `plan_once` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
 | An item that a waiting derived item could pass edges into, in a step of placing the items, waits in that step too | `waiting_receivers`, `closure_closed` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
 | The planner reads no core twice, and reads every core that sits in an arm of a query a core reads, at any depth, before that core | `readOrder_postorder` | `proofs/SqliveNarrowing/ReadOrder.lean` | 8 |
 | The planner's state before it reads any condition, after it reads each core's conditions, and after it carries terms across a core's edges, says only what holds of every binding a core keeps: an item it holds no ON narrowing back for has a row, each term and carried term holds of its item's row, each edge and OR of an item with a row holds, and what it holds back for a LEFT JOIN's item holds where that item has a row | `PState.Sem.initial`, `PState.Sem.readConds`, `PState.Sem.carry` | `proofs/SqliveNarrowing/Facts.lean` | 5 to 8 |

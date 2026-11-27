@@ -234,7 +234,7 @@ theorem PState.Lookups.ordered {s : Statement} (hwf : s.wellFormed = true) :
       simp only
       refine PState.Lookups.pushDown hwf _ _ _ _ (h.update (fun sides hs => h.2.1 next sides hs)
         (fun sides hs => (List.mem_filter.mp hs).1) (fun n hn => h.2.2.2.1 next n hn)) ?_
-      exact fun e he => h.1 e (List.mem_filter.mp he).1
+      exact fun e he => h.1 e (List.mem_filter.mp (List.mem_eraseDups.mp he)).1
 
 /-- Every edge, OR side and held narrowing of the planned state takes values
 from items a lookup reads alone, each OR an item keeps is one of its ORs, and

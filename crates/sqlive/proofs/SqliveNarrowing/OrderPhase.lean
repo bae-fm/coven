@@ -282,7 +282,7 @@ theorem PState.Sem.placed {s : Statement} (h : s.wellFormed = true) {rel : Nat �
   unfold ordered.placed at hfin ⊢
   simp only at hfin ⊢
   have hs' := hs.update (i := next) (g := fun p => { p with
-      memberships := p.memberships ++ st.edges.filter fun e => e.member == next && e.placedIn order,
+      memberships := p.memberships ++ (st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups,
       either := (st.items next).ors.filter fun sides =>
         sides.all fun side => side.edges.all fun e => e.placedIn order })
     (fun hl Z f k b hb hi => hs.rows Z f k b hb next hi hl)
@@ -291,10 +291,10 @@ theorem PState.Sem.placed {s : Statement} (h : s.wellFormed = true) {rel : Nat �
     (fun Z f b hb hr sides hsides => hs.ors Z f b next hb hr sides hsides)
     (fun n hn => hs.held next n hn)
   have hpass : (st.update next fun p => { p with
-      memberships := p.memberships ++ st.edges.filter fun e => e.member == next && e.placedIn order,
+      memberships := p.memberships ++ (st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups,
       either := (st.items next).ors.filter fun sides =>
         sides.all fun side => side.edges.all fun e => e.placedIn order }).Passes next
-      (st.edges.filter fun e => e.member == next && e.placedIn order) :=
+      ((st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups) :=
     fun e he => Or.inl (by simp only [PState.update, ↓reduceIte]; exact List.mem_append_right _ he)
   have hgrow := (PushDown.pushDown_keeps s s.fuel s.fuel _ next none _ hpass).1
   refine PState.Sem.pushEdges h (fun _ _ _ _ hb => hb.1) (Fin := Fin)
@@ -617,7 +617,7 @@ theorem ordered_go_membersEdges (s : Statement) :
         subst hi
         rcases List.mem_append.mp hm with hm | hm
         · exact h _ m hm
-        · exact (List.mem_filter.mp hm).1
+        · exact (List.mem_filter.mp (List.mem_eraseDups.mp hm)).1
       · exact h i m hm
 
 /-- Each item's memberships are edges of the planned state. -/
