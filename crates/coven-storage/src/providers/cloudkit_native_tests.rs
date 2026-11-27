@@ -1,6 +1,8 @@
 use super::*;
 use objc2::runtime::AnyObject;
-use objc2_cloud_kit::{CKErrorCode, CKErrorDomain, CKRecordChangedErrorClientRecordKey};
+use objc2_cloud_kit::{
+    CKErrorCode, CKErrorDomain, CKOperationConfiguration, CKRecordChangedErrorClientRecordKey,
+};
 
 #[tokio::test]
 async fn object_publications_use_atomic_change_tag_conditions_and_retain_the_fetched_record() {
@@ -148,6 +150,42 @@ async fn multipart_floor_publication_replaces_its_asset_chain_in_one_conditional
     .await
     .unwrap();
     assert_eq!(result.len(), 2);
+}
+
+/// A save carries no deadline of coven's: it keeps CloudKit's default limit
+/// on the whole operation, and fails only when no data moves for the stall
+/// window (§6.7).
+#[tokio::test]
+async fn a_save_times_out_only_when_it_stalls() {
+    let files = coven_foundation::files::AssetFiles::new().unwrap();
+    let mut part = Record::new("CovenAsset", &record_id("upload/0"));
+    let asset = files.stage(&[1; 10]).unwrap();
+    part.set_asset(asset.path()).unwrap();
+    modify_with(
+        |operation| unsafe {
+            let configuration = operation.configuration();
+            assert_eq!(configuration.timeoutIntervalForRequest(), 60.0);
+            assert_eq!(
+                configuration.timeoutIntervalForResource(),
+                CKOperationConfiguration::new().timeoutIntervalForResource()
+            );
+            let records = operation.recordsToSave().unwrap();
+            operation.modifyRecordsCompletionBlock().as_ref().unwrap().call((
+                &*records as *const _ as *mut _,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ));
+        },
+        vec![part],
+        &[],
+        CKRecordSavePolicy::IfServerRecordUnchanged,
+        None,
+        vec![asset],
+        None,
+    )
+    .wait()
+    .await
+    .unwrap();
 }
 
 /// A save hears CloudKit's per-record progress for the record carrying the

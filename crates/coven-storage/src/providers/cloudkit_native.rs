@@ -2,6 +2,7 @@
 
 use super::query::Selection;
 use super::record::{native_error, Record};
+use crate::providers::http_client::STALL_WINDOW;
 use crate::{StorageError, StorageFailure};
 use block2::RcBlock;
 use coven_foundation::locks::lock_unpoisoned;
@@ -318,7 +319,10 @@ fn modify_with(
         // and does not defer publication until discretionary background time.
         let configuration = operation.configuration();
         configuration.setQualityOfService(objc2_foundation::NSQualityOfService::UserInitiated);
-        configuration.setTimeoutIntervalForResource(120.0);
+        // The request timeout restarts whenever data moves. A resource timeout
+        // would be a deadline on the whole save, which a slow link outlasts
+        // (§6.7), so it keeps CloudKit's default.
+        configuration.setTimeoutIntervalForRequest(STALL_WINDOW.as_secs_f64());
         operation.setConfiguration(Some(&configuration));
         operation.setSavePolicy(policy);
         operation.setAtomic(true);

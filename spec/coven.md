@@ -12694,6 +12694,11 @@ the encrypted bytes. Saving a record saves its assets too; coven never exposes
 an incomplete asset as a complete object. Bounded asset parts let ranged reads
 skip unrelated parts.
 
+- Each save sets CloudKit's `timeoutIntervalForRequest`, which restarts
+  whenever data arrives, to the 60 seconds of §6.7. It keeps CloudKit's
+  default `timeoutIntervalForResource`, seven days. A limit of minutes on the
+  whole save would be a deadline: on a slow enough link, a part would never
+  finish.
 - CloudKit has no upload an app resumes from a byte offset, so coven keeps its
   own durable session: its id, destination, total size and confirmed part
   boundary. A long-lived `CKOperation`
