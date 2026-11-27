@@ -829,7 +829,7 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
           have hji : j ≠ i := fun e => hipre (e ▸ hj)
           rw [hset j hji] at hrj
           exact hb j rj hrj) _ harm b'' hb''
-        (relevant_of_all (queryTest_sub hwf (plan s) ((plan s).scopes last) (lookupRows s Y) hsub) _ _)
+        (relevant_of_all (queryTest_sub hwf (plan s) ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) hsub) _ _)
         (fun he => absurd (he ▸ List.mem_append_right _ hsub) (s.wellFormed_root hwf k)) hwin j r'
         (by rw [horder, List.take_append_length]; exact hj) hr'
     exact hall Z hZ b' hb'
@@ -885,9 +885,10 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
   have hleft : (s.item i).left = true := by
     have := plan_leftOn s hl
     simpa [Statement.alwaysBound] using this
-  have hst : (plan s).scopeTest ((plan s).scopes last) (lookupRows s Y) i r = true := by
+  have hst : (plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y)
+      i r = true := by
     unfold Planned.scopeTest
-    rw [hscope, windowScope_left hleft]
+    rw [hscope, windowScope_left hleft, innerScope_left (by unfold planLeft at hl; exact hl)]
     simp only [RScope.passes, Bool.true_and]
     refine List.all_eq_true.mpr fun e he => ?_
     by_cases hm : e.member = i

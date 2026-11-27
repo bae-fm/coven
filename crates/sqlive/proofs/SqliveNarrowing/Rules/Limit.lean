@@ -1,15 +1,17 @@
 import SqliveNarrowing.Reader
 
 /-! Rule 6: a statement that is one SELECT ordered by its result columns,
-each a column or an expression over the columns of one of its tables, with a
-LIMIT and no OFFSET, depends only on its rows that sort at or before its last
-row when a run returns as many rows as its LIMIT (`scope_order.rs`). The
-ORDER BY's terms fall into runs, each of consecutive terms over one table.
-The table of the first run is bounded by its own terms. A later run's table
-is bounded by its own terms too, or by a row it joins of each earlier run's
-table that sorts before the last row's values of that run. No table is a
-LEFT JOIN's right side, and the SELECT neither groups, aggregates nor calls a
-window function, whose value in a row the rows after the last can change. -/
+each a column or an expression over the columns of one of its FROM items, with
+a LIMIT and no OFFSET, depends only on its rows that sort at or before its
+last row when a run returns as many rows as its LIMIT (`scope_order.rs`). The
+ORDER BY's terms fall into runs, each of consecutive terms over one item. The
+item of the first run is bounded by its own terms. A later run's item is
+bounded by its own terms too, or by a row it joins of each earlier run's item
+that sorts before the last row's values of that run. No item is a LEFT JOIN's
+right side, and the SELECT neither groups, aggregates nor calls a window
+function, whose value in a row the rows after the last can change. Where a
+run's item is derived, items inside it take its bound over its first terms
+(`Level`, `Rules/InnerLimit.lean`). -/
 namespace SqliveNarrowing.Limit
 
 /-- What an ORDER BY term sorts its item's rows by (`SortKey`): one of
@@ -26,13 +28,26 @@ def SortKey.value (r : Row) : SortKey → Value
   | .column c => r.cell c
   | .expr e => e.eval (rowBind (some r)) noSubs
 
+/-- An item inside a derived item that each row of the derived item is made
+from, whose columns the first terms of the derived item's run read
+(`InnerRun`). -/
+structure Level where
+  item : Nat
+  /-- The item's column that holds each column of the item around it that one
+  of its columns passes to. -/
+  rename : Nat → Option Nat
+  /-- The run's first terms, over this item's columns. -/
+  terms : List (SortKey × Dir × Nat)
+
 /-- Consecutive ORDER BY terms over one item (`SortRun`). -/
 structure SortRun where
   item : Nat
   /-- Each term: its key, its direction and collation, and the result column
   that returns it. -/
   terms : List (SortKey × Dir × Nat)
-  deriving Repr
+  /-- For a run over a derived item, the items inside it that its first terms
+  pass down to, each inside the one before it. -/
+  inner : List Level := []
 
 /-- The run's keys, each with its direction and collation. -/
 def SortRun.keys (run : SortRun) : List (SortKey × Dir) := run.terms.map fun (key, d, _) => (key, d)
@@ -45,14 +60,13 @@ def SortRun.group : List (Nat × SortKey × Dir × Nat) → List SortRun
     match group rest with
     | run :: runs =>
       if run.item = i then { run with terms := term :: run.terms } :: runs
-      else ⟨i, [term]⟩ :: run :: runs
-    | [] => [⟨i, [term]⟩]
+      else ⟨i, [term], []⟩ :: run :: runs
+    | [] => [⟨i, [term], []⟩]
 
 structure SortedLimit where
   /-- The ORDER BY's runs, in order. -/
   runs : List SortRun
   limit : Nat
-  deriving Repr
 
 /-- The key the result column `e` sorts item `i`'s rows by: a column, or an
 expression over its columns and no subquery, where each column it names is
@@ -74,6 +88,90 @@ def termKey (s : Statement) (i : Nat) (e : Expr) : Option SortKey :=
     | .col j c => if j == i && ((s.item i).collated[c]?).getD false then some (.column c) else none
     | _ => none
 
+/-- The item whose column the column `c` of derived item `i` is: the item's
+query has one arm and no LIMIT or OFFSET, and the arm, which calls no window
+function, passes the column on unchanged from an item of its own that no LEFT
+JOIN adds, in an arm that aggregates one its GROUP BY lists
+(`only_source`). -/
+def passedTo (s : Statement) (st : PState) (i c : Nat) : Option (Nat × Nat) :=
+  match (s.item i).kind with
+  | .derived q _ =>
+    if (s.query q).limit.isSome || (s.query q).offset.isSome then none
+    else
+      match (s.query q).arms with
+      | [a] =>
+        if (s.core a).windowed then none
+        else
+          match (s.core a).output[c]? with
+          | some (.expr (.col j d)) =>
+            if (s.core a).items.contains j
+                && (!(s.core a).aggregated
+                  || (s.core a).groupBy.contains (.col j d) && (s.affinity j d).isSome)
+                && (st.items j).leftOn.isNone then some (j, d)
+            else none
+          | _ => none
+      | _ => none
+  | .table _ => none
+
+/-- The column of item `j` that holds the column `c` of item `i`, when `j` is
+the item `i`'s column `c` is passed on from. -/
+def passedColumn (s : Statement) (st : PState) (i j c : Nat) : Option Nat :=
+  (passedTo s st i c).bind fun (j', d) => if j' = j then some d else none
+
+/-- The value of its item's row a key sorts by. -/
+def SortKey.pvalue : SortKey → PValue
+  | .column c => .column c
+  | .expr e => .expr e
+
+/-- The expression of item `i`'s columns a value is. -/
+def valueExpr (i : Nat) : PValue → Expr
+  | .column c => .col i c
+  | .expr e => e
+
+/-- The columns of its item a key reads. -/
+def SortKey.columns (key : SortKey) : List Nat := key.pvalue.columns
+
+/-- A term of item `i`'s run over item `j`, whose column `rename c` holds
+column `c`'s value (`sort_key` of the term read over `j`). -/
+def passTerm (s : Statement) (i j : Nat) (rename : Nat → Option Nat) :
+    SortKey × Dir × Nat → Option (SortKey × Dir × Nat)
+  | (key, d, p) =>
+    (key.pvalue.passed i j rename).bind fun v =>
+      (termKey s j (valueExpr j v)).map fun key => (key, d, p)
+
+/-- The first terms of a run that pass to item `j`. -/
+def passTerms (s : Statement) (i j : Nat) (rename : Nat → Option Nat) :
+    List (SortKey × Dir × Nat) → List (SortKey × Dir × Nat)
+  | [] => []
+  | term :: rest =>
+    match passTerm s i j rename term with
+    | some found => found :: passTerms s i j rename rest
+    | none => []
+
+/-- The items inside item `i` that the first of `terms`, over its columns,
+pass down to (`inner_runs`): the item the first term's first column is passed
+on from takes the first terms that all pass to it, and so on inside it. -/
+def innerLevels (s : Statement) (st : PState) : Nat → Nat → List (SortKey × Dir × Nat) → List Level
+  | 0, _, _ => []
+  | _ + 1, _, [] => []
+  | f + 1, i, (key, d, p) :: rest =>
+    match key.columns.head?.bind (passedTo s st i) with
+    | some (j, _) =>
+      match passTerms s i j (passedColumn s st i j) ((key, d, p) :: rest) with
+      | [] => []
+      | term :: terms =>
+        ⟨j, passedColumn s st i j, term :: terms⟩ :: innerLevels s st f j (term :: terms)
+    | none => []
+
+/-- The runs, the first over each item with the items inside it that its terms
+pass down to; `seen` are the items of the runs before. -/
+def attach (s : Statement) (st : PState) (seen : List Nat) : List SortRun → List SortRun
+  | [] => []
+  | run :: rest =>
+    ⟨run.item, run.terms,
+        if seen.contains run.item then [] else innerLevels s st s.items.length run.item run.terms⟩ ::
+      attach s st (run.item :: seen) rest
+
 /-- The order and LIMIT of the root query, when a full run's last row bounds
 the scopes of the items it sorts (`sorted_limit`); `st` is the state after
 the statement's conditions are read. -/
@@ -87,12 +185,12 @@ def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
   let terms ← query.orderBy.mapM fun (p, desc) => do
     let .expr e ← c.output[p]? | none
     let (i, _) ← e.refs.head?
-    if (s.item i).core ≠ k ∨ (s.table? i).isNone ∨ (st.items i).leftOn.isSome then none
+    if (s.item i).core ≠ k ∨ (st.items i).leftOn.isSome then none
     let position ← c.output.findIdx? fun
       | .expr e' => e' == e
       | _ => false
     pure (i, (← termKey s i e), desc, position)
-  pure { runs := SortRun.group terms, limit := n }
+  pure { runs := attach s st [] (SortRun.group terms), limit := n }
 
 /-- The rows of item `i` whose key is NULL, or isn't when `not`. -/
 def SortKey.nullScope (i : Nat) (not : Bool) : SortKey → RScope
@@ -157,6 +255,27 @@ def runBound (i : Nat) (lookup : Nat → Option (RScope → RScope)) :
       pure (match sortedBefore run.item run.keys last none with
         | some before => (look before).either later
         | none => later)
+
+/-- For each place among the runs' inner items where item `i` is one: the
+run's item, the inner items down to `i`, and the runs before that run with
+`i`'s bound in its place, each with the last row's values. `before` are the
+runs read so far, and `outer` the inner items around those left of the run
+`root` is of. -/
+def levelRuns (i root : Nat) (before : List (SortRun × List Value)) (last : List Value) :
+    List Level → List Level → List (Nat × List Level × List (SortRun × List Value))
+  | _, [] => []
+  | outer, level :: rest =>
+    let found := levelRuns i root before last (outer ++ [level]) rest
+    if level.item = i then
+      (root, outer ++ [level], before ++ [({ item := i, terms := level.terms }, last)]) :: found
+    else found
+
+/-- `levelRuns` of each run, in turn. -/
+def innerRuns (i : Nat) (before : List (SortRun × List Value)) :
+    List (SortRun × List Value) → List (Nat × List Level × List (SortRun × List Value))
+  | [] => []
+  | (run, last) :: rest =>
+    levelRuns i run.item before last [] run.inner ++ innerRuns i (before ++ [(run, last)]) rest
 
 /-- The last row's ORDER BY values, run by run, when the run returned as
 many rows as the LIMIT. -/

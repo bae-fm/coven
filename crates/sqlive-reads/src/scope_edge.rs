@@ -488,6 +488,20 @@ pub(crate) enum MemberValue {
     Expression { term: Arc<RowTerm>, strict: bool },
 }
 
+impl MemberValue {
+    /// This value over the rows the statement names `rows`, of a source whose
+    /// column `column` gives for each column the value reads holds the same
+    /// value, or `None` when it gives none for one of them.
+    pub(crate) fn over(&self, rows: &str, column: &dyn Fn(&str) -> Option<String>) -> Option<Self> {
+        Some(match self {
+            Self::Column(read) => Self::Column(column(read)?),
+            Self::Expression { term, strict } => {
+                Self::Expression { term: term.over(rows, column)?, strict: *strict }
+            }
+        })
+    }
+}
+
 impl Member {
     /// The member's column, unless it is an expression.
     pub(crate) fn column(&self) -> Option<&str> {
@@ -519,13 +533,10 @@ impl Member {
         missing: bool,
         column: &dyn Fn(&str) -> Option<String>,
     ) -> Option<Self> {
-        let value = match &self.value {
-            MemberValue::Column(read) => MemberValue::Column(column(read)?),
-            MemberValue::Expression { strict, .. } if missing && !strict => return None,
-            MemberValue::Expression { term, strict } => {
-                MemberValue::Expression { term: term.over(rows, column)?, strict: *strict }
-            }
-        };
+        if missing && matches!(self.value, MemberValue::Expression { strict: false, .. }) {
+            return None;
+        }
+        let value = self.value.over(rows, column)?;
         Some(Self { item, value, affinity: self.affinity })
     }
 }

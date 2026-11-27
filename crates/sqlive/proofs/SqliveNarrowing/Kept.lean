@@ -1,3 +1,4 @@
+import SqliveNarrowing.LimitTests
 import SqliveNarrowing.Partners
 
 /-! The planner's promise for the bindings that matter. Each item's test
@@ -16,15 +17,6 @@ item's test. -/
 namespace SqliveNarrowing
 
 attribute [local instance] Classical.propDecidable
-
-/-- Item `i`'s test for a run whose last row's LIMIT values are `last`, with
-lookups in `Y`. -/
-def planTest (s : Statement) (Y : Db) (last : Option (List (List Value))) : Nat → Row → Bool :=
-  (plan s).itemTest s ((plan s).scopes last) (lookupRows s Y)
-
-/-- Query `q`'s test for the same run. -/
-def planRel (s : Statement) (Y : Db) (last : Option (List (List Value))) : Nat → Row → Bool :=
-  (plan s).queryTest s ((plan s).scopes last) (lookupRows s Y)
 
 /-- Whether binding `b` of the statement's own core `k` sorts at or before a
 row of the core, which gives the LIMIT values `last` of the run, when the
@@ -45,7 +37,7 @@ theorem planTest_parts {s : Statement} {Y : Db} {last : Option (List (List Value
       ((s.item i).readable = true → r ∈ lookupRows s Y i) := by
   unfold planTest Planned.itemTest Planned.scopeTest at h
   simp only [Bool.and_eq_true] at h
-  refine ⟨h.1.1.1, fun hr => ?_⟩
+  refine ⟨h.1.1.1.1, fun hr => ?_⟩
   have := h.2
   rw [hr] at this
   simpa using this
@@ -68,22 +60,11 @@ theorem scopes_parts {s : Statement} (last : Option (List (List Value))) (rowsOf
 
 /-! Each query's test. -/
 
-/-- A query with no LIMIT and no OFFSET keeps only rows that pass the scope
-and pushed edges of each derived item a core lists that reads it. -/
-theorem queryTest_scope {s : Statement} {p : Planned} {scopes : Nat → RScope} {rowsOf : Nat → List Row}
-    {d q : Nat} {v : Bool} (hd : d ∈ (s.core (s.item d).core).items)
-    (hkind : (s.item d).kind = .derived q v) (hlim : (s.query q).limit = none)
-    (hoff : (s.query q).offset = none) {r : Row} (hr : p.queryTest s scopes rowsOf q r = true) :
-    p.scopeTest scopes rowsOf d r = true := by
-  simp only [Planned.queryTest, hlim, hoff, Option.isSome_none, Bool.or_false, Bool.false_or,
-    List.all_eq_true, List.mem_range] at hr
-  have := hr _ (s.core_lt hd) d hd
-  simpa only [hkind, bne_self_eq_false, Bool.false_or] using this
-
 /-- No derived item reads a subquery, so its test keeps every row. -/
-theorem queryTest_sub {s : Statement} (hwf : s.wellFormed = true) (p : Planned) (scopes : Nat → RScope)
+theorem queryTest_sub {s : Statement} (hwf : s.wellFormed = true) (p : Planned)
+    (scopes inner : Nat → RScope)
     (rowsOf : Nat → List Row) {k q : Nat} (hq : q ∈ (s.core k).subqueries) (r : Row) :
-    p.queryTest s scopes rowsOf q r = true := by
+    p.queryTest s scopes inner rowsOf q r = true := by
   simp only [Planned.queryTest, Bool.or_eq_true, List.all_eq_true, List.mem_range]
   refine Or.inr fun k' _ d hd => ?_
   split
@@ -97,9 +78,10 @@ theorem queryTest_sub {s : Statement} (hwf : s.wellFormed = true) (p : Planned) 
 /-- A row that passes a derived item's scope and pushed edges passes the
 test of its query. -/
 theorem queryTest_of_scope {s : Statement} (hwf : s.wellFormed = true) {p : Planned}
-    {scopes : Nat → RScope} {rowsOf : Nat → List Row} {k i q : Nat} {v : Bool}
+    {scopes inner : Nat → RScope} {rowsOf : Nat → List Row} {k i q : Nat} {v : Bool}
     (hi : i ∈ (s.core k).items) (hkind : (s.item i).kind = .derived q v) {r : Row}
-    (hr : p.scopeTest scopes rowsOf i r = true) : p.queryTest s scopes rowsOf q r = true := by
+    (hr : p.scopeTest scopes inner rowsOf i r = true) :
+    p.queryTest s scopes inner rowsOf q r = true := by
   simp only [Planned.queryTest, Bool.or_eq_true, List.all_eq_true, List.mem_range]
   refine Or.inr fun k' _ d hd => ?_
   split
@@ -220,7 +202,7 @@ theorem pushed_passes {s : Statement} (hwf : s.wellFormed = true) {Y : Db}
   have h0 : (Planned.membershipScope ((plan s).scopes last) e0).passes (lookupRows s Y) r0 = true := by
     rcases he0 with he0 | ⟨he0, hm0⟩
     · obtain ⟨pre, post, horder, _⟩ := (plan_placedBefore s d).1 e0 he0
-      exact (scopes_parts last _ (by rw [horder]; simp) htest.1.1).2.2 e0 he0
+      exact (scopes_parts last _ (by rw [horder]; simp) htest.1.1.1).2.2 e0 he0
     · rcases htest.2 e0 he0 with h | h
       · exact absurd hm0 h
       · exact h
@@ -252,7 +234,7 @@ theorem pushedOr_passes {s : Statement} (hwf : s.wellFormed = true) {Y : Db}
   have htest := queryTest_scope hdl hd hlim hoff hr0
   simp only [Planned.scopeTest, Bool.and_eq_true] at htest
   obtain ⟨boundd, hboundd, hbefore⟩ := (plan s).scopes_eq last (plan_order s).1 hdo
-  have hscope := htest.1.1
+  have hscope := htest.1.1.1
   rw [hboundd] at hscope
   obtain ⟨side0, hside0, hpass0⟩ := (scopeAt_parts hscope).2.2.2 sides0 hs0 hne
   rw [sideScope_congr fun e he' => hbefore e.partner
@@ -333,73 +315,6 @@ theorem partner_found {s : Statement} {Y : Db} {last : Option (List (List Value)
     rw [hon] at hx
     exact fin r' ht (by rw [hval, hx]) (Or.inl (by rw [hx]; rfl)) (fun h => by rw [hnt] at h; cases h)
 
-/-! The LIMIT bound's runs. -/
-
-/-- Each run of the LIMIT bound is over an item the statement's own core,
-its only arm, lists, which the planned state holds no ON narrowing back
-for. -/
-theorem Limit.run_facts {s : Statement} (hwf : s.wellFormed = true) {sorted : Limit.SortedLimit}
-    (hs : (plan s).sorted = some sorted) {run : Limit.SortRun} (hrun : run ∈ sorted.runs) :
-    ∃ k, (s.query s.root).arms = [k] ∧ run.item ∈ (s.core k).items ∧
-      ((plan s).state.items run.item).leftOn = none := by
-  have hs' := hs
-  rw [plan_sorted] at hs'
-  obtain ⟨k, ts, harms, _, _, hruns, hlen, hts⟩ := Limit.sortedLimit_facts hs'
-  rw [hruns] at hrun
-  obtain ⟨t, ht, he⟩ := Limit.group_item hrun
-  obtain ⟨⟨pd, t'⟩, hx, rfl⟩ : ∃ x ∈ (s.query s.root).orderBy.zip ts, x.2 = t := by
-    obtain ⟨n, hn, rfl⟩ := List.getElem_of_mem ht
-    exact ⟨((s.query s.root).orderBy[n]'(by omega), ts[n]), List.mem_iff_getElem.mpr
-      ⟨n, by simp only [List.length_zip]; omega, by simp⟩, rfl⟩
-  obtain ⟨e, ho, hc, hleft, hsk, _, _⟩ := hts _ hx
-  simp only at he ho hc hleft hsk
-  rw [← he]
-  refine ⟨k, harms, ?_, ?_⟩
-  · -- The sort key names the item, so the core's clauses name it.
-    obtain ⟨c, hjc⟩ : ∃ c, (t'.1, c) ∈ e.refs := by
-      unfold Limit.termKey at hsk
-      cases hs : Limit.sortKey s t'.1 e with
-      | some k0 =>
-        unfold Limit.sortKey at hs
-        split at hs
-        · rename_i hcond
-          simp only [Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff,
-            List.all_eq_true, beq_iff_eq] at hcond
-          obtain ⟨⟨_, hne⟩, hall⟩ := hcond
-          obtain ⟨⟨j, c⟩, hjc⟩ := List.exists_mem_of_ne_nil _ hne
-          have hj : j = t'.1 := (hall _ hjc).1
-          rw [hj] at hjc
-          exact ⟨c, hjc⟩
-        · cases hs
-      | none =>
-        rw [hs] at hsk
-        cases e <;> simp [Option.orElse_none] at hsk
-        rename_i it
-        obtain ⟨⟨hj, _⟩, _⟩ := hsk
-        subst hj
-        exact ⟨_, List.mem_singleton_self _⟩
-    have hklt := ((s.wellFormed_parts hwf).arms s.root (s.wellFormed_parts hwf).root k
-      (by rw [harms]; simp)).1
-    have hp : (t'.1, c) ∈ (s.core k).refs := by
-      unfold Core.refs
-      refine List.mem_append_left _ (List.mem_append_right _ (List.mem_flatMap.mpr
-        ⟨_, List.mem_of_getElem? ho, ?_⟩))
-      simpa [OutCol.refs, OutCol.exprs] using hjc
-    obtain ⟨k', _, hjk'⟩ := (s.wellFormed_parts hwf).refs k hklt _ hp
-    have := ((s.wellFormed_parts hwf).items k' (s.core_lt hjk') _ hjk').2
-    rw [hc] at this
-    subst this
-    exact hjk'
-  · cases hfin : ((plan s).state.items t'.1).leftOn with
-    | none => rfl
-    | some _ =>
-      have h1 : ((plan s).state.items t'.1).leftOn.isSome = true := by rw [hfin]; rfl
-      unfold plan ordered at h1
-      simp only at h1
-      have h2 := (ordered_keeps s _ _ _ [] []).1.1 t'.1 h1
-      rw [hleft] at h2
-      cases h2
-
 /-! The induction on the order. -/
 
 /-- What the restriction's tables and the earlier fuels give the induction:
@@ -409,15 +324,15 @@ up to `f`. -/
 structure KeptBase (s : Statement) (X Y : Db) (last : Option (List (List Value))) (f : Nat) : Prop where
   wf : s.wellFormed = true
   tables : ∀ i t, s.table? i = some t → i < s.items.length →
-    (X.rows t).filter ((plan s).scopeTest ((plan s).scopes last) (lookupRows s Y) i) =
-      (Y.rows t).filter ((plan s).scopeTest ((plan s).scopes last) (lookupRows s Y) i)
+    (X.rows t).filter ((plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) i) =
+      (Y.rows t).filter ((plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) i)
   agree : ∀ g ≤ f, Agree s X Y (planTest s Y last) (planRel s Y last) g
 
 /-- A row of `X` that passes its item's scope test is a row of `Y`. -/
 theorem KeptBase.mem {s : Statement} {X Y : Db} {last : Option (List (List Value))} {f : Nat}
     (base : KeptBase s X Y last f) {i t : Nat} (ht : s.table? i = some t) (hi : i < s.items.length)
     {r : Row} (hr : r ∈ X.rows t)
-    (hst : (plan s).scopeTest ((plan s).scopes last) (lookupRows s Y) i r = true) : r ∈ Y.rows t := by
+    (hst : (plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) i r = true) : r ∈ Y.rows t := by
   have hmem := List.mem_filter.mpr ⟨hr, hst⟩
   rw [base.tables i t ht hi] at hmem
   exact (List.mem_filter.mp hmem).1
@@ -443,7 +358,7 @@ theorem nested_windowPasses {s : Statement} {X Y : Db} {last : Option (List (Lis
     rw [← hwk, hf.items] at hpm
     simpa using hpm
   rw [hpi] at hp
-  refine ⟨(plan s).scopeTest ((plan s).scopes last) (lookupRows s Y) w.item, ?_,
+  refine ⟨(plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) w.item, ?_,
     fun b'' hb'' hwin r hr => ?_⟩
   · rcases hZ with rfl | rfl
     · exact base.tables w.item t ht (s.wellFormed_items hwf (k := w.core) (by rw [hf.items]; simp))
@@ -501,7 +416,7 @@ theorem derived_source_passes {s : Statement} (hwf : s.wellFormed = true) {Y : D
       | some rp =>
         simp only [hp, cellOf] at hcell
         refine ⟨rp, hA qd v a hkind (by rw [harms]; simp) g' rfl b'' hb'' ?_ rp hp, hcell⟩
-        have hst : (plan s).scopeTest ((plan s).scopes last) (lookupRows s Y) d rd = true := by
+        have hst : (plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) d rd = true := by
           unfold planTest Planned.itemTest at htest
           simp only [Bool.and_eq_true] at htest
           exact htest.1
@@ -708,9 +623,10 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
   have hwini : ((plan s).windowScope i).passes (lookupRows s Y) r = true := by
     have := List.all_eq_true.mp hwin i hi
     simpa [hbi] using this
-  have hst : (plan s).scopeTest ((plan s).scopes last) (lookupRows s Y) i r = true := by
+  have hst : (plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) i r = true := by
     unfold Planned.scopeTest
-    rw [hscope, hwini, Bool.true_and, Bool.true_and]
+    rw [hscope, hwini, inner_passes hwf hk hi hrel hbi, Bool.true_and, Bool.true_and,
+      Bool.true_and]
     refine List.all_eq_true.mpr fun e he => ?_
     by_cases hm : e.member = i
     · simp [pushed_passes hwf hk hi hrel hbi he hm]
@@ -813,7 +729,7 @@ theorem plan_kept_rows {s : Statement} {X Y : Db} {last : Option (List (List Val
           have hqq := s.wellFormed_nested hwf (s.query_lt hk) hk hnest
           exact ih Z' hZ' g' (by omega) q' (by omega) b
             (s.outer_sub hwf hk ho (coreBindings_within hb) hbd hq') hbn k' hk' b' hb'
-            (relevant_of_all (queryTest_sub hwf (plan s) ((plan s).scopes last) (lookupRows s Y) hq') _ _)
+            (relevant_of_all (queryTest_sub hwf (plan s) ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) hq') _ _)
             (fun he => absurd (he ▸ hnest) (s.wellFormed_root hwf k)) hwb' j' r' hj' hbj'
         · intro Z' hZ' d hd qd v hkind g' hg' a ha b'' hb'' hrel'' j' r' hj' hbj'
           have hqd : qd ∈ s.nestedQueries k :=

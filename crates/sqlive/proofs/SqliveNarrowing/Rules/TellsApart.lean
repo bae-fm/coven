@@ -61,11 +61,15 @@ def _root_.SqliveNarrowing.Db.Constrained (db : Db) (s : Statement) : Prop :=
       (∀ c ∈ key, r.cell c = r'.cell c ∧ r.cell c ≠ none) → r = r'
 
 /-- What `one` promises of queries run with fuel `g`: a query it says returns
-one row at most for values of `columns` returns no two different rows that
-hold, not NULL, the same values there. -/
-def OneSound (s : Statement) (db : Db) (g : Nat) (one : Nat → List Nat → Bool) : Prop :=
-  ∀ q columns, one q columns = true → ∀ b, ∀ r ∈ evalQuery s db g b q, ∀ r' ∈ evalQuery s db g b q,
-    (∀ p ∈ columns, r.cell p = r'.cell p ∧ r.cell p ≠ none) → r = r'
+one row at most for values of `columns` among rows that tie in `compared`
+returns no two different rows that hold, not NULL, the same values in
+`columns`, and the same values, NULL or not, in `compared`. -/
+def OneSound (s : Statement) (db : Db) (g : Nat) (one : Nat → List Nat → List Nat → Bool) :
+    Prop :=
+  ∀ q columns compared, one q columns compared = true →
+    ∀ b, ∀ r ∈ evalQuery s db g b q, ∀ r' ∈ evalQuery s db g b q,
+    (∀ p ∈ columns, r.cell p = r'.cell p ∧ r.cell p ≠ none) →
+    (∀ p ∈ compared, r.cell p = r'.cell p) → r = r'
 
 /-- A binding a join keeps holds a row of each item it joins that no LEFT JOIN
 adds. -/
@@ -350,7 +354,7 @@ theorem onKnown_none (hwf : s.wellFormed = true) (hk : k ∈ (s.query q).arms) {
 bindings that agree on those items, tie in `sorted` and hold `fixed`'s values
 alike. -/
 theorem determines_agree (hwf : s.wellFormed = true) (hdb : db.Keyed)
-    (hcons : db.Constrained s) (hk : k ∈ (s.query q).arms) {one : Nat → List Nat → Bool}
+    (hcons : db.Constrained s) (hk : k ∈ (s.query q).arms) {one : Nat → List Nat → List Nat → Bool}
     (hone : OneSound s db g one) {ba bb : Bind}
     (hba : ba ∈ coreBindings s db (evalQuery s db g) outer k)
     (hbb : bb ∈ coreBindings s db (evalQuery s db g) outer k)
@@ -503,11 +507,14 @@ theorem determines_agree (hwf : s.wellFormed = true) (hdb : db.Keyed)
         have hrb := hrowsb rb hjb
         simp only [itemRows, hkind] at hra hrb
         congr 1
-        refine hone q' _ hq' _ ra hra rb hrb fun c hc => ?_
-        simp only [Statement.fixedColumns, List.mem_filter] at hc
-        have := fixed_cell hwf hk hba hbb hknown hfixed hi hja hjb hc.2
-        rw [hja, hjb] at this
-        exact this
+        refine hone q' _ _ hq' _ ra hra rb hrb (fun c hc => ?_) (fun c hc => ?_)
+        · simp only [Statement.fixedColumns, List.mem_filter] at hc
+          have := fixed_cell hwf hk hba hbb hknown hfixed hi hja hjb hc.2
+          rw [hja, hjb] at this
+          exact this
+        · simp only [Statement.comparedColumns, List.mem_filter, List.contains_iff_mem] at hc
+          have := hsorted _ hc.2
+          simpa [Expr.eval, hja, hjb, cellOf] using this
 
 /-- Each item the rounds add holds one row, or none, in two bindings, when
 each step's items do. -/
@@ -530,7 +537,7 @@ theorem toldRounds_agree {determines : List Nat → Nat → Bool} {items : List 
 /-- Two bindings core `k` keeps that tie in `sorted` and hold `fixed`'s values
 alike are one binding when each item of the core is determined. -/
 theorem allTold_separates (hwf : s.wellFormed = true) (hdb : db.Keyed)
-    (hcons : db.Constrained s) (hk : k ∈ (s.query q).arms) {one : Nat → List Nat → Bool}
+    (hcons : db.Constrained s) (hk : k ∈ (s.query q).arms) {one : Nat → List Nat → List Nat → Bool}
     (hone : OneSound s db g one) {sorted : List Expr} {fixed : List (Nat × Nat)}
     (hall : s.allTold one k sorted fixed = true) {ba bb : Bind}
     (hba : ba ∈ coreBindings s db (evalQuery s db g) outer k)
@@ -586,10 +593,10 @@ theorem cell_passes {c : Core} {p : Nat} {e : Expr} (h : c.passes p = some e)
 most for values of some columns returns no two rows that hold them alike. -/
 theorem oneRow_sound {s : Statement} (hwf : s.wellFormed = true) {db : Db} (hdb : db.Keyed)
     (hcons : db.Constrained s) : ∀ f g, OneSound s db g (s.oneRow f)
-  | 0, _ => fun _ _ h => by simp [Statement.oneRow] at h
-  | f + 1, 0 => fun _ _ _ _ r hr => by simp [evalQuery] at hr
+  | 0, _ => fun _ _ _ h => by simp [Statement.oneRow] at h
+  | f + 1, 0 => fun _ _ _ _ _ r hr => by simp [evalQuery] at hr
   | f + 1, g + 1 => by
-    intro q columns h b r hr r' hr' hcells
+    intro q columns compared h b r hr r' hr' hcells hties
     unfold Statement.oneRow at h
     split at h
     case h_2 => cases h
@@ -675,7 +682,20 @@ theorem oneRow_sound {s : Statement} (hwf : s.wellFormed = true) {db : Db} (hdb 
       obtain ⟨bb, hbb, jb, rfl⟩ := mem_rows_plain hagg hr'
       have hsame : ba = bb := by
         refine allTold_separates hwf hdb hcons hk (oneRow_sound hwf hdb hcons f g) hall hba hbb
-          (sa := evalQuery s db g ba) (sb := evalQuery s db g bb) (fun _ h => by cases h) ?_
+          (sa := evalQuery s db g ba) (sb := evalQuery s db g bb) ?_ ?_
+        · intro e he
+          obtain ⟨⟨i, c⟩, hp, rfl⟩ := List.mem_map.mp he
+          simp only [Statement.passedColumns, List.mem_filterMap] at hp
+          obtain ⟨p, hpc, hp⟩ := hp
+          split at hp
+          · rename_i i' c' hpass
+            split at hp
+            · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hp)
+              have hc := hties p hpc
+              rw [cell_passes hpass, cell_passes hpass] at hc
+              simpa [OutCol.plain, Expr.eval] using hc
+            · cases hp
+          · cases hp
         intro (i, c) hp
         simp only [Statement.passedColumns, List.mem_filterMap] at hp
         obtain ⟨p, hpc, hp⟩ := hp

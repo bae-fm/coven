@@ -1,4 +1,5 @@
 import SqliveNarrowing.Restrict
+import SqliveNarrowing.Rules.InnerLimit
 import SqliveNarrowing.Windows
 import SqliveNarrowing.Scopes
 import SqliveNarrowing.PlannerState
@@ -18,28 +19,30 @@ row in a binding of the statement's own core that sorts at or before the
 last row. -/
 namespace SqliveNarrowing
 
-/-- Whether item `i`'s row `r` passes its scope among `scopes` and its
-window's, with lookups `rowsOf`, and each edge the planner pushed into `i`. -/
-def Planned.scopeTest (p : Planned) (scopes : Nat → RScope) (rowsOf : Nat → List Row)
+/-- Whether item `i`'s row `r` passes its scope among `scopes`, its
+window's and its bound `inner` from inside a run's derived item, with lookups
+`rowsOf`, and each edge the planner pushed into `i`. -/
+def Planned.scopeTest (p : Planned) (scopes inner : Nat → RScope) (rowsOf : Nat → List Row)
     (i : Nat) (r : Row) : Bool :=
-  (scopes i).passes rowsOf r && (p.windowScope i).passes rowsOf r && p.state.pushed.all fun e =>
-    e.member != i || (Planned.membershipScope scopes e).passes rowsOf r
+  (scopes i).passes rowsOf r && (p.windowScope i).passes rowsOf r && (inner i).passes rowsOf r &&
+    p.state.pushed.all fun e =>
+      e.member != i || (Planned.membershipScope scopes e).passes rowsOf r
 
 /-- Item `i`'s test: its row passes its scope and pushed edges, and is among
 the rows a lookup reads when one reads `i` alone. -/
-def Planned.itemTest (s : Statement) (p : Planned) (scopes : Nat → RScope) (rowsOf : Nat → List Row)
-    (i : Nat) (r : Row) : Bool :=
-  p.scopeTest scopes rowsOf i r && (!(s.item i).readable || (rowsOf i).contains r)
+def Planned.itemTest (s : Statement) (p : Planned) (scopes inner : Nat → RScope)
+    (rowsOf : Nat → List Row) (i : Nat) (r : Row) : Bool :=
+  p.scopeTest scopes inner rowsOf i r && (!(s.item i).readable || (rowsOf i).contains r)
 
 /-- Query `q`'s test: its row passes the scope and pushed edges of each
 derived item a core lists that reads `q`, unless `q` has a LIMIT or an
 OFFSET. -/
-def Planned.queryTest (s : Statement) (p : Planned) (scopes : Nat → RScope) (rowsOf : Nat → List Row)
-    (q : Nat) (r : Row) : Bool :=
+def Planned.queryTest (s : Statement) (p : Planned) (scopes inner : Nat → RScope)
+    (rowsOf : Nat → List Row) (q : Nat) (r : Row) : Bool :=
   (s.query q).limit.isSome || (s.query q).offset.isSome ||
     (List.range s.cores.length).all fun k => (s.core k).items.all fun d =>
       match (s.item d).kind with
-      | .derived q' _ => q' != q || p.scopeTest scopes rowsOf d r
+      | .derived q' _ => q' != q || p.scopeTest scopes inner rowsOf d r
       | .table _ => true
 
 /-- The LIMIT values of the run that read `db`, run by run, when it returned
@@ -148,8 +151,10 @@ theorem plan_restriction {s : Statement} (hwf : s.wellFormed = true) {db db' : D
     let p := plan s
     let scopes := p.scopes (p.lastOf s db)
     let rowsOf := lookupRows s (db'.mask s.reads)
-    Restriction s (db.mask s.reads) (db'.mask s.reads) (p.itemTest s scopes rowsOf)
-      (p.queryTest s scopes rowsOf) (p.windowPasses s (db'.mask s.reads)) := by
+    Restriction s (db.mask s.reads) (db'.mask s.reads)
+      (p.itemTest s scopes (p.innerScope (p.lastOf s db)) rowsOf)
+      (p.queryTest s scopes (p.innerScope (p.lastOf s db)) rowsOf)
+      (p.windowPasses s (db'.mask s.reads)) := by
   intro p scopes rowsOf
   have hscopes : s.tableScopes db = some (tableScope s (p.itemScopes (p.lastOf s db))) := by
     simp [Statement.tableScopes, hwhole, p, Planned.lastOf]
@@ -316,7 +321,8 @@ grouped into runs, each as `SortedTerm` says. -/
 theorem Limit.sortedLimit_facts {s : Statement} {st : PState} {sorted : Limit.SortedLimit}
     (h : Limit.sortedLimit s st = some sorted) :
     ∃ k ts, (s.query s.root).arms = [k] ∧ (s.core k).aggregated = false ∧
-      (s.core k).windowed = false ∧ sorted.runs = Limit.SortRun.group ts ∧
+      (s.core k).windowed = false ∧
+      sorted.runs = Limit.attach s st [] (Limit.SortRun.group ts) ∧
       ts.length = (s.query s.root).orderBy.length ∧
       ∀ x ∈ (s.query s.root).orderBy.zip ts, Limit.SortedTerm s st k x.1 x.2 := by
   unfold Limit.sortedLimit at h
@@ -354,7 +360,7 @@ theorem Limit.sortedLimit_facts {s : Statement} {st : PState} {sorted : Limit.So
         simp only [Option.bind_eq_some_iff, Option.some.injEq] at hx'
         obtain ⟨pos, hpos, key, hkey, rfl⟩ := hx'
         obtain ⟨hlt, hmatch, _⟩ := List.findIdx?_eq_some_iff_getElem.mp hpos
-        refine ⟨e, ho, hok.1, by simpa using hok.2.2, hkey, rfl, ?_⟩
+        refine ⟨e, ho, hok.1, by simpa using hok.2, hkey, rfl, ?_⟩
         rw [List.getElem?_eq_getElem hlt]
         split at hmatch
         · rename_i e' heq
@@ -406,7 +412,9 @@ theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
   have hcore : ∀ run ∈ sorted.runs, (s.item run.item).core = k := by
     intro run hrun
     rw [hruns] at hrun
-    obtain ⟨t, ht, he⟩ := Limit.group_item hrun
+    obtain ⟨grouped, hg, hitem, _⟩ := Limit.mem_attach hrun
+    rw [← hitem]
+    obtain ⟨t, ht, he⟩ := Limit.group_item hg
     obtain ⟨⟨pd, t'⟩, hx, rfl⟩ : ∃ x ∈ (s.query s.root).orderBy.zip ts, x.2 = t := by
       obtain ⟨n, hn, rfl⟩ := List.getElem_of_mem ht
       exact ⟨((s.query s.root).orderBy[n]'(by omega), ts[n]), List.mem_iff_getElem.mpr
@@ -460,6 +468,22 @@ theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
     rw [hfst, List.flatMap_map]
     simp only
     rw [hruns]
+    have adirs : ∀ st seen l, Limit.runDirections (Limit.attach s st seen l) =
+        Limit.runDirections l := fun st seen l => by
+      unfold Limit.runDirections Limit.SortRun.keys
+      exact Limit.attach_flatMap s st
+        (fun _ t => (t.map fun x => (x.1, x.2.1)).map (·.2)) seen l
+    have akey : ∀ st seen l, Limit.runKey row (Limit.attach s st seen l) = Limit.runKey row l :=
+      fun st seen l => by
+        unfold Limit.runKey Limit.SortRun.keys
+        exact Limit.attach_flatMap s st
+          (fun j t => (t.map fun x => (x.1, x.2.1)).map (·.1.value (row j))) seen l
+    have alast : ∀ st seen l, (Limit.attach s st seen l).flatMap (fun run =>
+          run.terms.map fun (_, _, p) => ((s.core k).outRow E' b').cell p) =
+        l.flatMap fun run => run.terms.map fun (_, _, p) => ((s.core k).outRow E' b').cell p :=
+      fun st seen l => Limit.attach_flatMap s st
+        (fun _ t => t.map fun (_, _, p) => ((s.core k).outRow E' b').cell p) seen l
+    rw [adirs, akey, alast]
     have hdirs : Limit.runDirections (Limit.SortRun.group ts) = (s.query s.root).orderBy.map (·.2) := by
       unfold Limit.runDirections Limit.SortRun.keys
       simp only [List.map_map, Function.comp_def]
@@ -476,9 +500,11 @@ theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
       obtain ⟨⟨p, d⟩, t⟩ := x
       simp only at he hsk ⊢
       obtain ⟨run, hrun, hitem⟩ := Limit.term_item (List.of_mem_zip hx).2
-      rw [← hruns] at hrun
-      have hb := hrows run hrun
-      rw [hitem] at hb
+      obtain ⟨found, hfound, hsame, _⟩ := Limit.attach_has (s := s)
+        (st := s.readOrder.foldl (readCore s) (PState.initial s)) (seen := []) hrun
+      rw [← hruns] at hfound
+      have hb := hrows found hfound
+      rw [hsame, hitem] at hb
       rw [Core.outRow_cell he, Limit.termKey_value hsk hb]
     have hlast : (Limit.SortRun.group ts).flatMap (fun run => run.terms.map fun (_, _, p) =>
         ((s.core k).outRow E' b').cell p) = Limit.orderKey (s.query s.root) ((s.core k).outRow E' b') := by

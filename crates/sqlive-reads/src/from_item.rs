@@ -34,9 +34,11 @@ pub(crate) enum ColumnValue {
     /// stored columns of BINARY collation (SPEC.md section 6).
     Generated(RowExpression),
     /// A stored column whose collation isn't BINARY, of this affinity and
-    /// the collation it declares. No condition narrows by it, but an ORDER
-    /// BY term that is the column bounds a LIMIT's rows, by a comparison
-    /// SQLite runs in the term's collation (SPEC.md section 6).
+    /// the collation it declares, or a derived item's column that passes one
+    /// on, or passes on a generated column, whose collation is BINARY. No
+    /// condition narrows by it, but an ORDER BY term that is the column
+    /// bounds a LIMIT's rows, by a comparison SQLite runs in the term's
+    /// collation (SPEC.md section 6).
     Collated(Affinity, String),
     /// Values no condition narrows by: a generated column sqlive can't
     /// evaluate, or a column of a view read whole.
@@ -74,6 +76,15 @@ impl Columns {
                 .cloned(),
             Self::Unknown { .. } => Some(crate::sql::name(name.0).to_ascii_lowercase()),
         }
+    }
+
+    /// The names of the columns sqlive knows them of, lowercase.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        let listed = match self {
+            Self::Listed(columns) => columns.as_slice(),
+            Self::Unknown { .. } => &[],
+        };
+        listed.iter().filter_map(|column| column.name.as_deref())
     }
 
     /// What sqlive knows of the values of `column`.

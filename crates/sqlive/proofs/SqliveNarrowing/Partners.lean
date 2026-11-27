@@ -418,8 +418,8 @@ theorem relevant_of_all {s : Statement} {rel : Nat → Row → Bool} {q k : Nat}
 /-- No derived item reads the statement's own query, so the planner's test
 of it keeps every row. -/
 theorem queryTest_root {s : Statement} (hwf : s.wellFormed = true) (p : Planned)
-    (scopes : Nat → RScope) (rowsOf : Nat → List Row) (r : Row) :
-    p.queryTest s scopes rowsOf s.root r = true := by
+    (scopes inner : Nat → RScope) (rowsOf : Nat → List Row) (r : Row) :
+    p.queryTest s scopes inner rowsOf s.root r = true := by
   simp only [Planned.queryTest, Bool.or_eq_true, List.all_eq_true, List.mem_range]
   refine Or.inr fun k _ d hd => ?_
   split

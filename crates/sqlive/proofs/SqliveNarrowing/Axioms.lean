@@ -34,6 +34,8 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Limit.termKey_value
 #print axioms SqliveNarrowing.Limit.sortedBefore_passes
 #print axioms SqliveNarrowing.Limit.runBound_passes
+#print axioms SqliveNarrowing.Limit.inner_step
+#print axioms SqliveNarrowing.Limit.innerLevels_chain
 #print axioms SqliveNarrowing.Limit.joined_passes
 #print axioms SqliveNarrowing.Pick.post_picks_any
 #print axioms SqliveNarrowing.Pick.tellsApart_separates
@@ -117,6 +119,8 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.plan_once
 #print axioms SqliveNarrowing.plan_restriction
 #print axioms SqliveNarrowing.Planned.bound_passes
+#print axioms SqliveNarrowing.inner_passes
+#print axioms SqliveNarrowing.innerScope_left
 #print axioms SqliveNarrowing.readOrder_postorder
 #print axioms SqliveNarrowing.evalQuery_outer_congr
 #print axioms SqliveNarrowing.Statement.on_kept

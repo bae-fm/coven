@@ -253,6 +253,19 @@ pub(crate) struct Membership {
 }
 
 impl Membership {
+    /// A copy of this membership.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            member: self.member.clone(),
+            affinity: self.affinity,
+            partner: self.partner,
+            value: self.value.clone(),
+            nulls: self.nulls,
+            nested: self.nested,
+            pushed: self.pushed,
+        }
+    }
+
     /// The membership `edge` gives its member.
     pub(crate) fn of(edge: &Edge) -> Self {
         Self {

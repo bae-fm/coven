@@ -287,7 +287,7 @@ impl Telling<'_> {
             return Ok(false);
         };
         let terms = order_by.iter().filter_map(|term| match order_term(columns, &term.expr) {
-            OrderTerm::Position(expr) | OrderTerm::Alias(_, expr) | OrderTerm::Expr(expr) => {
+            OrderTerm::Position(expr) | OrderTerm::Alias(expr) | OrderTerm::Expr(expr) => {
                 Some(expr)
             }
             OrderTerm::Unknown => None,
@@ -833,7 +833,12 @@ impl Telling<'_> {
                     .map(|equality| (equality.column.as_str(), equality.collation.as_str()))
                     .collect();
                 let anchored = equalities.iter().any(|equality| equality.on.is_none());
-                Ok(self.one_row(scope, outer, select, &fixed)?
+                let compared: Vec<(&str, &str)> = sorted
+                    .iter()
+                    .filter(|term| term.item == item)
+                    .map(|term| (term.column.as_str(), term.collation.as_str()))
+                    .collect();
+                Ok(self.one_row(scope, outer, select, &fixed, &compared)?
                     && decided.is_none_or(|decided| anchored || decided))
             }
             Source::Other => Ok(false),
@@ -841,17 +846,19 @@ impl Telling<'_> {
     }
 
     /// Whether the subquery `select` returns one row at most for any values,
-    /// none NULL, of its columns `fixed`, each compared by its collation: it
-    /// is one SELECT that aggregates with no GROUP BY, or groups by columns
-    /// that `fixed` returns, or neither aggregates nor calls a window
-    /// function, and equalities with the columns `fixed` returns tell its
-    /// rows apart.
+    /// none NULL, of its columns `fixed` among rows that tie in a sort of its
+    /// columns `compared`, each compared by its collation: it is one SELECT
+    /// that aggregates with no GROUP BY, or groups by columns that `fixed`
+    /// returns, or neither aggregates nor calls a window function, and the
+    /// sort of the columns `compared` passes on, with equalities with the
+    /// columns `fixed` returns, tells its rows apart.
     fn one_row(
         &self,
         scope: &crate::sql_walk::Scope<'_>,
         outer: &[OuterItems],
         select: &Select<'_>,
         fixed: &[(&str, &str)],
+        compared: &[(&str, &str)],
     ) -> rusqlite::Result<bool> {
         if select.body.compounds.is_some() {
             return Ok(false);
@@ -885,14 +892,20 @@ impl Telling<'_> {
         };
         // The FROM item's column each fixed column passes on, with the
         // collation the equality compares it by.
-        let fixed = fixed.iter().filter_map(|(name, collation)| {
+        let passed = |&(name, collation): &(&str, &str)| -> Option<((usize, String), String)> {
             let output = outputs.iter().find(|output| output.name.as_deref() == Some(name))?;
-            Some((output.passes.clone()?, *collation))
-        });
+            Some((output.passes.clone()?, collation.to_owned()))
+        };
+        let sorted: Vec<Sorted> = compared
+            .iter()
+            .filter_map(passed)
+            .map(|((item, column), collation)| Sorted { item, column, collation })
+            .collect();
+        let fixed = fixed.iter().filter_map(passed);
         if let Some(terms) = group_by {
             let fixed: Vec<_> = fixed.collect();
             for term in terms.iter() {
-                let (OrderTerm::Position(expr) | OrderTerm::Alias(_, expr) | OrderTerm::Expr(expr)) =
+                let (OrderTerm::Position(expr) | OrderTerm::Alias(expr) | OrderTerm::Expr(expr)) =
                     order_term(columns, term)
                 else {
                     return Ok(false);
@@ -922,10 +935,10 @@ impl Telling<'_> {
                 column,
                 needs: BTreeSet::new(),
                 on: None,
-                collation: collation.to_owned(),
+                collation,
             });
         }
-        self.all_told(scope, outer, &rows, &[])
+        self.all_told(scope, outer, &rows, &sorted)
     }
 
     /// Whether two values that the column `column` of item `item` holds that

@@ -243,6 +243,21 @@ def Planned.lookupOf (p : Planned) (bound : Nat → RScope) (i j : Nat) : Option
   ((p.state.items i).memberships.find? (·.partner == j)).map fun m before =>
     .joined m.memberValue m.partner m.value ((bound m.partner).both before) m.nulls
 
+/-- An item's membership read as the membership of an item inside it: the
+membership `found` of item `found.2`, if any, over the columns of `level`'s
+item. -/
+def Planned.inside (found : Option Edge × Nat) (level : Limit.Level) : Option Edge × Nat :=
+  (found.1.bind fun m => (m.memberValue.passed found.2 level.item level.rename).map fun v =>
+    { m with member := level.item, memberValue := v }, level.item)
+
+/-- How an item that `levels` lead to from a run's item `root` looks up the
+rows of an earlier run's item `j`: through the first of `root`'s memberships
+that takes values from `j`, read as its own. -/
+def Planned.lookupThrough (p : Planned) (bound : Nat → RScope) (root : Nat)
+    (levels : List Limit.Level) (j : Nat) : Option (RScope → RScope) :=
+  (levels.foldl inside ((p.state.items root).memberships.find? (·.partner == j), root)).1.map
+    fun m before => .joined m.memberValue m.partner m.value ((bound m.partner).both before) m.nulls
+
 /-- Item `i`'s scope for a run whose last row's ORDER BY values are `last`,
 with `bound` giving each item placed before it its scope: its terms, what
 its edges carry, its memberships, its ORs, and the LIMIT bound when the run
@@ -273,11 +288,23 @@ def Planned.scopes (p : Planned) (last : Option (List (List Value))) : Nat → R
     let scope := p.scopeAt last bound i
     fun j => if j = i then scope else bound j) fun _ => .all
 
+/-- The LIMIT bound of item `i` where it is inside a run's derived item, for
+a run whose last row's ORDER BY values are `last`: the run's bound over its
+first terms, with lookups within each partner's scope. It narrows the item's
+table's own scope, and no lookup of another item. -/
+def Planned.innerScope (p : Planned) (last : Option (List (List Value))) (i : Nat) : RScope :=
+  match p.sorted, last with
+  | some sorted, some values =>
+    (Limit.innerRuns i [] (sorted.runs.zip values)).foldl (fun scope (root, levels, runs) =>
+      scope.both
+        ((Limit.runBound i (p.lookupThrough (p.scopes last) root levels) runs).getD .all)) .all
+  | _, _ => .all
+
 /-- Each item's scope as its table's scope reads it: its scope among
-`Planned.scopes`, which lookups read, and its window's
-(`scope_lookup::scopes`). -/
+`Planned.scopes`, which lookups read, its window's, and its LIMIT bound from
+inside a run's derived item (`scope_lookup::scopes`). -/
 def Planned.itemScopes (p : Planned) (last : Option (List (List Value))) (i : Nat) : RScope :=
-  (p.scopes last i).both (p.windowScope i)
+  ((p.scopes last i).both (p.windowScope i)).both (p.innerScope last i)
 
 /-- Each table's scope: the scopes of the items reading it, joined with OR;
 `none` for a table no item reads. -/

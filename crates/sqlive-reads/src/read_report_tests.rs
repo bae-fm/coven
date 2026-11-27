@@ -91,13 +91,14 @@ fn a_recursive_cte_keeps_the_statement_whole() {
     );
 }
 
+/// A `*` leaves out an FTS5 table's hidden columns, as SQLite's does, so a
+/// CTE's column list names the columns the `*` gives.
 #[test]
-fn a_column_list_of_another_length_keeps_the_statement_whole() {
-    // The planner counts the FTS5 table's hidden columns, which `*` leaves out.
-    assert_whole(
-        "WITH c(body) AS (SELECT * FROM notes) SELECT body FROM c",
-        "a CTE or view whose column list differs in length from its SELECT's columns",
-    );
+fn a_star_of_an_fts5_table_leaves_out_its_hidden_columns() {
+    assert!(matches!(
+        report_with("WITH c(body) AS (SELECT * FROM notes) SELECT body FROM c", &[]),
+        ReadReport::Entries(_)
+    ));
 }
 
 #[test]

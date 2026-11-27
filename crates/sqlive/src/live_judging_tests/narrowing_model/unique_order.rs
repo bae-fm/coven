@@ -41,7 +41,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         4 => vec![1, 3, 0],
         _ => vec![1],
     };
-    if select_.len() > 4 && rng.chance(25) {
+    if select_.len() > 4 && rng.chance(40) {
         order.push(4);
     }
     Query {
@@ -63,7 +63,7 @@ fn join(rng: &mut Rng, alias: &str, before: &str) -> (Item, &'static str) {
     // `before` can be a FROM subquery, so its columns here are `id` and `a`.
     let other = |column| col(before, column);
     let own = |column| col(alias, column);
-    let (source, mut on, returned): (Source, Vec<Cond>, &'static str) = match rng.below(9) {
+    let (source, mut on, returned): (Source, Vec<Cond>, &'static str) = match rng.below(11) {
         // The whole of the key (a, c), by `c` of the first item.
         0 => {
             (Source::Table(KEYED), vec![eq(own("a"), other("a")), eq(own("c"), col("x", "c"))], "c")
@@ -124,6 +124,27 @@ fn join(rng: &mut Rng, alias: &str, before: &str) -> (Item, &'static str) {
             vec![eq(own("id"), other("a"))],
             "a",
         ),
+        // A FROM subquery over the key (a, c) joined by part of it, or over
+        // a rowid by none of it, which an order by the rest of it tells
+        // apart.
+        8 | 9 => {
+            let table_ = pick(rng, &[KEYED, "u"]);
+            let rest = if table_ == KEYED { "c" } else { "id" };
+            (
+                Source::Query(Box::new(select(Core {
+                    from: vec![table("g", table_)],
+                    conditions: Vec::new(),
+                    select: vec![
+                        Out::Expr(col("g", "a"), Some("id".to_owned())),
+                        Out::Expr(col("g", rest), Some("a".to_owned())),
+                    ],
+                    group: Vec::new(),
+                    distinct: false,
+                }))),
+                vec![eq(own("id"), other("a"))],
+                "a",
+            )
+        }
         // A key the WHERE or the ON names by a constant.
         _ => (
             Source::Table(KEYED),

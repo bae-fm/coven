@@ -227,6 +227,10 @@ fn a_query_whose_sort_and_joins_tell_its_rows_apart_reads_only_the_named_columns
          ORDER BY a.id LIMIT 1",
         "SELECT a.v FROM a LEFT JOIN (SELECT count(*) AS n FROM b) AS c ON c.n = a.k \
          ORDER BY a.id LIMIT 1",
+        // A FROM subquery whose key the sort of a column it passes on covers,
+        // with the equality that covers the rest.
+        "SELECT a.v FROM a LEFT JOIN (SELECT p.l, p.r FROM pair AS p) AS d ON d.l = a.k \
+         ORDER BY a.id, d.r LIMIT 1",
         // A key compared with a subquery's value.
         "SELECT a.v FROM a LEFT JOIN b ON b.id = (SELECT max(w.id) FROM words AS w \
          WHERE w.x = a.v) ORDER BY a.id LIMIT 1",
@@ -267,6 +271,9 @@ fn a_query_whose_sort_or_joins_leave_rows_tied_reads_every_column() {
         "SELECT a.v FROM a JOIN seen AS s ON s.id = a.k ORDER BY a.id LIMIT 1",
         "SELECT a.v FROM a JOIN (SELECT b.k, count(*) AS n FROM b GROUP BY b.k, b.w) AS g \
          ON g.k = a.k ORDER BY a.id LIMIT 1",
+        // A sort tells no groups of a FROM subquery apart.
+        "SELECT a.v FROM a JOIN (SELECT b.k, b.w, count(*) AS n FROM b GROUP BY b.k, b.w) AS g \
+         ON g.k = a.k ORDER BY a.id, g.w LIMIT 1",
         "SELECT a.v FROM a JOIN (SELECT w.shout, count(*) AS n FROM words AS w \
          GROUP BY w.shout) AS g ON g.shout = a.k ORDER BY a.id LIMIT 1",
         "SELECT a.v FROM a JOIN (SELECT b.id AS key FROM b UNION ALL SELECT b.k FROM b) AS d \

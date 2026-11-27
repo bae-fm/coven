@@ -96,7 +96,7 @@ pub(crate) fn read_window(
     let mut keys = Vec::new();
     for term in order_by.iter() {
         let sorted = match order_term(columns, &term.expr) {
-            OrderTerm::Alias(_, listed) => listed,
+            OrderTerm::Alias(listed) => listed,
             OrderTerm::Expr(expr) => expr,
             OrderTerm::Position(_) | OrderTerm::Unknown => return Ok(None),
         };

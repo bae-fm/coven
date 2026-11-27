@@ -9,7 +9,8 @@
 //! a join, makes every column of the tables count as read.
 
 use super::{
-    col, eq, item, lit, out, pick, table, Core, Expr, Join, Limit, Query, Source, SEARCH, TABLES,
+    col, columns, eq, item, lit, out, pick, table, Core, Expr, Join, Limit, Out, Query, Source,
+    SEARCH, TABLES,
 };
 use crate::random_scopes::Rng;
 
@@ -116,6 +117,17 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         }
         _ => order,
     };
+    // Either item read through FROM subqueries that pass its columns on, as
+    // a spread fragment's, whose table takes the run's bound too.
+    for (at, name) in [first, second].into_iter().enumerate().take(from.len()) {
+        if rng.chance(30) {
+            let mut source = through(rng, Source::Table(name), name);
+            if rng.chance(30) {
+                source = through(rng, source, name);
+            }
+            from[at].source = source;
+        }
+    }
     Query {
         arms: vec![Core { from, conditions, select: select_, group: Vec::new(), distinct: false }],
         order,
@@ -127,6 +139,49 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         }),
         ..Query::default()
     }
+}
+
+/// A FROM subquery that returns each column of `source`, which has the
+/// columns of the table `name`: one that passes them all on, or one that
+/// computes a column, groups its rows, adds a LEFT JOIN or keeps its first
+/// rows by a LIMIT, from which a column or all of them pass no further.
+fn through(rng: &mut Rng, source: Source, name: &str) -> Source {
+    let shape = rng.below(10);
+    let computed = (shape == 0).then(|| pick(rng, &["a", "c", "id"]));
+    let select_ = columns(name)
+        .iter()
+        .map(|column| {
+            let value = if computed == Some(*column) {
+                Expr::Add(Box::new(col("g", column)), Box::new(lit(0)))
+            } else {
+                col("g", column)
+            };
+            Out::Expr(value, Some((*column).to_owned()))
+        })
+        .collect();
+    let mut from = vec![item("g", source, Join::Comma, Vec::new())];
+    if shape == 1 {
+        let on = vec![eq(col("j", "id"), col("g", "a"))];
+        from.push(item("j", Source::Table("w"), Join::Left, on));
+    }
+    let mut conditions = Vec::new();
+    if rng.chance(25) {
+        conditions.push(super::term::condition(rng, "g", 1));
+    }
+    let group = match shape {
+        // One row of each rowid, each group one row, which passes on only
+        // the columns the GROUP BY lists.
+        2 => vec![col("g", "c"), col("g", "id")],
+        3 => vec![col("g", "id")],
+        _ => Vec::new(),
+    };
+    Source::Query(Box::new(Query {
+        arms: vec![Core { from, conditions, select: select_, group, distinct: false }],
+        // The first rows by the rowid.
+        order: if shape == 4 { vec![(0, false)] } else { Vec::new() },
+        limit: (shape == 4).then(|| super::limit(3)).flatten(),
+        ..Query::default()
+    }))
 }
 
 /// An expression over `sorted`'s columns: of the INTEGER `a` and `c` and the

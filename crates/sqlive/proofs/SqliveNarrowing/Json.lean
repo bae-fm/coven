@@ -292,24 +292,24 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
       match schema.views.find? (·.1 == name) with
       | some (_, query) => do
         let q ← readSelect schema query none []
-        let (names, columns) ← derivedColumns q
-        pure (ItemKind.derived q true, columns, names, View.readable true parent false, [])
+        let (names, columns, collations) ← derivedColumns q
+        pure (ItemKind.derived q true, columns, names, View.readable true parent false, collations)
       | none => lift (throw s!"no view {name}")
     | _, _, some (.str name), _ =>
       match CteNames.resolve ctes name with
       | some (query, scope) => do
         let first := (← get).queries.size
         let q ← readSelect schema query parent scope
-        let (names, columns) ← derivedColumns q
+        let (names, columns, collations) ← derivedColumns q
         pure (ItemKind.derived q false, columns, names,
-          View.readable false parent (← closedSince first q), [])
+          View.readable false parent (← closedSince first q), collations)
       | none => lift (throw s!"no CTE {name}")
     | _, _, _, some query => do
       let first := (← get).queries.size
       let q ← readSelect schema query parent ctes
-      let (names, columns) ← derivedColumns q
+      let (names, columns, collations) ← derivedColumns q
       pure (ItemKind.derived q false, columns, names,
-        View.readable false parent (← closedSince first q), [])
+        View.readable false parent (← closedSince first q), collations)
     | _, _, _, _ => lift (throw "a FROM item names no source")
   let b ← get
   set { b with
@@ -321,8 +321,10 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
 
 /-- A derived item's columns: the names of its first arm's result columns,
 a repeated name left unnamed, and each column's affinity when every arm
-passes on columns of one affinity, or is a literal (`read_derived`). -/
-partial def derivedColumns (q : Nat) : M (List (Option String) × List (Option Affinity)) := do
+passes on columns of one affinity, or is a literal, and its collation when
+every arm passes on a column of that collation (`read_derived`). -/
+partial def derivedColumns (q : Nat) :
+    M (List (Option String) × List (Option Affinity) × List (Option (Int → Int))) := do
   let b ← get
   let query := b.queries.getD q default
   let first := query.arms.headD 0
@@ -341,7 +343,20 @@ partial def derivedColumns (q : Nat) : M (List (Option String) × List (Option A
     match found with
     | some a :: rest => if rest.all (· == some a) then some a else none
     | _ => none
-  pure (names, affinities)
+  let collations := (List.range names.length).map fun position =>
+    let found := query.arms.map fun k =>
+      match (b.cores.getD k default).output[position]? with
+      | some (.expr (.col i c)) =>
+        if (b.items.getD i default).core == k then ((b.named.getD i default).collations[c]?).join
+        else none
+      | _ => none
+    -- The runner's collations differ in what they give these (`readDir`).
+    let keys (key : Int → Int) := [-4, -1, 1, 4].map key
+    match found with
+    | some first :: rest =>
+      if rest.all (fun other => other.map keys == some (keys first)) then some first else none
+    | _ => none
+  pure (names, affinities, collations)
 
 partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : CteNames.Visible Json)
     (items : List Nat) : M (OutCol × Option String) := do

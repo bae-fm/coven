@@ -99,6 +99,31 @@ pub(crate) fn source_scopes(
 ) -> Vec<RowScope> {
     let parameters = values.parameters();
     let mut bound: Vec<Option<RowScope>> = sources.sources.iter().map(|_| None).collect();
+    // The rows whose membership finds a row of its partner in
+    // `partner_scope`.
+    let joined = |membership: &Membership, partner_scope: RowScope| {
+        let partner = &sources.sources[membership.partner];
+        let lookup = Arc::new(Lookup::new(
+            partner.from.clone().expect("an edge's partner reads alone"),
+            partner.qualifier.clone(),
+            membership.value.clone(),
+            membership.affinity,
+            membership.nulls,
+            partner_scope,
+            parameters,
+        ));
+        match &membership.member {
+            MemberValue::Column(column) => RowScope::Joined { column: column.clone(), lookup },
+            // A write asks SQLite for the expression's value in the
+            // changed row and whether a partner row gives it, compared
+            // as the statement compares them (`scope_row.rs`).
+            MemberValue::Expression { term, .. } => RowScope::Row(Arc::new(RowCondition {
+                term: Arc::clone(term),
+                parameters: parameters.to_vec(),
+                test: RowTest::Joined(lookup),
+            })),
+        }
+    };
     for &position in &sources.order {
         let source = &sources.sources[position];
         let bind = |term: &Option<ScopeTerm>| {
@@ -107,31 +132,6 @@ pub(crate) fn source_scopes(
         let mut scope = bind(&source.term).and(bind(&source.carried));
         let partner_scope = |membership: &Membership| {
             bound[membership.partner].as_ref().expect("a membership's partner comes first")
-        };
-        // The rows whose membership finds a row of its partner in
-        // `partner_scope`.
-        let joined = |membership: &Membership, partner_scope: RowScope| {
-            let partner = &sources.sources[membership.partner];
-            let lookup = Arc::new(Lookup::new(
-                partner.from.clone().expect("an edge's partner reads alone"),
-                partner.qualifier.clone(),
-                membership.value.clone(),
-                membership.affinity,
-                membership.nulls,
-                partner_scope,
-                parameters,
-            ));
-            match &membership.member {
-                MemberValue::Column(column) => RowScope::Joined { column: column.clone(), lookup },
-                // A write asks SQLite for the expression's value in the
-                // changed row and whether a partner row gives it, compared
-                // as the statement compares them (`scope_row.rs`).
-                MemberValue::Expression { term, .. } => RowScope::Row(Arc::new(RowCondition {
-                    term: Arc::clone(term),
-                    parameters: parameters.to_vec(),
-                    test: RowTest::Joined(lookup),
-                })),
-            }
         };
         // The memberships that compare columns of this source with one
         // partner's by `=` are one join: one row of the partner gives all
@@ -206,26 +206,45 @@ pub(crate) fn source_scopes(
             }
         }
         if let (Some(sorted), Some(last)) = (&sources.sorted, last) {
-            let found = sorted.bound(
-                position,
-                last,
-                parameters,
-                &source.memberships,
-                |membership, before| {
+            let found =
+                sorted.bound(position, last, parameters, &sources.sources, |membership, before| {
                     joined(membership, partner_scope(membership).clone().and(before))
-                },
-            );
+                });
             if let Some(found) = found {
                 scope = scope.and(found);
             }
         }
         bound[position] = Some(scope);
     }
+    // A source inside a sorted derived source takes its bound once every
+    // source has its scope: it narrows the source's own table, and no lookup
+    // of another source.
+    let inner: Vec<Option<RowScope>> = (0..sources.sources.len())
+        .map(|position| {
+            let (sorted, last) = (sources.sorted.as_ref()?, last?);
+            sorted.inner_bound(
+                position,
+                last,
+                parameters,
+                &sources.sources,
+                |membership, before| {
+                    let partner = bound[membership.partner]
+                        .as_ref()
+                        .expect("the planner places every source");
+                    joined(membership, partner.clone().and(before))
+                },
+            )
+        })
+        .collect();
     bound
         .into_iter()
+        .zip(inner)
         .enumerate()
-        .map(|(position, scope)| {
-            let scope = scope.expect("the planner places every source");
+        .map(|(position, (scope, inner))| {
+            let mut scope = scope.expect("the planner places every source");
+            if let Some(inner) = inner {
+                scope = scope.and(inner);
+            }
             // A subquery's window narrows its table's own scope, and no
             // lookup of another source (`scope_window.rs`).
             let window = sources.windows.iter().find(|window| window.item == position);

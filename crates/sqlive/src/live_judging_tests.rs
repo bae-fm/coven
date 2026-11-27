@@ -15,6 +15,8 @@ mod cell_cards;
 mod derived;
 #[path = "live_judging_tests/fragment_relation.rs"]
 mod fragment_relation;
+#[path = "live_judging_tests/fragment_window.rs"]
+mod fragment_window;
 #[path = "live_judging_tests/join_shapes.rs"]
 mod join_shapes;
 #[path = "live_judging_tests/join_through_found.rs"]

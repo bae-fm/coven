@@ -542,10 +542,10 @@ theorem queryTest_good {s : Statement} (last : Option (List (List Value)))
     (rowsOf : Nat → List Row) {d q : Nat} {v : Bool} (hd : d ∈ (s.core (s.item d).core).items)
     (hkind : (s.item d).kind = .derived q v) (hlim : (s.query q).limit = none)
     (hoff : (s.query q).offset = none) {r : Row}
-    (hr : (plan s).queryTest s ((plan s).scopes last) rowsOf q r = true) :
+    (hr : (plan s).queryTest s ((plan s).scopes last) ((plan s).innerScope last) rowsOf q r = true) :
     Planned.Good (plan s).state d r := by
   have hdk : (s.item d).core < s.cores.length := s.core_lt hd
-  have htest : (plan s).scopeTest ((plan s).scopes last) rowsOf d r = true := by
+  have htest : (plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) rowsOf d r = true := by
     simp only [Planned.queryTest, hlim, hoff, Option.isSome_none, Bool.or_false, Bool.false_or,
       List.all_eq_true, List.mem_range] at hr
     have := hr _ hdk d hd
@@ -553,7 +553,7 @@ theorem queryTest_good {s : Statement} (last : Option (List (List Value)))
     exact this
   simp only [Planned.scopeTest, Bool.and_eq_true, List.all_eq_true, Bool.or_eq_true, bne_iff_ne,
     ne_eq] at htest
-  obtain ⟨⟨hsc, _⟩, hpushed⟩ := htest
+  obtain ⟨⟨⟨hsc, _⟩, _⟩, hpushed⟩ := htest
   obtain ⟨hnd, hall⟩ := plan_order s
   obtain ⟨bound, hbound, _⟩ := (plan s).scopes_eq last hnd (hall _ hdk d hd)
   rw [hbound] at hsc
@@ -572,7 +572,7 @@ theorem queryTest_carried {s : Statement} (last : Option (List (List Value)))
     (rowsOf : Nat → List Row) {d q : Nat} {v : Bool} (hd : d ∈ (s.core (s.item d).core).items)
     (hkind : (s.item d).kind = .derived q v) (hlim : (s.query q).limit = none)
     (hoff : (s.query q).offset = none) {r : Row}
-    (hr : (plan s).queryTest s ((plan s).scopes last) rowsOf q r = true) :
+    (hr : (plan s).queryTest s ((plan s).scopes last) ((plan s).innerScope last) rowsOf q r = true) :
     ∀ u, ((plan s).state.items d).carried = some u → u.holds (some r) = true := by
   have hdk : (s.item d).core < s.cores.length := s.core_lt hd
   simp only [Planned.queryTest, hlim, hoff, Option.isSome_none, Bool.or_false, Bool.false_or,
@@ -581,7 +581,7 @@ theorem queryTest_carried {s : Statement} (last : Option (List (List Value)))
   simp only [hkind, bne_self_eq_false, Bool.false_or, Planned.scopeTest, Bool.and_eq_true] at this
   obtain ⟨hnd, hall⟩ := plan_order s
   obtain ⟨bound, hbound, _⟩ := (plan s).scopes_eq last hnd (hall _ hdk d hd)
-  have hsc := this.1.1
+  have hsc := this.1.1.1
   rw [hbound] at hsc
   exact (scopeAt_parts hsc).2.1
 
@@ -589,7 +589,7 @@ theorem queryTest_carried {s : Statement} (last : Option (List (List Value)))
 matters to its query's test, the test the planner's scopes give. -/
 theorem plan_semTests {s : Statement} (h : s.wellFormed = true) (last : Option (List (List Value)))
     (rowsOf : Nat → List Row) :
-    (plan s).state.Sem s (endCls s ((plan s).queryTest s ((plan s).scopes last) rowsOf)) :=
+    (plan s).state.Sem s (endCls s ((plan s).queryTest s ((plan s).scopes last) ((plan s).innerScope last) rowsOf)) :=
   plan_sem h (fun _ _ _ hd hkind hlim hoff _ hr => queryTest_good last rowsOf hd hkind hlim hoff hr)
     (fun _ _ _ hd hkind hlim hoff _ hr => queryTest_carried last rowsOf hd hkind hlim hoff hr)
 

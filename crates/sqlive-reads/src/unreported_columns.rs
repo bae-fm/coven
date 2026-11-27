@@ -421,7 +421,7 @@ impl Found<'_> {
             .iter()
             .flat_map(|terms| terms.iter())
             .filter_map(|term| match order_term(columns, term) {
-                OrderTerm::Position(expr) | OrderTerm::Alias(_, expr) | OrderTerm::Expr(expr) => {
+                OrderTerm::Position(expr) | OrderTerm::Alias(expr) | OrderTerm::Expr(expr) => {
                     Some(crate::sql::unparenthesized(expr))
                 }
                 OrderTerm::Unknown => None,

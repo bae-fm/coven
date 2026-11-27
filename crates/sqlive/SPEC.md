@@ -638,9 +638,10 @@ its scope stays as the WHERE gives it.
 The bound compares rows as the ORDER BY does: term by term, each in its own
 direction, with NULL first in ascending order and last in descending. sqlive
 reads the last row's values from the result, so the statement must also return
-each ORDER BY term as a result column, listed before any `*` and written as the
-term writes it, with or without the COLLATE it ends in (below). Each term
-reads one table, with no NULLS FIRST or LAST, and is one of these:
+each ORDER BY term as a result column, anywhere among them: one a `*` lists, or
+one written as the term writes it, with or without the COLLATE it ends in
+(below). Each term reads one FROM item, with no NULLS FIRST or LAST. For an
+item that is a table, it is one of these:
 
 - a stored column, in any collation;
 - an expression over that table's stored BINARY columns, such as `year IS
@@ -701,7 +702,27 @@ table narrows it. When a condition on `albums` alone makes sqlive read
 `albums` first, only the artists' bound narrows the window, and an album
 that meets that condition reruns it wherever it sorts.
 
-No table a term reads is the right side of a LEFT JOIN. There, when a write
+An item a term reads can also be a FROM subquery, CTE or view, whose column the
+term then reads in the same ways: a column it passes on from a table sorts in
+that column's collation. A music app's download list spreads a fragment of the
+queue's rows, which SQLite reads as a FROM subquery, and orders by a column the
+spread returns: `SELECT entry.*, al.* FROM (SELECT q.position, q.album_id,
+q.state FROM downloads AS q) AS entry JOIN albums AS al ON al.id =
+entry.album_id ORDER BY entry.position LIMIT 100`. Each row of such an item is
+made of one row of a table inside it when the item is one SELECT, with no
+LIMIT, OFFSET or window function, that passes each column the run's first terms
+read on from that table, which no LEFT JOIN adds. A SELECT that aggregates
+passes on only the columns its GROUP BY lists. The table takes the run's bound
+over those first terms, and where the run is a later one, the item's joins to
+the earlier runs' tables count as the table's. So here a download queued after
+the window doesn't rerun it. When the table is itself such a subquery, CTE or
+view, the table inside it takes the bound in turn. Where the ORDER BY has two
+runs over one FROM item, only the first bounds the tables inside it. This
+bound narrows only the writes to the inner table. Where a join narrows another
+table by the inner table's rows, it takes every such row that the conditions
+allow, within the bound or not.
+
+No FROM item a term reads is the right side of a LEFT JOIN. There, when a write
 adds a row that matches a left row that had no match, SQLite no longer returns
 the row of NULLs it returned for that left row, and that row of NULLs can sort
 before the last row. The statement is one SELECT with no OFFSET, no GROUP BY,
@@ -770,12 +791,14 @@ items taken before it:
   ON, covers one of the key's columns; or the join's ON names only the table,
   the items taken before it and rows around the query.
 - A FROM subquery, written in the FROM, adds at most one row when equalities
-  with the columns it returns let it return at most one. It is one SELECT that
-  calls an aggregate with no GROUP BY; or one whose every GROUP BY term is a
-  column, of the kind the third case of the aggregate rules below allows, that
-  it returns in a column that such an equality covers; or one with no aggregate
-  or window function whose own FROM items each add at most one row by these
-  rules, with its conditions and the equalities with the columns it passes on.
+  with the columns it returns, and ORDER BY terms that name them, let only one
+  of its rows join. It is one SELECT that calls an aggregate with no GROUP BY;
+  or one whose every GROUP BY term is a column, of the kind the third case of
+  the aggregate rules below allows, that it returns in a column that such an
+  equality covers; or one with no aggregate or window function whose own FROM
+  items each add at most one row by these rules, with its conditions, the
+  equalities with the columns it passes on and the ORDER BY terms that name
+  them.
   A LEFT JOIN's FROM subquery meets the LEFT JOIN condition above, with the
   columns of the subquery as the key.
 
@@ -2127,7 +2150,8 @@ the model and states its assumptions.
 | A FROM item that names a CTE reads the innermost CTE of that name visible where it is, and a WITH that doesn't declare the name changes nothing of what it names inside, so an outer CTE's query reads the outer CTEs | `resolve_inner`, `resolve_outer` | `proofs/SqliveNarrowing/Rules/CteNames.lean` | 8 |
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row; an ORDER BY term that is a column or an expression over one table's columns, in any collation that orders values by a key, gives each binding the value its key gives the table's row; a run of terms over one table bounds that table's rows at or before the last row's values of the run, a row that ties with the last row's values counting as at or before them, and a later run's table by those rows or by the rows that join an earlier run's table's rows that sort before that run's values, so each table's bound passes its row in each binding that sorts at or before the last row | `limit_sound`, `sortKey_value`, `termKey_value`, `sortedBefore_passes`, `atOrBefore_passes`, `runBound_passes`, `joined_passes` | `proofs/SqliveNarrowing/Rules/Limit.lean` | 6 |
 | A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY and equalities tell its rows apart, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal, which the order they read them in decides; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `proofs/SqliveNarrowing/Rules/Pick.lean` | 6 |
-| Two rows a SELECT joins that tie in an ORDER BY are one row when, taken in turn, each FROM item adds at most one row by a unique key that the ORDER BY and the equalities cover, or as a FROM subquery that returns at most one | `tellsApart_separates` | `proofs/SqliveNarrowing/Rules/TellsApart.lean` | 6 |
+| Two rows a SELECT joins that tie in an ORDER BY are one row when, taken in turn, each FROM item adds at most one row by a unique key that the ORDER BY and the equalities cover, or as a FROM subquery that returns at most one for the values the equalities give among the rows that tie in the columns the ORDER BY compares | `tellsApart_separates` | `proofs/SqliveNarrowing/Rules/TellsApart.lean` | 6 |
+| Where an ORDER BY term's FROM item is a FROM subquery, CTE or view whose one SELECT passes the columns of the run's first terms on from one of its own tables, that table's bound over those terms passes its row in each binding of the SELECT that matters, and so does a table's inside that one; no such bound narrows a table a LEFT JOIN adds | `innerLevels_chain`, `inner_step`, `inner_passes`, `innerScope_left` | `proofs/SqliveNarrowing/Rules/InnerLimit.lean`; `proofs/SqliveNarrowing/LimitTests.lean` | 6 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `proofs/SqliveNarrowing/Rules/Whole.lean` | 4 |
 | A row's update that FTS5 makes as a delete and an insert reruns a statement wherever the update would | `rewrite_reruns` | `proofs/SqliveNarrowing/Rules/Virtual.lean` | 7 |
 | A statement read whole reruns on every write that any scopes rerun it on, so sqlive's judge, which narrows nothing for a write whose question stopped at the step limit, lets a write pass only when the judge without the limit does | `reruns_whole`, `Statement.rerunsLimited_sound` | `proofs/SqliveNarrowing/Judge.lean` | 7 |

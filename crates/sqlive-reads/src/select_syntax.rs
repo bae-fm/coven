@@ -113,16 +113,15 @@ pub(crate) enum OrderTerm<'a> {
     /// The expression of the result column whose position the term gives
     /// as its number.
     Position(&'a Expr<'a>),
-    /// The result column at a position, from zero, whose alias the term, a
-    /// bare name, matches, which SQLite reads before any other column of
-    /// that name, and the column's expression.
-    Alias(usize, &'a Expr<'a>),
+    /// The expression of the result column whose alias the term, a bare
+    /// name, matches, which SQLite reads before any other column of that
+    /// name.
+    Alias(&'a Expr<'a>),
     /// An expression of its own, which SQLite resolves among the FROM items.
     Expr(&'a Expr<'a>),
-    /// A result column sqlive can't place: one after a `*`, whose position
-    /// sqlive doesn't know as it doesn't know how many columns a `*` adds, a
-    /// `*` itself, a number past the last column, or an alias several result
-    /// columns share.
+    /// A result column sqlive can't place: a number after a `*`, since this
+    /// doesn't count the columns a `*` adds, a `*` itself, a number past the
+    /// last column, or an alias several result columns share.
     Unknown,
 }
 
@@ -162,9 +161,11 @@ pub(crate) fn order_term<'a>(columns: &'a [ResultColumn<'a>], expr: &'a Expr<'a>
         .collect();
     match named[..] {
         [] => OrderTerm::Expr(expr),
-        [position] => match result_column(position) {
-            Some(column) => OrderTerm::Alias(position, column),
-            None => OrderTerm::Unknown,
+        [position] => match &columns[position] {
+            ResultColumn::Expr(column, _) => OrderTerm::Alias(column),
+            ResultColumn::Star | ResultColumn::TableStar(_) => {
+                unreachable!("a `*` has no alias")
+            }
         },
         _ => OrderTerm::Unknown,
     }

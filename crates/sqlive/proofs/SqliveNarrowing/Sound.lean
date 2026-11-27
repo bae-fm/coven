@@ -129,11 +129,11 @@ theorem narrowing_sound {s : Statement} (hwf : s.wellFormed = true) {db db' : Db
       simp [Statement.tableScopes, hwhole, Planned.lastOf]
     have htab : ∀ i t, s.table? i = some t → i < s.items.length →
         ((db.mask s.reads).rows t).filter
-            ((plan s).scopeTest ((plan s).scopes last) (lookupRows s (db'.mask s.reads)) i) =
+            ((plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s (db'.mask s.reads)) i) =
           ((db'.mask s.reads).rows t).filter
-            ((plan s).scopeTest ((plan s).scopes last) (lookupRows s (db'.mask s.reads)) i) :=
+            ((plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s (db'.mask s.reads)) i) :=
       fun i t ht hi => scoped_rows hw hr hscopes hi ht
-        (G := (plan s).scopeTest ((plan s).scopes last) (lookupRows s (db'.mask s.reads)) i)
+        (G := (plan s).scopeTest ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s (db'.mask s.reads)) i)
         (fun r hg => by
           simp only [Planned.scopeTest, Bool.and_eq_true] at hg
           simp only [Planned.itemScopes, Limit.passes_both, Bool.and_eq_true]
@@ -150,7 +150,7 @@ theorem narrowing_sound {s : Statement} (hwf : s.wellFormed = true) {db db' : Db
       ⟨hwf, htab, fun g _ => hagree g⟩
     have hrootLe : s.root ≤ s.queries.length := Nat.le_of_lt (s.wellFormed_parts hwf).root
     have hrel : ∀ k E b, relevant s (planRel s (db'.mask s.reads) last) s.root k E b = true :=
-      fun _ _ _ => relevant_of_all (fun r => queryTest_root hwf _ _ _ r) _ _
+      fun _ _ _ => relevant_of_all (fun r => queryTest_root hwf _ _ _ _ r) _ _
     cases last with
     | none =>
       have hroot : ∀ Z, (Z = db.mask s.reads ∨ Z = db'.mask s.reads) →
@@ -159,7 +159,7 @@ theorem narrowing_sound {s : Statement} (hwf : s.wellFormed = true) {db db' : Db
             (evalQuery s Z s.queries.length) :=
         fun Z hZ => plan_armsKept base hZ hrootLe (s.outer_root hwf) (Passes.empty _)
           fun k hk b _ _ => ⟨hrel k _ b, (fun _ _ _ _ hl => by cases hl), windowPasses_root hwf hk _ b⟩
-      exact (result_restricted hR hLeft (fun r => queryTest_root hwf _ _ _ r) hkept
+      exact (result_restricted hR hLeft (fun r => queryTest_root hwf _ _ _ _ r) hkept
         (hroot _ (Or.inl rfl)) (hroot _ (Or.inr rfl))).symm
     | some values =>
       simp only [Planned.lastOf, Option.bind_eq_some_iff] at hlast

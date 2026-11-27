@@ -366,6 +366,20 @@ JOIN adds, so where such a part holds, its item has a row.
   its row, when each lookup passes the item's row wherever the partner's row
   passes the lookup's scope, and `joined_passes` proves that a membership's
   lookup does, in a binding where its edge holds.
+- **The LIMIT bound inside a derived item.** A run's item can be derived. When
+  its query has one arm, with no LIMIT, OFFSET or window function, that passes
+  on the columns the run's first terms read from one of its own items, which
+  no LEFT JOIN adds, that item takes the run's bound over those terms, and an
+  item inside it in turn (`Limit.Level`, `innerLevels`), for the first run
+  over each item. Its lookups are the memberships of the run's item, read over
+  its columns (`Planned.lookupThrough`), within each partner's final scope. The
+  bound narrows the item's table's scope and no lookup of another item
+  (`Planned.innerScope`). `innerLevels_chain`
+  ([Rules/InnerLimit.lean](SqliveNarrowing/Rules/InnerLimit.lean)) proves that
+  each level's terms have, in a row that holds the derived row's values, the
+  directions and values of the first terms of the level around it, and
+  `inner_step` that a level has a bound only where the one around it has one,
+  which passes the derived row only if the level's passes its row.
 - **A subquery's window.** A subquery that is one SELECT of one table, with
   an ORDER BY over that table's columns, a LIMIT and no OFFSET, returns for
   each binding around it the first rows of that binding's window: the
@@ -405,7 +419,8 @@ JOIN adds, so where such a part holds, its item has a row.
   `tellsApart_separates`
   ([Rules/TellsApart.lean](SqliveNarrowing/Rules/TellsApart.lean)) proves that two bindings of such a core that tie in
   those expressions are one binding, with `oneRow_sound` for the FROM
-  subqueries. `fullyOrders_sound` proves that a query that aggregates with no
+  subqueries, which takes the columns of the subquery the sort compares along
+  with those the equalities cover. `fullyOrders_sound` proves that a query that aggregates with no
   GROUP BY, and so returns one row, or whose rows its ORDER BY tells apart by
   those rules, each term in a collation that ties no two different values
   (`Dir.exact`), keeps the same rows in every order, on a database that holds
@@ -669,7 +684,12 @@ BY sorts items of the statement's own core, which sits in no core, so no
 such membership takes a subquery's value (`plan_nestedOK`), and
 `joined_passes` gives each lookup the bound makes. The runs of the ORDER
 BY's terms keep the terms in order, so a binding's values run by run are its
-ORDER BY values.
+ORDER BY values. `inner_passes`
+([LimitTests.lean](SqliveNarrowing/LimitTests.lean)) proves the same of each bound from inside a derived item, from the binding that
+matters alone: the derived item's test keeps a row that holds the binding's
+values in the columns its arm passes on, and passes its own bounds, which
+`inner_step` takes down to the item's row. `innerScope_left` proves that no
+such bound narrows an item a LEFT JOIN adds.
 
 [Facts.lean](SqliveNarrowing/Facts.lean) states
 what the planner's state says of the bindings a core keeps (`PState.Sem`):

@@ -158,6 +158,41 @@ fn passed_on<'a>(
     arms.iter().map(|arm| arm.get(position)?.as_ref()).collect()
 }
 
+/// The source, and its column, that the one arm of the derived item `item`
+/// passes its column `column` on from, when each row of the item is made
+/// from a row of that source: the query is one SELECT with no LIMIT and no
+/// window function, which groups by the column if it groups, and no LEFT
+/// JOIN of the arm adds the source.
+pub(crate) fn only_source(planner: &Planner, item: usize, column: &str) -> Option<(usize, String)> {
+    let derived = planner.items[item].derived.as_ref()?;
+    let ([_], [_]) = (&derived.cores[..], &derived.arms[..]) else { return None };
+    let [Some((source, passed))] =
+        passed_on(&planner.items[item].columns, &derived.arms, column)[..]
+    else {
+        return None;
+    };
+    let found = &planner.items[*source];
+    (found.left_on.is_none()).then(|| (*source, passed.clone()))
+}
+
+/// What the column of a subquery, CTE or view holds that an arm passes on
+/// from a column of `value`: its values compare as that column's do. An
+/// ORDER BY term bounds a LIMIT's rows by a column of another collation, or
+/// a generated one, which no condition narrows by.
+fn passed_value(value: &ColumnValue) -> ColumnValue {
+    match value {
+        ColumnValue::Compared(affinity) => ColumnValue::Compared(*affinity),
+        ColumnValue::Collated(affinity, collation) => {
+            ColumnValue::Collated(*affinity, collation.clone())
+        }
+        // A generated column's collation is BINARY.
+        ColumnValue::Generated(generated) => {
+            ColumnValue::Collated(generated.affinity, "BINARY".to_owned())
+        }
+        ColumnValue::Unknown | ColumnValue::Volatile | ColumnValue::Hidden => ColumnValue::Unknown,
+    }
+}
+
 /// Read `named` as a FROM item of a core that sits in `parent`: its source,
 /// its columns and its cores, or why sqlive can't read its rows.
 pub(crate) fn read_derived_item<'a>(
@@ -292,13 +327,15 @@ fn read_derived<'a>(
             !columns.iter().any(|column: &Column| column.name.as_ref() == Some(name))
         });
         // The column compares as the columns it passes on do in every arm.
-        let mut affinities = arms.iter().map(|(_, columns, _)| {
-            let output = columns.get(position)?;
-            match &output.value {
-                OutputValue::Passed(item, column) => planner.items[*item].columns.affinity(column),
-                OutputValue::Constant => Some(Affinity::Blob),
-                OutputValue::Volatile | OutputValue::Other => None,
+        let mut values = arms.iter().map(|(_, columns, _)| match &columns.get(position) {
+            Some(Output { value: OutputValue::Passed(item, column), .. }) => planner.items[*item]
+                .columns
+                .value(column)
+                .map_or(ColumnValue::Unknown, passed_value),
+            Some(Output { value: OutputValue::Constant, .. }) => {
+                ColumnValue::Compared(Affinity::Blob)
             }
+            _ => ColumnValue::Unknown,
         });
         let volatile = arms.iter().any(|(core, columns, _)| {
             // Every column of a core that reads a view read whole is one
@@ -312,12 +349,20 @@ fn read_derived<'a>(
                     OutputValue::Constant | OutputValue::Other => false,
                 })
         });
-        let first = affinities.next().flatten();
-        let affinity = first.filter(|first| affinities.all(|other| other == Some(*first)));
+        let first = values.next().unwrap_or(ColumnValue::Unknown);
+        let same = |other: ColumnValue| match (&first, &other) {
+            (ColumnValue::Compared(first), ColumnValue::Compared(other)) => first == other,
+            (ColumnValue::Collated(first, by), ColumnValue::Collated(other, also)) => {
+                first == other && by.eq_ignore_ascii_case(also)
+            }
+            _ => false,
+        };
         let value = if volatile {
             ColumnValue::Volatile
+        } else if values.all(same) {
+            first
         } else {
-            affinity.map_or(ColumnValue::Unknown, ColumnValue::Compared)
+            ColumnValue::Unknown
         };
         columns.push(Column { name, value });
     }
@@ -517,7 +562,10 @@ pub(crate) fn arm_columns<'a>(
                 let listed =
                     crate::from_star::star(items.iter().map(|item| &planner.items[*item]))?;
                 found.extend(
-                    listed.into_iter().map(|(at, column)| passed_through(items[at], column)),
+                    listed
+                        .into_iter()
+                        .filter(|(_, column)| !matches!(column.value, ColumnValue::Hidden))
+                        .map(|(at, column)| passed_through(items[at], column)),
                 );
             }
             ResultColumn::TableStar(qualifier) => {
@@ -528,7 +576,12 @@ pub(crate) fn arm_columns<'a>(
                     .find(|item| *qualifier == Name(&planner.items[*item].source.qualifier));
                 let item = named?;
                 let listed = planner.items[item].listed()?;
-                found.extend(listed.iter().map(|column| passed_through(item, column)));
+                found.extend(
+                    listed
+                        .iter()
+                        .filter(|column| !matches!(column.value, ColumnValue::Hidden))
+                        .map(|column| passed_through(item, column)),
+                );
             }
         }
     }

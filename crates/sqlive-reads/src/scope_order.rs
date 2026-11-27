@@ -1,5 +1,5 @@
-//! A statement that orders by columns of its tables, or expressions over one
-//! table's columns, and has a LIMIT with no OFFSET, whose full run depends
+//! A statement that orders by columns of its FROM items, or expressions over
+//! one item's columns, and has a LIMIT with no OFFSET, whose full run depends
 //! only on the rows that sort at or before its last row (SPEC.md section 6).
 //!
 //! When a run returns as many rows as its LIMIT, a row that sorts after its
@@ -20,10 +20,21 @@
 //! which a write looks up as it looks up a join (`scope_lookup.rs`). A table
 //! that takes no value from each earlier run's table has no bound.
 //!
+//! A run's source can be a subquery, CTE or view the statement reads as a
+//! FROM item, such as a spread fragment. When it has one arm, with no LIMIT,
+//! OFFSET or window function, and the arm passes the columns the run's first
+//! terms read on from one of its own sources, that no LEFT JOIN adds, each
+//! row of the item is made of a row of that source that sorts as the item's
+//! does over those terms. So that source takes the first run's bound over
+//! them too, with the item's joins read as its own, and so does a source
+//! inside it where it is such an item (`derived::only_source`). This bound
+//! narrows the source's table, and no lookup of another source.
+//!
 //! sqlive takes the last row's values from the result columns that return them,
-//! so each ORDER BY term is a result column of the statement's only SELECT,
-//! written as the term writes it, with or without the COLLATE the term ends in,
-//! and with no NULLS FIRST or LAST. Each term reads one table of that SELECT: a
+//! so each ORDER BY term is a result column of the statement's only SELECT, one
+//! it writes as the term does, with or without the COLLATE the term ends in, or
+//! one a `*` lists, and with no NULLS FIRST or LAST. Each term reads one FROM
+//! item of that SELECT: a
 //! stored column of BINARY collation, whose values sqlive compares as SQLite
 //! does; a stored column of another collation; or an expression over stored
 //! BINARY columns that SQLite can evaluate row by row, or a generated column
@@ -34,7 +45,7 @@
 //! whether SQLite's own or one the app registered, so sqlive keeps no list of
 //! collations (SPEC.md section 6). A COLLATE inside the term, anywhere but its
 //! end, gives a comparison within it a collation of its own, and the term
-//! bounds nothing. No such table is the right side of a LEFT JOIN. There, when
+//! bounds nothing. No such item is the right side of a LEFT JOIN. There, when
 //! a write adds a row that matches a left row that had no match, SQLite no
 //! longer returns the row of NULLs it returned for that left row, and that row
 //! of NULLs can sort before the last row. The SELECT has no GROUP BY and calls
@@ -42,11 +53,13 @@
 //! result row's values depend on many table rows.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::derived::{arm_columns, only_source, Output};
 use crate::from_item::ColumnValue;
 use crate::row_scope::RowScope;
-use crate::scope_plan::{is_name, Membership, Planner};
+use crate::scope_plan::{is_name, Membership, Planner, Source};
 use crate::scope_row::{item_row_term, RowColumn, RowCondition, RowExpression, RowTerm, RowTest};
 use crate::scope_term::{operand, Affinity, Operand, RunValues};
 use crate::select_syntax::{order_term, parts, Functions, OrderTerm, Part};
@@ -142,9 +155,27 @@ struct SortRun {
     /// The source whose rows the terms sort.
     source: usize,
     terms: Vec<SortTerm>,
+    /// For the first run over a derived item, the sources inside it that its
+    /// first terms pass down to, each inside the one before it.
+    inner: Vec<InnerRun>,
+}
+
+/// A source inside a derived item that each row of the item is made from,
+/// whose columns the first terms of the item's run read: the run's bound on
+/// its rows is the item's, over those terms.
+struct InnerRun {
+    source: usize,
+    /// How the statement names the source's rows.
+    qualifier: String,
+    /// This source's column that holds each column of the source around it
+    /// that one of its columns passes to.
+    columns: BTreeMap<String, String>,
+    /// The run's first terms, over the source.
+    terms: Vec<SortTerm>,
 }
 
 /// One ORDER BY term of a sorted source.
+#[derive(Clone)]
 struct SortTerm {
     /// What it sorts the source's rows by.
     key: SortKey,
@@ -155,6 +186,7 @@ struct SortTerm {
 }
 
 /// What an ORDER BY term sorts its source's rows by.
+#[derive(Clone)]
 enum SortKey {
     /// A stored column of BINARY collation, lowercase, whose values sqlive
     /// compares itself.
@@ -250,41 +282,92 @@ impl SortedLimit {
     }
 
     /// The bound of `source`'s rows for a run bound to `parameters` whose
-    /// last row's ORDER BY values are `last`, when the order sorts it: its
-    /// first run's terms at or before their values, or, for each earlier
-    /// run, a row it joins of that run's source that sorts before that run's
-    /// values. `memberships` are its own, and `looked_up` gives the rows
-    /// whose membership finds a row of its partner that passes the given
-    /// scope too. `None` when it takes no value from an earlier run's source.
+    /// last row's ORDER BY values are `last`, when a run sorts it: its first
+    /// run's terms at or before their values, or, for each earlier run, a row
+    /// it joins of that run's source that sorts before that run's values.
+    /// `sources` are the plan's, whose memberships give each source's joins,
+    /// and `looked_up` gives the rows whose membership finds a row of its
+    /// partner that passes the given scope too. `None` when no run sorts it,
+    /// or it takes no value from an earlier run's source.
     pub(crate) fn bound(
         &self,
         source: usize,
         last: &[Value],
         parameters: &[Value],
-        memberships: &[Membership],
+        sources: &[Source],
+        looked_up: impl Fn(&Membership, RowScope) -> RowScope,
+    ) -> Option<RowScope> {
+        let at = self.runs.iter().position(|run| run.source == source)?;
+        let join = |partner| {
+            let own = &sources[source].memberships;
+            own.iter().find(|found| found.partner == partner).map(Membership::copy)
+        };
+        self.run_bound(at, &self.runs[at].terms, last, parameters, join, looked_up)
+    }
+
+    /// The bound of `source`'s rows when it is inside a run's derived item:
+    /// that run's, over its first terms, with the item's joins read as joins
+    /// of `source`'s rows. The arguments are `bound`'s. It narrows what a
+    /// write must change in `source`'s table, and no other source looks rows
+    /// up within it, so `looked_up` may read every source's scope.
+    pub(crate) fn inner_bound(
+        &self,
+        source: usize,
+        last: &[Value],
+        parameters: &[Value],
+        sources: &[Source],
+        looked_up: impl Fn(&Membership, RowScope) -> RowScope,
+    ) -> Option<RowScope> {
+        let (at, run, inner) = self.runs.iter().enumerate().find_map(|(at, run)| {
+            let inner = run.inner.iter().position(|inner| inner.source == source)?;
+            Some((at, run, &run.inner[..=inner]))
+        })?;
+        let join = |partner| {
+            let own = &sources[run.source].memberships;
+            let found = own.iter().find(|found| found.partner == partner)?;
+            // The derived item's join, read down through each source around
+            // `source`.
+            inner.iter().try_fold(found.copy(), |membership, inner| {
+                let column = |column: &str| inner.columns.get(column).cloned();
+                let member = membership.member.over(&inner.qualifier, &column)?;
+                Some(Membership { member, ..membership })
+            })
+        };
+        let terms = &inner.last()?.terms;
+        self.run_bound(at, terms, last, parameters, join, looked_up)
+    }
+
+    /// The bound of the rows `terms` sort, the run's at `at` or its first
+    /// ones read over a source inside it, where `join` gives their join with
+    /// an earlier run's source.
+    fn run_bound(
+        &self,
+        at: usize,
+        terms: &[SortTerm],
+        last: &[Value],
+        parameters: &[Value],
+        join: impl Fn(usize) -> Option<Membership>,
         looked_up: impl Fn(&Membership, RowScope) -> RowScope,
     ) -> Option<RowScope> {
         let mut earlier = Vec::new();
         let mut values = last;
-        for run in &self.runs {
+        for run in &self.runs[..at] {
             let (own, rest) = values.split_at(run.terms.len());
             values = rest;
-            if run.source == source {
-                let at_or_before = sorted_before(&run.terms, own, parameters, Some(RowScope::All))
-                    .expect("a tied row passes, so some row does");
-                return Some(
-                    earlier
-                        .into_iter()
-                        .rev()
-                        .fold(at_or_before, |later, sooner: RowScope| sooner.or(later)),
-                );
-            }
-            let membership = memberships.iter().find(|found| found.partner == run.source)?;
+            let membership = join(run.source)?;
             if let Some(before) = sorted_before(&run.terms, own, parameters, None) {
-                earlier.push(looked_up(membership, before));
+                earlier.push(looked_up(&membership, before));
             }
         }
-        None
+        let at_or_before =
+            sorted_before(terms, &values[..terms.len()], parameters, Some(RowScope::All))
+                .expect("a tied row passes, so some row does");
+        Some(
+            earlier
+                .into_iter()
+                .rev()
+                .fold(at_or_before, |later, sooner: RowScope| sooner.or(later)),
+        )
     }
 }
 
@@ -301,106 +384,107 @@ pub(crate) fn sorted_limit(
     else {
         return Ok(None);
     };
+    // The result columns as SQLite lists them, each `*`'s one by one.
+    let Some(outputs) = arm_columns(planner, core, &select.body.select) else {
+        return Ok(None);
+    };
     let mut runs: Vec<SortRun> = Vec::new();
+    // The ORDER BY's terms of each run, with the COLLATE each ends in.
+    let mut written: Vec<Vec<(Sorted, Option<String>)>> = Vec::new();
     for term in order_by.iter() {
         if term.nulls.is_some() {
             return Ok(None);
         }
-        let Some((position, item, key)) = sort_term(planner, core, columns, &term.expr) else {
+        let Some(found) = sort_term(planner, core, columns, &outputs, &term.expr) else {
             return Ok(None);
         };
+        let (position, item, sorted, explicit) = found;
         let from = &planner.items[item];
-        if from.core != core || from.source.table().is_none() || from.left_on.is_some() {
+        if from.core != core || from.left_on.is_some() {
             return Ok(None);
         }
+        let Some(key) = sort_key(planner, item, &sorted, explicit.as_deref()) else {
+            return Ok(None);
+        };
         let term = SortTerm { key, descending: term.order == Some(SortOrder::Desc), position };
-        match runs.last_mut() {
-            Some(run) if run.source == item => run.terms.push(term),
-            _ => runs.push(SortRun { source: item, terms: vec![term] }),
+        match (runs.last_mut(), written.last_mut()) {
+            (Some(run), Some(terms)) if run.source == item => {
+                run.terms.push(term);
+                terms.push((sorted, explicit));
+            }
+            _ => {
+                runs.push(SortRun { source: item, terms: vec![term], inner: Vec::new() });
+                written.push(vec![(sorted, explicit)]);
+            }
+        }
+    }
+    // Only the first run over a source bounds its rows, and the sources
+    // inside it.
+    for (at, terms) in written.iter().enumerate() {
+        let (before, rest) = runs.split_at_mut(at);
+        let run = &mut rest[0];
+        if before.iter().all(|earlier| earlier.source != run.source) {
+            run.inner = inner_runs(planner, run.source, &run.terms, terms);
         }
     }
     Ok((!runs.is_empty()).then_some(SortedLimit { runs, limit }))
 }
 
-/// `expr` without the COLLATE it ends in, and the collation that names.
-fn without_collation<'a>(expr: &'a Expr<'a>) -> (&'a Expr<'a>, Option<String>) {
-    match unparenthesized(expr) {
-        Expr::Collate(inner, name) => (unparenthesized(inner), Some(crate::sql::name(name))),
-        expr => (expr, None),
-    }
+/// What an ORDER BY term reads of one source's rows.
+#[derive(Clone)]
+enum Sorted {
+    /// One of its columns, lowercase.
+    Column(String),
+    /// An expression over its columns, as a row term of its rows.
+    Expression(Arc<RowTerm>),
 }
 
-/// `collation`, unless it is BINARY, which SQLite's comparison uses with no
-/// COLLATE.
-fn not_binary(collation: String) -> Option<String> {
-    (!collation.eq_ignore_ascii_case("BINARY")).then_some(collation)
-}
-
-/// The result column that returns the ORDER BY term `expr`, the source whose
-/// rows it sorts, what it sorts them by and the collation it compares text
-/// by, when a run's last row can bound them. A term may end in one COLLATE,
-/// which gives it that collation: otherwise a stored column sorts in the
-/// collation it declares and any other term in BINARY. A bare name that
-/// matches a result column's alias means that result column, as SQLite reads
-/// an ORDER BY; any other name means the column it resolves to, and any
-/// other expression the result column that writes it the same way. A result
-/// column may end in a COLLATE too, which doesn't change its value.
-fn sort_term(
+/// The result column, from zero, that returns the ORDER BY term `expr`, the
+/// source whose rows it sorts, what it reads of them and the COLLATE it ends
+/// in. A bare name that matches a result column's alias means that result
+/// column, as SQLite reads an ORDER BY; any other name means the column it
+/// resolves to, and any other expression the result column that writes it the
+/// same way. A result column may end in a COLLATE too, which doesn't change
+/// its value. `outputs` are the result columns `columns` list, each `*`'s one
+/// by one.
+fn sort_term<'a>(
     planner: &Planner,
     core: usize,
-    columns: &[ResultColumn<'_>],
-    expr: &Expr<'_>,
-) -> Option<(usize, usize, SortKey)> {
+    columns: &'a [ResultColumn<'a>],
+    outputs: &[Output<'a>],
+    expr: &'a Expr<'a>,
+) -> Option<(usize, usize, Sorted, Option<String>)> {
     let (term, explicit) = without_collation(expr);
     let (position, sorted) = match order_term(columns, term) {
-        OrderTerm::Alias(position, listed) => (position, listed),
+        OrderTerm::Alias(listed) => {
+            let position = outputs.iter().position(|output| {
+                output.written().is_some_and(|written| std::ptr::eq(written, listed))
+            })?;
+            (position, listed)
+        }
         OrderTerm::Expr(term) => {
             let resolved = is_name(term).then(|| planner.resolve(core, term)).flatten();
-            // sqlive doesn't know how many columns a `*` adds, so it can't
-            // tell the position of a column after one.
-            let position = columns
-                .iter()
-                .map_while(|column| match column {
-                    ResultColumn::Expr(expr, _) => Some(without_collation(expr).0),
-                    ResultColumn::Star | ResultColumn::TableStar(_) => None,
-                })
-                .position(|listed| match &resolved {
-                    Some(resolved) => {
-                        is_name(listed) && planner.resolve(core, listed).as_ref() == Some(resolved)
-                    }
-                    None => listed == term,
-                })?;
+            let position = outputs.iter().position(|output| {
+                let listed = output.written().map(|written| without_collation(written).0);
+                match &resolved {
+                    // A column a `*` lists has no expression of its own.
+                    Some(resolved) => match listed {
+                        Some(listed) => {
+                            is_name(listed)
+                                && planner.resolve(core, listed).as_ref() == Some(resolved)
+                        }
+                        None => output.passed().as_ref() == Some(resolved),
+                    },
+                    None => listed == Some(term),
+                }
+            })?;
             (position, term)
         }
         OrderTerm::Position(_) | OrderTerm::Unknown => return None,
     };
     if is_name(sorted) {
         let (item, column) = planner.resolve(core, sorted)?;
-        let from = &planner.items[item];
-        let key = match from.columns.value(&column)? {
-            ColumnValue::Compared(affinity) => match explicit.and_then(not_binary) {
-                None => SortKey::Column(column),
-                // SQLite compares by the term's collation, which sqlive asks
-                // it for.
-                collation => SortKey::Expression {
-                    expression: column_expression(from, &column, *affinity),
-                    collation,
-                },
-            },
-            ColumnValue::Generated(generated) => SortKey::Expression {
-                expression: generated.clone(),
-                collation: explicit.and_then(not_binary),
-            },
-            ColumnValue::Collated(affinity, declared) => SortKey::Expression {
-                expression: column_expression(from, &column, *affinity),
-                collation: match explicit {
-                    Some(name) => not_binary(name),
-                    None => Some(declared.clone()),
-                },
-            },
-            ColumnValue::Unknown | ColumnValue::Volatile | ColumnValue::Hidden => return None,
-        };
-        return Some((position, item, key));
+        return Some((position, item, Sorted::Column(column), explicit));
     }
     let mut found = Vec::new();
     parts(sorted, &mut found);
@@ -418,9 +502,135 @@ fn sort_term(
         return None;
     }
     let term = item_row_term(planner, core, item, sorted, &found)?;
-    let expression = RowExpression { term, affinity: Affinity::Blob };
-    let collation = explicit.and_then(not_binary);
-    Some((position, item, SortKey::Expression { expression, collation }))
+    Some((position, item, Sorted::Expression(term), explicit))
+}
+
+/// What a term that reads `sorted` of the rows of source `item` sorts them by,
+/// ending in the COLLATE `explicit`, when a run's last row can bound them: a
+/// stored column sorts in the collation it declares unless the term names
+/// another, and any other term in BINARY.
+fn sort_key(
+    planner: &Planner,
+    item: usize,
+    sorted: &Sorted,
+    explicit: Option<&str>,
+) -> Option<SortKey> {
+    let explicit = explicit.map(str::to_owned);
+    let column = match sorted {
+        Sorted::Column(column) => column,
+        Sorted::Expression(term) => {
+            let expression = RowExpression { term: Arc::clone(term), affinity: Affinity::Blob };
+            let collation = explicit.and_then(not_binary);
+            return Some(SortKey::Expression { expression, collation });
+        }
+    };
+    let from = &planner.items[item];
+    Some(match from.columns.value(column)? {
+        ColumnValue::Compared(affinity) => match explicit.and_then(not_binary) {
+            None => SortKey::Column(column.clone()),
+            // SQLite compares by the term's collation, which sqlive asks it
+            // for.
+            collation => SortKey::Expression {
+                expression: column_expression(from, column, *affinity),
+                collation,
+            },
+        },
+        ColumnValue::Generated(generated) => SortKey::Expression {
+            expression: generated.clone(),
+            collation: explicit.and_then(not_binary),
+        },
+        ColumnValue::Collated(affinity, declared) => SortKey::Expression {
+            expression: column_expression(from, column, *affinity),
+            collation: match explicit {
+                Some(name) => not_binary(name),
+                None => not_binary(declared.clone()),
+            },
+        },
+        ColumnValue::Unknown | ColumnValue::Volatile | ColumnValue::Hidden => return None,
+    })
+}
+
+/// The sources inside the derived item `item` that the first terms of its
+/// run pass down to: `terms`, which read `written`, each with the COLLATE it
+/// ends in. A term passes to a source when the item's one arm passes each
+/// column it reads on from that source (`derived::only_source`), and so on
+/// down through a derived item there. A source takes the run's first terms
+/// that all pass to it.
+fn inner_runs(
+    planner: &Planner,
+    item: usize,
+    terms: &[SortTerm],
+    written: &[(Sorted, Option<String>)],
+) -> Vec<InnerRun> {
+    let mut found = Vec::new();
+    // The source the run's first term passes to, and each term over its rows.
+    let mut source = item;
+    let mut over: Vec<Sorted> = written.iter().map(|(sorted, _)| sorted.clone()).collect();
+    loop {
+        let Some(first) = over.first() else { return found };
+        let Some(below) = reads(first)
+            .first()
+            .and_then(|column| only_source(planner, source, column))
+            .map(|(below, _)| below)
+        else {
+            return found;
+        };
+        let passes = |column: &str| {
+            let (source_below, passed) = only_source(planner, source, column)?;
+            (source_below == below).then_some(passed)
+        };
+        let qualifier = planner.items[below].source.qualifier.clone();
+        let passed: Vec<Sorted> = over
+            .iter()
+            .map_while(|sorted| match sorted {
+                Sorted::Column(column) => passes(column).map(Sorted::Column),
+                Sorted::Expression(term) => term.over(&qualifier, &passes).map(Sorted::Expression),
+            })
+            .collect();
+        let keys: Vec<SortTerm> = passed
+            .iter()
+            .zip(written)
+            .zip(terms)
+            .map_while(|((sorted, (_, explicit)), term)| {
+                let key = sort_key(planner, below, sorted, explicit.as_deref())?;
+                Some(SortTerm { key, ..term.clone() })
+            })
+            .collect();
+        if keys.is_empty() {
+            return found;
+        }
+        let columns: BTreeMap<String, String> = planner.items[source]
+            .columns
+            .names()
+            .filter_map(|column| Some((column.to_owned(), passes(column)?)))
+            .collect();
+        over = passed;
+        over.truncate(keys.len());
+        found.push(InnerRun { source: below, qualifier, columns, terms: keys });
+        source = below;
+    }
+}
+
+/// The columns of its source's rows that `sorted` reads.
+fn reads(sorted: &Sorted) -> Vec<&str> {
+    match sorted {
+        Sorted::Column(column) => vec![column],
+        Sorted::Expression(term) => term.columns.iter().map(|read| read.column.as_str()).collect(),
+    }
+}
+
+/// `expr` without the COLLATE it ends in, and the collation that names.
+fn without_collation<'a>(expr: &'a Expr<'a>) -> (&'a Expr<'a>, Option<String>) {
+    match unparenthesized(expr) {
+        Expr::Collate(inner, name) => (unparenthesized(inner), Some(crate::sql::name(name))),
+        expr => (expr, None),
+    }
+}
+
+/// `collation`, unless it is BINARY, which SQLite's comparison uses with no
+/// COLLATE.
+fn not_binary(collation: String) -> Option<String> {
+    (!collation.eq_ignore_ascii_case("BINARY")).then_some(collation)
 }
 
 /// A stored column of `from`'s table as an expression a write asks SQLite

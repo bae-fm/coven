@@ -135,12 +135,16 @@ def Statement.fixedColumns (s : Statement) (k : Nat) (fixed : List (Nat × Nat))
   (List.range (s.item i).columns.length).filter fun c =>
     fixed.contains (i, c) || s.innerEquated k known i c || s.onEquated k known i c
 
+/-- The columns of derived item `i` that `sorted` compares. -/
+def Statement.comparedColumns (s : Statement) (sorted : List Expr) (i : Nat) : List Nat :=
+  (List.range (s.item i).columns.length).filter fun c => sorted.contains (.col i c)
+
 /-- Whether item `i` of core `k` adds one row at most, or the one NULL row of
 a LEFT JOIN, to a binding of the items `known`, among bindings that tie in
-`sorted` and hold the values `fixed` names alike. `one q columns` says
-whether query `q` returns one row at most for any values of its columns
-`columns`. -/
-def Statement.determines (s : Statement) (one : Nat → List Nat → Bool) (k : Nat)
+`sorted` and hold the values `fixed` names alike. `one q columns compared`
+says whether query `q` returns one row at most for any values of its columns
+`columns` among rows that tie in its columns `compared`. -/
+def Statement.determines (s : Statement) (one : Nat → List Nat → List Nat → Bool) (k : Nat)
     (sorted : List Expr) (fixed : List (Nat × Nat)) (known : List Nat) (i : Nat) : Bool :=
   match (s.item i).kind with
   | .table _ => (s.keysOf i).any fun key =>
@@ -148,7 +152,7 @@ def Statement.determines (s : Statement) (one : Nat → List Nat → Bool) (k : 
         (!(s.item i).left || key.any (s.anchors k sorted fixed known i) || s.onKnown k known i)
   | .derived q _ =>
     let columns := s.fixedColumns k fixed known i
-    (s.item i).written && one q columns &&
+    (s.item i).written && one q columns (s.comparedColumns sorted i) &&
       (!(s.item i).left || columns.any (s.anchors k [] fixed known i) || s.onKnown k known i)
 
 /-- The items `known`, and those each round of `rounds` adds that the ones
@@ -160,7 +164,7 @@ def toldRounds (determines : List Nat → Nat → Bool) (items : List Nat) : Nat
       (known ++ items.filter fun i => !known.contains i && determines known i)
 
 /-- Whether the items of core `k` are each determined, in turn. -/
-def Statement.allTold (s : Statement) (one : Nat → List Nat → Bool) (k : Nat)
+def Statement.allTold (s : Statement) (one : Nat → List Nat → List Nat → Bool) (k : Nat)
     (sorted : List Expr) (fixed : List (Nat × Nat)) : Bool :=
   let items := (s.core k).items
   let known := toldRounds (s.determines one k sorted fixed) items items.length []
@@ -190,13 +194,14 @@ def Statement.passedColumns (s : Statement) (k : Nat) (columns : List Nat) : Lis
     | _ => none
 
 /-- Whether query `q` returns one row at most for any values of its columns
-`columns`, none of them NULL: it is one SELECT that aggregates with no GROUP
-BY, or groups by columns that `columns` return, or neither aggregates nor
-calls a window function, and equalities with the columns it returns there tell
-its bindings apart. -/
-def Statement.oneRow (s : Statement) : Nat → Nat → List Nat → Bool
-  | 0, _, _ => false
-  | f + 1, q, columns =>
+`columns`, none of them NULL, among rows that tie in its columns `compared`:
+it is one SELECT that aggregates with no GROUP BY, or groups by columns that
+`columns` return, or neither aggregates nor calls a window function, and a
+sort of the columns it returns in `compared`, with equalities with those it
+returns in `columns`, tells its bindings apart. -/
+def Statement.oneRow (s : Statement) : Nat → Nat → List Nat → List Nat → Bool
+  | 0, _, _, _ => false
+  | f + 1, q, columns, compared =>
     match (s.query q).arms with
     | [k] =>
       let c := s.core k
@@ -204,7 +209,9 @@ def Statement.oneRow (s : Statement) : Nat → Nat → List Nat → Bool
         (!c.groupBy.isEmpty && c.groupBy.all fun g =>
           s.comparesExactly k g && columns.any fun p => c.passes p == some g) ||
         (!c.aggregated && !c.windowed &&
-          s.allTold (s.oneRow f) k [] (s.passedColumns k columns))
+          s.allTold (s.oneRow f) k
+            ((s.passedColumns k compared).map fun (i, c) => .col i c)
+            (s.passedColumns k columns))
     | _ => false
 
 /-- Whether the expressions `sorted`, with the equalities of core `k`'s
