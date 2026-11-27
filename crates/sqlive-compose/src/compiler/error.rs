@@ -283,14 +283,6 @@ pub enum Cause {
         /// How many columns.
         width: usize,
     },
-    /// A result column names one column of a spread.
-    #[error("{concerns} selects {column}, one column of a spread: select the spread with its alias and `.*`")]
-    SpreadColumn {
-        /// The call's name.
-        concerns: String,
-        /// The column as written.
-        column: String,
-    },
     /// A spread that can be missing has no column that is NULL only when it
     /// is.
     #[error("{concerns} spreads {fragment} where its row can be missing, and it has no NOT NULL column to tell")]

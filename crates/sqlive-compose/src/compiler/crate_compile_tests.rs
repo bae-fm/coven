@@ -423,12 +423,6 @@ sqlive_compose::read!(InFrom, r#"
 sqlive_compose::read!(WrongTable, r#"
     SELECT i.id, @people::CommentAuthor(parent: i) AS author FROM issues AS i
 "#);
-sqlive_compose::read!(OneColumn, r#"
-    SELECT issue.issue_id FROM @issues::Issue AS issue
-"#);
-sqlive_compose::read!(ByColumn, r#"
-    SELECT p.person_id, p.name FROM @people::Person AS p
-"#);
 sqlive_compose::read!(Missing, r#"SELECT p.* FROM @people::Person AS p WHERE p.person_id = :wanted"#);
 "##,
         )],
@@ -439,9 +433,7 @@ sqlive_compose::read!(Missing, r#"SELECT p.* FROM @people::Person AS p WHERE p.p
         [
             "src/lib.rs:2:1: people::CommentAuthor reads a parent row, so its spread is a value, not a table in FROM",
             "src/lib.rs:5:1: the spread of people::CommentAuthor takes its parent row from i, which is no FROM item that reads comments",
-            "src/lib.rs:8:1: OneColumn selects issue.issue_id, one column of a spread: select the spread with its alias and `.*`",
-            "src/lib.rs:11:1: ByColumn selects p.person_id, one column of a spread: select the spread with its alias and `.*`",
-            "src/lib.rs:14:1: Missing reads :wanted, which its header does not declare",
+            "src/lib.rs:8:1: Missing reads :wanted, which its header does not declare",
         ]
     );
 }

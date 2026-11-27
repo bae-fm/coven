@@ -638,8 +638,20 @@ and uses the root only to return a row.
 
 A statement may name a spread's columns in its conditions and its `ORDER BY`, as
 `issue.author_id` in the issue page's join and `item.number` in the issue list.
-A result column that names one column of a spread fails the build, because the
-columns belong to the fragment's type (section 9).
+It may also select one column of a spread, beside the whole spread or without
+it. That column is a field of the statement's own row, typed as any result
+column is (section 9): a table's column takes the type of its STRICT type, an
+`Option` where it can be NULL, and a declaration in the statement's own header
+replaces that type, or gives a computed column its type. The types that the
+fragment's header declares are those of the fragment's fields, so the
+statement declares its own. A list that keys each row by its place selects
+that column beside the row:
+
+```sql
+SELECT item.number, item.*
+FROM @issues::IssueListItem(viewer: :me) AS item
+ORDER BY item.number DESC
+```
 
 **The join rule.** A fragment joins its parent on columns it passes through
 unchanged, never through a computed CTE column.

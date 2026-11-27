@@ -451,3 +451,49 @@ fn a_column_that_the_where_requires_not_null_needs_no_option() {
         assert!(errors.is_empty(), "{sql}: {errors:?}");
     }
 }
+
+/// A statement selects one column of a spread as it selects any column: a
+/// table's column takes its STRICT type, an `Option` where a join leaves the
+/// spread without a row, and a computed one takes the type the statement's
+/// own header declares, beside the whole spread or not.
+#[test]
+fn a_read_selects_one_column_of_a_spread() {
+    let output = compile_lib(
+        r##"
+sqlive_compose::fragment!(Entry { number: u32, shout: String }, r#"
+    SELECT i.id AS issue_id, i.number, i.assignee_id, upper(i.title) AS shout FROM issues AS i
+"#);
+sqlive_compose::fragment!(Person, r#"SELECT p.id AS person_id, p.name FROM people AS p"#);
+sqlive_compose::read!(Window { shout: Title }, r#"
+    SELECT entry.number, entry.shout, assignee.name, entry.*, assignee.person_id AS who
+    FROM @crate::Entry AS entry
+    LEFT JOIN @crate::Person AS assignee ON assignee.person_id = entry.assignee_id
+    ORDER BY entry.number
+"#);
+"##,
+    )
+    .unwrap();
+    let code = code_of(&output, "Window.rs");
+    for field in [
+        // The statement's own types: the fragment declares `number` a `u32`.
+        "pub number : i64",
+        "pub shout : Title",
+        "pub name : Option < String >",
+        "pub entry : crate :: Entry",
+        "pub who : Option < String >",
+    ] {
+        assert!(code.contains(field), "{field} in {code}");
+    }
+    let errors = messages(compile_lib(
+        r##"
+sqlive_compose::fragment!(Entry { shout: String }, r#"
+    SELECT upper(i.title) AS shout FROM issues AS i
+"#);
+sqlive_compose::read!(Shouts, r#"SELECT entry.shout FROM @crate::Entry AS entry"#);
+"##,
+    ));
+    assert_eq!(
+        errors,
+        ["src/lib.rs:5:1: Shouts computes the column shout, and its header gives shout no type"]
+    );
+}

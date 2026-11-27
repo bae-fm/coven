@@ -41,14 +41,6 @@ pub(crate) fn fields(
             push(header, &mut fields, field)?;
             continue;
         }
-        if let ItemKind::Column { qualifier: Some(qualifier), name } = &span.item.kind {
-            if placed.iter().any(|spread| spread.alias.as_deref() == Some(qualifier.as_str())) {
-                return Err(Cause::SpreadColumn {
-                    concerns: header.name.clone(),
-                    column: format!("{qualifier}.{name}"),
-                });
-            }
-        }
         let columns = prepared.columns.iter().enumerate().skip(span.start).take(span.width);
         for (position, column) in columns {
             let field = column_field(header, span.item, column, position, (sql, tokens))?;
