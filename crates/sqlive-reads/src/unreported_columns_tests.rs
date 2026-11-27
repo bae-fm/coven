@@ -132,9 +132,10 @@ fn a_query_sqlite_picks_rows_of_reads_every_column_of_its_tables() {
 /// every two rows apart, so the rows a LIMIT keeps depend only on the columns
 /// the statement names: by the INTEGER PRIMARY KEY column, named or by its
 /// result column's position or alias, or by `rowid`. An aggregate with no
-/// GROUP BY returns one row, which every order keeps. A primary key that
-/// isn't the rowid can hold NULL in many rows, and a WITHOUT ROWID table has
-/// no rowid.
+/// GROUP BY returns one row, which every order keeps. A WITHOUT ROWID
+/// table's primary key holds no NULL, so an ORDER BY over it tells rows apart
+/// too. A primary key that isn't the rowid can otherwise hold NULL in many
+/// rows.
 #[test]
 fn an_order_by_each_tables_rowid_reads_only_the_named_columns() {
     let connection = connection();
@@ -157,6 +158,7 @@ fn an_order_by_each_tables_rowid_reads_only_the_named_columns() {
         "SELECT a.v FROM a WHERE a.v = (SELECT max(b.w) FROM b WHERE b.k = a.k)",
         "SELECT count(*) FROM a LIMIT 1",
         "SELECT s.x FROM s ORDER BY s.id LIMIT 1",
+        "SELECT r.x FROM r ORDER BY r.id LIMIT 1",
     ] {
         let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
             panic!("the columns are known: {sql}");
@@ -166,12 +168,113 @@ fn an_order_by_each_tables_rowid_reads_only_the_named_columns() {
     for (sql, table) in [
         ("SELECT p.x FROM p ORDER BY p.id LIMIT 1", "p"),
         ("SELECT q.x FROM q ORDER BY q.id LIMIT 1", "q"),
-        ("SELECT r.x FROM r ORDER BY r.id LIMIT 1", "r"),
     ] {
         let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
             panic!("the columns are known: {sql}");
         };
         assert_eq!(found, pairs(&[(table, "id"), (table, "x")]), "{sql}");
+    }
+}
+
+/// Tables with each kind of unique key a row can be told apart by, and some
+/// that tell none apart.
+const KEYED: &str = "
+    CREATE TABLE pair(l INTEGER NOT NULL, r INTEGER NOT NULL, x INTEGER, UNIQUE (l, r));
+    CREATE TABLE loose(l INTEGER UNIQUE, x INTEGER);
+    CREATE TABLE named(name TEXT PRIMARY KEY, x INTEGER);
+    CREATE TABLE folded(name TEXT NOT NULL, x INTEGER);
+    CREATE UNIQUE INDEX folded_name ON folded(name COLLATE NOCASE);
+    CREATE TABLE some(l INTEGER NOT NULL, x INTEGER);
+    CREATE UNIQUE INDEX some_l ON some(l) WHERE x > 0;
+    CREATE UNIQUE INDEX some_sum ON some(l + x);
+    CREATE TABLE words(id INTEGER PRIMARY KEY, word TEXT, shout TEXT COLLATE NOCASE, x);
+    CREATE VIEW seen AS SELECT words.id, words.word FROM words";
+
+/// A query whose ORDER BY and equalities cover a unique key of each FROM item
+/// depends only on the columns it names: by the sort's columns that hold no
+/// NULL, by equalities with the items told apart before, and through a FROM
+/// subquery that such equalities let return one row at most.
+#[test]
+fn a_query_whose_sort_and_joins_tell_its_rows_apart_reads_only_the_named_columns() {
+    let connection = connection();
+    connection.execute_batch(KEYED).unwrap();
+    for sql in [
+        "SELECT pair.x FROM pair ORDER BY pair.l, pair.r LIMIT 1",
+        "SELECT pair.x FROM pair WHERE pair.l = ?1 ORDER BY pair.r LIMIT 1",
+        "SELECT a.v FROM a LEFT JOIN b ON b.id = a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a, b WHERE a.k = b.id ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a LEFT JOIN loose ON loose.l = a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a LEFT JOIN pair ON pair.l = a.k AND pair.r = a.v + 1 \
+         ORDER BY a.id LIMIT 1",
+        // The third table takes its key from the second.
+        "SELECT a.v FROM a LEFT JOIN words AS w ON w.id = a.k \
+         LEFT JOIN named AS n ON n.name = w.word ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN named AS n ON n.name = ?1 ORDER BY a.id LIMIT 1",
+        // A subquery that equalities with the row around it let return one
+        // row at most picks none.
+        "SELECT (SELECT b.w FROM b WHERE b.id = a.k) FROM a",
+        "SELECT (SELECT n.x FROM named AS n WHERE n.name = w.word) FROM words AS w",
+        // A FROM subquery: one row for each group key, one for each key of
+        // the table it passes on, or one in all.
+        "SELECT a.v FROM a LEFT JOIN (SELECT b.k, count(*) AS n FROM b GROUP BY b.k) AS g \
+         ON g.k = a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a LEFT JOIN (SELECT g.* FROM (SELECT s.k, count(*) AS n \
+         FROM seen AS v JOIN b AS s ON s.id = v.id GROUP BY s.k) AS g) AS g ON g.k = a.k \
+         ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN (SELECT b.id AS key, b.w FROM b) AS d ON d.key = a.k \
+         ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a LEFT JOIN (SELECT count(*) AS n FROM b) AS c ON c.n = a.k \
+         ORDER BY a.id LIMIT 1",
+        // A key compared with a subquery's value.
+        "SELECT a.v FROM a LEFT JOIN b ON b.id = (SELECT max(w.id) FROM words AS w \
+         WHERE w.x = a.v) ORDER BY a.id LIMIT 1",
+        "SELECT count(*), group_concat(a.v ORDER BY a.id) FROM a LEFT JOIN b ON b.id = a.k",
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(&[]), "{sql}");
+    }
+}
+
+/// A query reads every column of its tables when a sort or an equality leaves
+/// some key of a FROM item open: the sort leaves a column of the key out, or
+/// sorts one that can hold NULL in many rows; the comparison converts the
+/// key's values, or calls equal what the key tells apart; the index leaves
+/// rows out or indexes an expression; the condition is no equality; or only
+/// the ON of another item's LEFT JOIN holds it.
+#[test]
+fn a_query_whose_sort_or_joins_leave_rows_tied_reads_every_column() {
+    let connection = connection();
+    connection.execute_batch(KEYED).unwrap();
+    for sql in [
+        "SELECT pair.x FROM pair ORDER BY pair.l LIMIT 1",
+        "SELECT loose.x FROM loose ORDER BY loose.l LIMIT 1",
+        "SELECT folded.x FROM folded ORDER BY folded.name COLLATE RTRIM LIMIT 1",
+        "SELECT a.v FROM a JOIN named AS n ON n.name = a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN words AS w ON w.id = a.k \
+         JOIN named AS n ON w.shout = n.name ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN words AS w ON w.id = a.k \
+         JOIN folded AS f ON w.shout = f.name COLLATE RTRIM ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN some ON some.l = a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN b ON b.id = a.k OR b.id = a.v ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN b ON b.id >= a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN b ON b.k = a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM b LEFT JOIN a ON b.id = a.id ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a RIGHT JOIN b ON b.id = a.k ORDER BY a.id, b.id LIMIT 1",
+        "SELECT a.v FROM a JOIN seen AS s ON s.id = a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN (SELECT b.k, count(*) AS n FROM b GROUP BY b.k, b.w) AS g \
+         ON g.k = a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN (SELECT w.shout, count(*) AS n FROM words AS w \
+         GROUP BY w.shout) AS g ON g.shout = a.k ORDER BY a.id LIMIT 1",
+        "SELECT a.v FROM a JOIN (SELECT b.id AS key FROM b UNION ALL SELECT b.k FROM b) AS d \
+         ON d.key = a.k ORDER BY a.id LIMIT 1",
+        "SELECT (SELECT b.w FROM b WHERE b.k = a.k) FROM a",
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert!(!found.is_empty(), "{sql}");
     }
 }
 
@@ -182,7 +285,7 @@ fn an_order_by_each_tables_rowid_reads_only_the_named_columns() {
 /// HAVING or the ORDER BY shows a GROUP BY term, or it calls min or max, of
 /// anything but a column whose equal values are the same, or it calls an
 /// aggregate other than count, min and max with no ORDER BY of its own that
-/// sorts by the rowid of each of its tables.
+/// tells its rows apart.
 #[test]
 fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
     let connection = connection();
@@ -280,7 +383,7 @@ fn a_distinct_or_compound_of_values_that_compare_equal_and_differ_reads_every_co
         ("SELECT DISTINCT count(*) FROM a GROUP BY a.k", &a[..]),
         ("SELECT a.v FROM a WHERE a.k IN (SELECT DISTINCT c.t FROM c)", &c[..]),
         (
-            "SELECT s.v FROM (SELECT DISTINCT a.v FROM a JOIN (SELECT b.w FROM b) AS d) AS s",
+            "SELECT s.w FROM (SELECT DISTINCT d.w FROM a JOIN (SELECT b.w FROM b) AS d) AS s",
             &a_b[..],
         ),
         ("SELECT c.t FROM c UNION SELECT a.v FROM a", &a_c[..]),
@@ -302,6 +405,8 @@ fn a_distinct_or_compound_of_values_that_compare_equal_and_differ_reads_every_co
     for sql in [
         "SELECT DISTINCT c.x, c.r, c.id FROM c",
         "SELECT DISTINCT a.v, b.w FROM a JOIN b ON b.k = a.k",
+        // A table's column compares as it does beside any other FROM item.
+        "SELECT s.v FROM (SELECT DISTINCT a.v FROM a JOIN (SELECT b.w FROM b) AS d) AS s",
         "SELECT a.v FROM a UNION SELECT b.w FROM b",
         "SELECT c.t FROM c UNION ALL SELECT a.v FROM a",
         "SELECT c.x, c.r, c.id FROM c EXCEPT SELECT a.k, a.v, rowid FROM a",

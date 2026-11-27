@@ -13,8 +13,9 @@ statements and writes and compares all three.
 ## The model
 
 [Syntax.lean](SqliveNarrowing/Syntax.lean) states a
-statement as the planner numbers it: its FROM items, the SELECT cores that hold
-them, the queries whose arms the cores are, and the conditions on each core's
+statement as the planner numbers it: its FROM items, each with its table's
+unique keys and NOT NULL columns, or whether it is a FROM subquery written in
+place, the SELECT cores that hold them, the queries whose arms the cores are, and the conditions on each core's
 rows, each in the WHERE or in a LEFT JOIN's ON. A join's USING stands for the
 equality of each column it names with the column of that name of the leftmost
 item before it that has one, as SQLite compares them: where that column is a
@@ -302,8 +303,8 @@ JOIN adds, so where such a part holds, its item has a row.
   proves that the two changes rerun a statement wherever the update as one
   change would. A lookup reads the FTS5 table's rows from its content table, which
   costs fewer of SQLite's steps. sqlive doesn't know the FTS5 table's first
-  column to hold its rowid, so the model's sort by each table's rowid counts
-  only a table whose first column is its INTEGER PRIMARY KEY
+  column to hold its rowid, so the model reads a rowid as a unique key only of
+  a table whose first column is its INTEGER PRIMARY KEY
   (`Item.rowidFirst`). A statement that names `rank` or the column
   that bears the table's name, whose values depend on the table's other
   rows, and one that reads any other virtual table, is read whole.
@@ -362,12 +363,23 @@ JOIN adds, so where such a part holds, its item has a row.
   rows SQLite reads first, in the order of the plan it chooses.
   `post_picks_any` proves that with no ORDER BY, some order of the rows puts
   any of them among the rows the query keeps, so an index on a column no
-  clause names can decide which rows those are. `fullyOrders_sound` proves
-  that a query that aggregates with no GROUP BY, and so returns one row, or
-  whose ORDER BY sorts by the rowid of each of its tables, each in a
-  collation that ties no two different values (`Dir.exact`), keeps the same
-  rows in every order, on a database whose tables hold each row's rowid in its
-  first column, never NULL and different in each row.
+  clause names can decide which rows those are.
+  [Tells.lean](SqliveNarrowing/Tells.lean) states when the expressions a sort
+  compares and the equalities of a core's conditions tell its bindings apart
+  (`Statement.tellsApart`): each item, in turn, adds one row at most to each
+  binding of those before it, a table by a unique key of it and a FROM
+  subquery by returning one row at most (`Statement.oneRow`).
+  `tellsApart_separates`
+  ([Rules/TellsApart.lean](SqliveNarrowing/Rules/TellsApart.lean)) proves that two bindings of such a core that tie in
+  those expressions are one binding, with `oneRow_sound` for the FROM
+  subqueries. `fullyOrders_sound` proves that a query that aggregates with no
+  GROUP BY, and so returns one row, or whose rows its ORDER BY tells apart by
+  those rules, each term in a collation that ties no two different values
+  (`Dir.exact`), keeps the same rows in every order, on a database that holds
+  what the schema constrains (`Db.Constrained`): each row's rowid in its first
+  column, never NULL and different in each row; no NULL in a NOT NULL column;
+  and no two rows that hold one value, none of it NULL, in every column of a
+  unique key.
   A SELECT that aggregates picks rows too. `bare_picks_any` proves that for
   any row of a group, some order of the group's rows gives that row's value to
   a result column outside every GROUP BY term, and `concat_follows_order`
@@ -390,8 +402,7 @@ JOIN adds, so where such a part holds, its item has a row.
   `rowNumber_follows_order` proves that `row_number()` whose window has no
   ORDER BY numbers two rows in the order SQLite reads them.
   `orderFree_rows_perm` proves that a SELECT with none of these, whose
-  `group_concat` calls and windows each sort by the rowid of each of its
-  tables, gives the same rows in some order from every order of its rows.
+  `group_concat` calls and windows each tell its rows apart, gives the same rows in some order from every order of its rows.
   `picked_column_reruns` proves that a change to any column of a table that a
   query of the first kind, or a SELECT whose rows follow the order SQLite reads
   them in, reads runs the query again, when the row before or after passes the

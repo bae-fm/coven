@@ -65,6 +65,8 @@ mod subquery_window;
 mod syntax;
 #[path = "narrowing_model/term.rs"]
 mod term;
+#[path = "narrowing_model/unique_order.rs"]
+mod unique_order;
 #[path = "narrowing_model/using.rs"]
 mod using;
 #[path = "narrowing_model/view.rs"]
@@ -81,6 +83,16 @@ pub(super) fn pick(rng: &mut Rng, names: &[&'static str]) -> &'static str {
     names[rng.below(names.len())]
 }
 
+/// The tables the unique order rule's statements read beside the others': one
+/// with the unique keys (a, c) and (b, a), of which `a` alone holds no NULL.
+pub(super) const KEYED: &str = "k";
+const KEYED_SQL: &str = "(id INTEGER PRIMARY KEY, a INTEGER NOT NULL, b, c INTEGER, \
+     n INTEGER COLLATE NOCASE, s TEXT COLLATE fold, UNIQUE (a, c), UNIQUE (b, a))";
+/// Every table: `TABLES`, then `KEYED`.
+const ALL_TABLES: [&str; 5] = {
+    let [t, u, w, search] = TABLES;
+    [t, u, w, search, KEYED]
+};
 /// The tables every statement reads: an INTEGER key, numeric columns, an
 /// untyped one (BLOB affinity) and one whose collation sqlive doesn't narrow
 /// by; and `SEARCH`, a contentful FTS5 table of the same columns, each
@@ -220,9 +232,10 @@ fn views() -> Vec<(&'static str, Query, Vec<&'static str>)> {
 }
 
 fn schema_sql() -> String {
-    let mut sql: Vec<String> = TABLES
+    let mut sql: Vec<String> = ALL_TABLES
         .iter()
         .map(|name| match *name {
+            KEYED => format!("CREATE TABLE {name}{KEYED_SQL}"),
             SEARCH => format!("CREATE VIRTUAL TABLE {name} USING fts5(id UNINDEXED, a, b, c, n)"),
             _ => format!("CREATE TABLE {name}{TABLE_SQL}"),
         })
@@ -246,6 +259,9 @@ fn schema_json() -> Json {
                     _ => json!("numeric"),
                 };
                 let mut column = json!({"name": name, "affinity": affinity});
+                if table == KEYED && *name == "a" {
+                    column["not_null"] = json!(true);
+                }
                 if *name == "s" {
                     column["collation"] = json!("fold");
                 }
@@ -255,7 +271,11 @@ fn schema_json() -> Json {
     };
     json!({
         // sqlive doesn't know `SEARCH`'s first column to hold its rowid.
-        "tables": TABLES.iter().map(|name| json!({"name": name, "columns": columns(name), "rowid": *name != SEARCH})).collect::<Vec<_>>(),
+        "tables": ALL_TABLES.iter().map(|name| {
+            // Each of `KEYED`'s unique keys, by its columns' places.
+            let keys = if *name == KEYED { json!([[1, 3], [2, 1]]) } else { json!([]) };
+            json!({"name": name, "columns": columns(name), "rowid": *name != SEARCH, "keys": keys})
+        }).collect::<Vec<_>>(),
         "views": views().into_iter().map(|(name, query, _)| json!({"name": name, "query": query.json()})).collect::<Vec<_>>(),
     })
 }
@@ -297,28 +317,43 @@ pub(super) fn insert(verb: &str, table: &str, id: usize, rng: &mut Rng) -> Strin
     )
 }
 
-/// A write of one to three statements, each to one table.
+/// A write of one to three statements, each to one of `TABLES`.
 pub(super) fn write(rng: &mut Rng) -> String {
+    write_to(rng, &TABLES)
+}
+
+/// A write of one to three statements, half of them to `KEYED`.
+fn keyed_write(rng: &mut Rng) -> String {
+    write_to(rng, &[KEYED, KEYED, KEYED, "t", "u", "w"])
+}
+
+/// A write of one to three statements, each to one of `tables`. A statement
+/// leaves a row that would break a constraint as it is.
+fn write_to(rng: &mut Rng, tables: &[&'static str]) -> String {
     let mut statements = Vec::new();
     for _ in 0..1 + rng.below(3) {
-        let table = pick(rng, &TABLES);
+        let table = pick(rng, tables);
         let id = rng.below(8);
         statements.push(match rng.below(9) {
             0 | 1 => insert("INSERT OR IGNORE", table, id, rng),
             2 | 3 => {
                 let column = pick(rng, &["a", "b", "n", "s"]);
                 if column == "s" && table != SEARCH {
-                    format!("UPDATE {table} SET s = {} WHERE id = {id}", text_value(value(rng)))
+                    let text = text_value(value(rng));
+                    format!("UPDATE OR IGNORE {table} SET s = {text} WHERE id = {id}")
                 } else {
                     let column = if column == "s" { "a" } else { column };
                     format!(
-                        "UPDATE {table} SET {column} = {} WHERE id = {id}",
+                        "UPDATE OR IGNORE {table} SET {column} = {} WHERE id = {id}",
                         sql_value(value(rng))
                     )
                 }
             }
-            4 => format!("UPDATE {table} SET c = {} WHERE id = {id}", rng.below(6)),
-            5 => format!("UPDATE {table} SET c = {} WHERE a = {}", rng.below(6), rng.below(4)),
+            4 => format!("UPDATE OR IGNORE {table} SET c = {} WHERE id = {id}", rng.below(6)),
+            5 => {
+                let (to, a) = (rng.below(6), rng.below(4));
+                format!("UPDATE OR IGNORE {table} SET c = {to} WHERE a = {a}")
+            }
             6 => {
                 let to = rng.below(8);
                 let rowid = if table == SEARCH { format!("rowid = {to}, ") } else { String::new() };
@@ -364,7 +399,7 @@ fn one_shot(db: &TestDatabase, sql: &str) -> Rows {
 /// Each table's rows, by id.
 fn snapshot(db: &TestDatabase) -> Json {
     let mut tables = serde_json::Map::new();
-    for name in TABLES {
+    for name in ALL_TABLES {
         tables.insert(
             name.to_owned(),
             json!(one_shot(
@@ -449,7 +484,7 @@ impl Mirror {
     /// Apply `write`, and the row changes of each of its statements in turn.
     fn apply(&self, write: &str) -> Vec<Json> {
         let mut changes = Vec::new();
-        let tables = TABLES.iter().filter(|table| **table != SEARCH);
+        let tables = ALL_TABLES.iter().filter(|table| **table != SEARCH);
         for statement in write.split("; ") {
             let before: Vec<_> = tables.clone().map(|table| self.rows(table)).collect();
             self.connection.execute_batch(statement).unwrap();
@@ -557,9 +592,11 @@ async fn run_case(
     let db = TestDatabase::open_with(&schema_sql(), options());
     register_nz(&db);
     let mut rows = Vec::new();
-    for table in TABLES {
+    for table in ALL_TABLES {
+        // `KEYED` leaves out a row that would break a constraint.
+        let verb = if table == KEYED { "INSERT OR IGNORE" } else { "INSERT" };
         for id in 0..6 {
-            rows.push(insert("INSERT", table, id, rng));
+            rows.push(insert(verb, table, id, rng));
         }
     }
     let mirror = Mirror::open();
@@ -815,4 +852,10 @@ async fn mixed_shapes_match_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn net_change_matches_lean() {
     differential_with("net change", net::statement, net::write).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn unique_order_matches_lean() {
+    differential_with("unique order", unique_order::statement, keyed_write).await;
 }

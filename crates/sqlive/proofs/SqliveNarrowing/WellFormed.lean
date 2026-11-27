@@ -12,13 +12,6 @@ for its query numbers, and the restriction for the outer items each query
 names (`Outer.lean`). -/
 namespace SqliveNarrowing
 
-/-- The queries core `k` reads: its derived items' and its subqueries. -/
-def Statement.nestedQueries (s : Statement) (k : Nat) : List Nat :=
-  (s.core k).items.filterMap (fun i =>
-    match (s.item i).kind with
-    | .derived q _ => some q
-    | .table _ => none) ++ (s.core k).subqueries
-
 /-- Whether derived query `q` is readable alone where the statement reads it:
 its arms sit in no other core, or the queries from some number up to `q`
 name nothing outside them, as the reader checks (`Json.closedSince`). -/
@@ -45,17 +38,6 @@ def Statement.readQueries (s : Statement) : List Nat :=
 /-- The cores the queries list as arms. -/
 def Statement.armCores (s : Statement) : List Nat :=
   (List.range s.queries.length).flatMap fun q => (s.query q).arms
-
-/-- The cores of query `q` and of the queries they read, `fuel` deep. -/
-def Statement.queryCores (s : Statement) : Nat → Nat → List Nat
-  | 0, _ => []
-  | f + 1, q => (s.query q).arms.flatMap fun k => k :: (s.nestedQueries k).flatMap (s.queryCores f)
-
-/-- The items query `q`, its subqueries and its derived items' queries name
-outside their own cores. -/
-def Statement.outerNames (s : Statement) (q : Nat) : List Nat :=
-  let cores := s.queryCores (s.queries.length + 1) q
-  (cores.flatMap fun k => (s.core k).refs.map (·.1)).filter fun j => !cores.contains (s.item j).core
 
 /-- The statement's own query sits in no core. -/
 def Statement.rootOutside (s : Statement) : Bool :=

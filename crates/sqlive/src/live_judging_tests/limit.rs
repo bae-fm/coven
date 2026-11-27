@@ -279,7 +279,10 @@ async fn a_window_ordered_across_a_join_ends_at_its_last_rows_values() {
             ("INSERT INTO albums VALUES (6,3,'a','')", false),
             ("INSERT INTO albums VALUES (7,2,'z','')", false),
             ("UPDATE albums SET note = 'x' WHERE id = 4", false),
-            ("UPDATE albums SET note = 'x' WHERE id = 3", true),
+            // Each album joins one artist, so the window depends only on the
+            // columns it names.
+            ("UPDATE albums SET note = 'x' WHERE id = 3", false),
+            ("UPDATE albums SET title = 'l' WHERE id = 3", true),
             // The window now ends at d's c.
             ("INSERT INTO albums VALUES (8,2,'c','')", true),
             ("UPDATE artists SET sort_key = 'e' WHERE id = 3", false),

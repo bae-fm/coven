@@ -48,6 +48,18 @@ impl Reads {
 /// What a use of the walk does at each SELECT, core and FROM clause, after
 /// the walk has read what it holds, with `scope` where the node is.
 pub(crate) trait Visit {
+    /// Before the walk reads what `core` holds: a SELECT inside it can name
+    /// its FROM items.
+    fn enter(&mut self, _scope: &Scope<'_>, _core: &OneSelect<'_>) -> rusqlite::Result<()> {
+        Ok(())
+    }
+
+    /// After the walk has read what the core it last entered holds.
+    fn leave(&mut self) {}
+
+    /// At a name that could be a column, in an expression.
+    fn name(&mut self, _expr: &Expr<'_>) {}
+
     /// At `select`, which reads `reads`: a subquery whose first row an
     /// expression takes when `first_row`.
     fn select(
@@ -278,6 +290,7 @@ impl<'c, V: Visit> Walk<'c, V> {
         order_by: &[SortedColumn<'_>],
     ) -> rusqlite::Result<Reads> {
         let mut reads = Reads::default();
+        self.visit.enter(&self.scope, core)?;
         match core {
             OneSelect::Values(rows) => {
                 for expr in rows.iter().flat_map(|row| row.iter()) {
@@ -314,6 +327,7 @@ impl<'c, V: Visit> Walk<'c, V> {
                 reads.extend(self.parts(&found)?);
             }
         }
+        self.visit.leave();
         self.visit.core(&self.scope, core, order_by, &reads)?;
         Ok(reads)
     }
@@ -394,7 +408,7 @@ impl<'c, V: Visit> Walk<'c, V> {
         }
     }
 
-    fn expr(&mut self, expr: &Expr<'_>) -> rusqlite::Result<Reads> {
+    pub(crate) fn expr(&mut self, expr: &Expr<'_>) -> rusqlite::Result<Reads> {
         let mut found = Vec::new();
         parts(expr, &mut found);
         self.parts(&found)
@@ -407,7 +421,8 @@ impl<'c, V: Visit> Walk<'c, V> {
                 Part::Select(select) => reads.extend(self.select(select, false)?),
                 Part::Subquery(select) => reads.extend(self.select(select, true)?),
                 Part::Table(name) => reads.extend(self.named(name)?),
-                Part::Name(_) | Part::Collation | Part::Function(..) | Part::Clock => {}
+                Part::Name(name) => self.visit.name(name),
+                Part::Collation | Part::Function(..) | Part::Clock => {}
             }
         }
         Ok(reads)

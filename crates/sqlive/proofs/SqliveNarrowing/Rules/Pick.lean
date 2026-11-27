@@ -1,4 +1,5 @@
 import SqliveNarrowing.Rules.Limit
+import SqliveNarrowing.Rules.TellsApart
 
 /-! Rule 7: the rows SQLite picks. A query that keeps some of its rows, by a
 LIMIT or an OFFSET or as a subquery whose first row a clause takes, returns
@@ -7,17 +8,18 @@ SQLite reads rows in the order of the plan it picks, which can follow an
 index on a column no clause names, so any of the rows can come first
 (`post_picks_any`). Such a query depends on every column of each table it
 reads (`Statement.picks`, `Statement.reads`, `picked_column_reruns`); its
-conditions still narrow which rows it depends on. A query whose ORDER BY sorts
-by the rowid of each of its tables, or that aggregates with no GROUP BY,
-returns the same rows in every order SQLite reads them in
+conditions still narrow which rows it depends on. A query whose ORDER BY,
+with the equalities of its conditions, tells its bindings apart
+(`Statement.tellsApart`, `tellsApart_separates`), or that aggregates with no
+GROUP BY, returns the same rows in every order SQLite reads them in
 (`fullyOrders_sound`), so it depends only on the columns its clauses name
 (`unreported_columns.rs`).
 
 A core that aggregates picks rows too: a result column outside every GROUP BY
 term takes its value from one binding of its group, which the order SQLite
 reads them in decides (`bare_picks_any`), and `group_concat` joins its values in the order SQLite
-reads them (`concat_follows_order`), unless the call's own ORDER BY sorts by
-the rowid of each of the core's tables, and `max` keeps the value it reads
+reads them (`concat_follows_order`), unless the call's own ORDER BY tells the
+core's bindings apart, and `max` keeps the value it reads
 first among values that compare equal (`max_keeps_first`), unless its
 argument is a column whose equal values are the same, and a GROUP BY term
 keeps the value it reads first among values that compare equal
@@ -28,8 +30,8 @@ DISTINCT core that returns anything but such columns follows the order SQLite
 reads its rows in (`Statement.distinctFollowsOrder`), and so does a compound
 whose arms do (`Statement.compoundFollowsOrder`). A window numbers the
 bindings its ORDER BY doesn't tell apart in that order too
-(`rowNumber_follows_order`), unless the ORDER BY sorts by the rowid of each
-of the core's tables. Such a core depends on every column of each table it
+(`rowNumber_follows_order`), unless the ORDER BY tells the core's bindings
+apart. Such a core depends on every column of each table it
 reads (`Statement.followsOrder`); any other core gives the same rows in every
 order (`orderFree_rows_perm`). -/
 namespace SqliveNarrowing.Pick
@@ -186,163 +188,34 @@ theorem post_perm {q : Query} {rows rows' : List Row} (hperm : rows'.Perm rows)
       (q.orderBy.map fun (p, _) => b.cell p)) =
       (fun a b => keyLe (q.orderBy.map (·.2)) (orderKey q a) (orderKey q b)) from rfl, hsorted]
 
-/-! The rows of a query whose ORDER BY sorts by each table's rowid differ in
-their sort key. -/
-
-/-- A database whose tables hold each row's rowid in its first column, never
-NULL and different in each row, as each slot holds the row of its rowid
-(`Json.readDb`). -/
-def _root_.SqliveNarrowing.Db.Keyed (db : Db) : Prop :=
-  ∀ t, ∀ r ∈ db.rows t, r.cell 0 ≠ none ∧ ∀ r' ∈ db.rows t, r.cell 0 = r'.cell 0 → r = r'
-
-/-- A binding that joining `is` onto `bs` gives is a binding of `bs` with
-each item of `is` bound to one of its rows, or to none. -/
-theorem mem_joinItems {s : Statement} {c : Core} {rowsOf : Nat → List Row}
-    {subs : Bind → Subs} :
-    ∀ (is : List Nat) (bs : List Bind) (b' : Bind), b' ∈ joinItems s c rowsOf subs is bs →
-      ∃ b ∈ bs, (∀ j, j ∉ is → b' j = b j) ∧
-        ∀ i ∈ is, b' i = none ∨ ∃ r ∈ rowsOf i, b' i = some r
-  | [], bs, b', h => ⟨b', h, fun _ _ => rfl, fun _ hi => by simp at hi⟩
-  | i :: is, bs, b', h => by
-    simp only [joinItems] at h
-    obtain ⟨b'', hb'', hout, hin⟩ := mem_joinItems is _ b' h
-    obtain ⟨b, hb, hset⟩ := List.mem_flatMap.mp hb''
-    have hrow : b'' = b.set i none ∨ ∃ r ∈ rowsOf i, b'' = b.set i (some r) := by
-      split at hset
-      · simp only [List.mem_singleton] at hset
-        exact Or.inl hset
-      · obtain ⟨r, hr, hsome⟩ := List.mem_filterMap.mp hset
-        split at hsome
-        · exact Or.inr ⟨r, hr, (Option.some.inj hsome).symm⟩
-        · cases hsome
-    refine ⟨b, hb, ?_, ?_⟩
-    · intro j hj
-      simp only [List.mem_cons, not_or] at hj
-      rw [hout j hj.2]
-      rcases hrow with rfl | ⟨r, _, rfl⟩ <;> simp [Bind.set, hj.1]
-    · intro i' hi'
-      by_cases hmem : i' ∈ is
-      · exact hin i' hmem
-      · have hi : i' = i := by simpa [hmem] using hi'
-        subst hi
-        rw [hout i' hmem]
-        rcases hrow with rfl | ⟨r, hr, rfl⟩
-        · simp [Bind.set]
-        · exact Or.inr ⟨r, hr, by simp [Bind.set]⟩
-
-/-- A core that aggregates with no GROUP BY makes one row of all its
-bindings. -/
-theorem one_row {c : Core} (hagg : c.aggregated = true) (hgroup : c.groupBy.isEmpty = true)
-    {subs : Bind → Subs} {kept : List Bind} {r : Row} (hr : r ∈ c.rows subs kept) :
-    r = c.output.map (OutCol.aggregate subs kept) := by
-  unfold Core.rows at hr
-  simp only [hagg, hgroup, ↓reduceIte, List.map_cons, List.map_nil, List.mem_singleton] at hr
-  exact hr
-
-/-- Two bindings that core `k` keeps, each of whose items is a table, that
-agree on each item's rowid, on a database that keeps each row's rowid in its
-first column, are the same binding. -/
-theorem bindings_eq_of_rowids {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
-    (htables : ∀ i ∈ (s.core k).items, (s.table? i).isSome = true)
-    {eval : Bind → Nat → List Row} {outer ba bb : Bind}
-    (hba : ba ∈ coreBindings s db eval outer k) (hbb : bb ∈ coreBindings s db eval outer k)
-    (hrowid : ∀ i ∈ (s.core k).items, cellOf (ba i) 0 = cellOf (bb i) 0) : ba = bb := by
-  simp only [coreBindings, List.mem_filter] at hba hbb
-  obtain ⟨a0, ha0, haout, hain⟩ := mem_joinItems _ _ _ hba.1
-  obtain ⟨b0, hb0, hbout, hbin⟩ := mem_joinItems _ _ _ hbb.1
-  simp only [List.mem_singleton] at ha0 hb0
-  subst ha0 hb0
-  funext j
-  by_cases hj : j ∈ (s.core k).items
-  · obtain ⟨t, ht⟩ := Option.isSome_iff_exists.mp (htables j hj)
-    have hkind : (s.item j).kind = .table t := by
-      unfold Statement.table? at ht
-      split at ht
-      · rename_i t' hk; cases ht; exact hk
-      · cases ht
-    have hcell := hrowid j hj
-    have hrows : ∀ (bnd : Bind) (r : Row), bnd j = some r →
-        (bnd j = none ∨ ∃ r' ∈ (match (s.item j).kind with
-          | .table t => db.rows t
-          | .derived q _ => eval (if (s.core k).parent.isNone then Bind.empty else outer) q),
-          bnd j = some r') → r ∈ db.rows t := by
-      intro bnd r hr hin
-      rw [hkind] at hin
-      rcases hin with h | ⟨r', hr', h⟩
-      · rw [hr] at h; cases h
-      · rw [hr] at h; cases h; exact hr'
-    cases hja : ba j with
-    | none =>
-      cases hjb : bb j with
-      | none => rfl
-      | some rb =>
-        have hrb := hrows bb rb hjb (hbin j hj)
-        rw [hja, hjb] at hcell
-        exact absurd hcell.symm (hdb t rb hrb).1
-    | some ra =>
-      have hra := hrows ba ra hja (hain j hj)
-      cases hjb : bb j with
-      | none =>
-        rw [hja, hjb] at hcell
-        exact absurd hcell (hdb t ra hra).1
-      | some rb =>
-        have hrb := hrows bb rb hjb (hbin j hj)
-        rw [hja, hjb] at hcell
-        rw [(hdb t ra hra).2 rb hrb hcell]
-  · rw [haout j hj, hbout j hj]
-
-/-- Two bindings that core `k` keeps, on which expressions that sort by the
-rowid of each of its items take the same values, are the same binding. -/
-theorem sortsByRowids_separates {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
-    {sorted : List Expr} (hsorts : s.sortsByRowids k sorted = true)
-    {eval : Bind → Nat → List Row} {outer ba bb : Bind}
-    (hba : ba ∈ coreBindings s db eval outer k) (hbb : bb ∈ coreBindings s db eval outer k)
-    {sa sb : Subs} (hkey : ∀ e ∈ sorted, e.eval ba sa = e.eval bb sb) : ba = bb := by
-  unfold Statement.sortsByRowids at hsorts
-  simp only [List.all_eq_true, Bool.and_eq_true, List.contains_iff_mem] at hsorts
-  apply bindings_eq_of_rowids hdb (fun i hi => (hsorts i hi).1.1) hba hbb
-  intro i hi
-  simpa [Expr.eval] using hkey (.col i 0) (hsorts i hi).2
-
-/-- Two rows of a query that returns one row, or whose ORDER BY sorts by the
-rowid of each of its tables on a database that keeps each row's rowid in its
-first column, differ in their sort key. -/
-theorem fullyOrders_separates {s : Statement} {db : Db} (hdb : db.Keyed) {q k : Nat}
-    (hfull : s.fullyOrders q = true) (harms : (s.query q).arms = [k])
-    {eval : Bind → Nat → List Row} {outer : Bind} :
-    ∀ a ∈ (s.core k).rows eval (coreBindings s db eval outer k),
-    ∀ b ∈ (s.core k).rows eval (coreBindings s db eval outer k),
+/-- Two rows of a query that returns one row, or whose ORDER BY tells its
+bindings apart, on a database that keeps each row's rowid in its first column
+and holds its declared constraints, differ in their sort key. -/
+theorem fullyOrders_separates {s : Statement} (hwf : s.wellFormed = true) {db : Db}
+    (hdb : db.Keyed) (hcons : db.Constrained s) {q k g : Nat}
+    (hfull : s.fullyOrders q = true) (harms : (s.query q).arms = [k]) {outer : Bind} :
+    ∀ a ∈ (s.core k).rows (evalQuery s db g) (coreBindings s db (evalQuery s db g) outer k),
+    ∀ b ∈ (s.core k).rows (evalQuery s db g) (coreBindings s db (evalQuery s db g) outer k),
       keyCompare ((s.query q).orderBy.map (·.2)) (orderKey (s.query q) a)
         (orderKey (s.query q) b) = .eq → a = b := by
+  have hk : k ∈ (s.query q).arms := by rw [harms]; exact List.mem_singleton_self _
   unfold Statement.fullyOrders at hfull
   rw [harms] at hfull
   simp only [Bool.or_eq_true, Bool.and_eq_true, Bool.not_eq_true'] at hfull
-  rcases hfull with ⟨hagg, hgroup⟩ | ⟨⟨⟨hagg, hwin⟩, _⟩, hsorts⟩
+  rcases hfull with ⟨hagg, hgroup⟩ | ⟨⟨⟨hagg, hwin⟩, _⟩, htells⟩
   · intro a ha b hb _
     exact (one_row hagg hgroup ha).trans (one_row hagg hgroup hb).symm
   intro a ha b hb hkey
   obtain ⟨ba, hba, ja, rfl⟩ := mem_rows_plain hagg ha
   obtain ⟨bb, hbb, jb, rfl⟩ := mem_rows_plain hagg hb
-  -- With no window, a row's values don't depend on its position.
-  have hplain : ∀ (b : Bind) (j j' : Nat), (s.core k).output.map
-      (OutCol.plain eval (coreBindings s db eval outer k) b j) =
-      (s.core k).output.map (OutCol.plain eval (coreBindings s db eval outer k) b j') := by
-    intro b j j'
-    apply List.map_congr_left
-    intro o ho
-    cases o with
-    | rowNumber =>
-      unfold Core.windowed at hwin
-      rw [List.any_eq_false] at hwin
-      exact absurd rfl (hwin _ ho)
-    | _ => rfl
+  let eval := evalQuery s db g
   have hex := keyCompare_eq_exact (s.query q).orderBy
     (fun p => Row.cell ((s.core k).output.map
       (OutCol.plain eval (coreBindings s db eval outer k) ba ja)) p)
     (fun p => Row.cell ((s.core k).output.map
       (OutCol.plain eval (coreBindings s db eval outer k) bb jb)) p) hkey
   have hsame : ba = bb := by
-    apply sortsByRowids_separates hdb hsorts hba hbb (sa := eval ba) (sb := eval bb)
+    apply tellsApart_separates hwf hdb hcons hk htells hba hbb (sa := eval ba) (sb := eval bb)
     intro e he
     simp only [Statement.orderExprs, List.mem_filterMap] at he
     obtain ⟨⟨p, d⟩, hpd, hp⟩ := he
@@ -357,21 +230,25 @@ theorem fullyOrders_separates {s : Statement} {db : Db} (hdb : db.Keyed) {q k : 
         subst hp
         have hc := hcell hd
         simpa [Row.cell, List.getElem?_map, hout, OutCol.plain] using hc
-  rw [hsame, hplain bb ja jb]
+  rw [hsame]
+  exact plain_any_place hwin _ _ _ _ _
 
 /-- Rule 7's theorem for a query that tells its rows apart: a one-arm query
-that aggregates with no GROUP BY, or whose ORDER BY sorts by the rowid of each
-of its tables, returns the same rows from any order of its core's rows, as
-SQLite's plan reads them, on a database that keeps each row's rowid in its
-first column. -/
-theorem fullyOrders_sound {s : Statement} {db : Db} (hdb : db.Keyed) {q k : Nat}
+that aggregates with no GROUP BY, or whose ORDER BY tells its bindings apart,
+returns the same rows from any order of its core's rows, as SQLite's plan
+reads them, on a database that keeps each row's rowid in its first column and
+holds its declared constraints. -/
+theorem fullyOrders_sound {s : Statement} (hwf : s.wellFormed = true) {db : Db}
+    (hdb : db.Keyed) (hcons : db.Constrained s) {q k g : Nat}
     (hfull : s.fullyOrders q = true) (harms : (s.query q).arms = [k])
-    {eval : Bind → Nat → List Row} {outer : Bind} {rows' : List Row}
-    (hperm : rows'.Perm ((s.core k).result eval (coreBindings s db eval outer k))) :
+    {outer : Bind} {rows' : List Row}
+    (hperm : rows'.Perm ((s.core k).result (evalQuery s db g)
+      (coreBindings s db (evalQuery s db g) outer k))) :
     (s.query q).post rows' =
-      (s.query q).post ((s.core k).result eval (coreBindings s db eval outer k)) :=
+      (s.query q).post ((s.core k).result (evalQuery s db g)
+        (coreBindings s db (evalQuery s db g) outer k)) :=
   post_perm hperm fun a ha b hb =>
-    fullyOrders_separates hdb hfull harms a (mem_result ha) b (mem_result hb)
+    fullyOrders_separates hwf hdb hcons hfull harms a (mem_result ha) b (mem_result hb)
 
 /-! A core that aggregates takes a plain result column's value from one
 binding of each group, which the order SQLite reads them in decides, and joins `group_concat`'s values in the
@@ -611,10 +488,15 @@ theorem perm_eraseDups {α : Type} [BEq α] [LawfulBEq α] {l l' : List α} (h :
 /-- The rows of a core whose rows don't follow the order SQLite reads its
 bindings in, from any order of the bindings it keeps, are its rows from the
 order the model reads them in, in some order. -/
-theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
-    (hfree : s.followsOrder k = false) {eval : Bind → Nat → List Row} {outer : Bind}
-    {kept' : List Bind} (hperm : kept'.Perm (coreBindings s db eval outer k)) :
-    ((s.core k).rows eval kept').Perm ((s.core k).rows eval (coreBindings s db eval outer k)) := by
+theorem rows_perm_of_orderFree {s : Statement} (hwf : s.wellFormed = true) {db : Db}
+    (hdb : db.Keyed) (hcons : db.Constrained s) {q k g : Nat} (hk : k ∈ (s.query q).arms)
+    (hfree : s.followsOrder k = false) {outer : Bind} {kept' : List Bind}
+    (hperm : kept'.Perm (coreBindings s db (evalQuery s db g) outer k)) :
+    ((s.core k).rows (evalQuery s db g) kept').Perm
+      ((s.core k).rows (evalQuery s db g) (coreBindings s db (evalQuery s db g) outer k)) := by
+  let eval := evalQuery s db g
+  show ((s.core k).rows eval kept').Perm ((s.core k).rows eval (coreBindings s db eval outer k))
+  change kept'.Perm (coreBindings s db eval outer k) at hperm
   let c := s.core k
   let kept := coreBindings s db eval outer k
   let key := fun b => c.groupBy.map (Expr.eval b (eval b))
@@ -623,7 +505,7 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
   | false =>
     -- Each window sorts by the rowid of each of the core's tables.
     have hsorts : ∀ partition orderBy, OutCol.rowNumber partition orderBy ∈ c.output →
-        s.sortsByRowids k (exactTerms orderBy) = true := by
+        s.tellsApart k (exactTerms orderBy) = true := by
       intro partition orderBy ho
       have hagg' : (s.core k).aggregated = false := hagg
       unfold Statement.followsOrder at hfree
@@ -642,7 +524,8 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
           simpa [windowKey, List.map_map, Function.comp_def] using h.2
         have hex := keyCompare_eq_exact orderBy (fun e => e.eval b' (eval b'))
           (fun e => e.eval b (eval b)) h2
-        exact sortsByRowids_separates hdb (hsorts _ _ ho) hb' hb (sa := eval b') (sb := eval b)
+        exact tellsApart_separates hwf hdb hcons hk (hsorts _ _ ho) hb' hb (sa := eval b')
+          (sb := eval b)
           (fun e he => by
             obtain ⟨⟨e', d⟩, hmem, rfl⟩ := List.mem_map.mp he
             obtain ⟨hmem, hd⟩ := List.mem_filter.mp hmem
@@ -682,7 +565,7 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
     exact (occurrences_perm hperm).map G
   | true =>
   have hfree' : ∀ o ∈ c.output, (∀ e, o = .expr e → e.bare c.groupBy = false) ∧
-      (∀ e orderBy, o = .concat e orderBy → s.sortsByRowids k (exactTerms orderBy) = true) := by
+      (∀ e orderBy, o = .concat e orderBy → s.tellsApart k (exactTerms orderBy) = true) := by
     intro o ho
     have hagg' : (s.core k).aggregated = true := hagg
     unfold Statement.followsOrder at hfree
@@ -727,8 +610,8 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
         intro a ha b hb hkey
         have hex := keyCompare_eq_exact orderBy (fun e => e.eval a (eval a))
           (fun e => e.eval b (eval b)) hkey
-        apply sortsByRowids_separates hdb (hsorts e orderBy rfl) (hin a (hg.mem_iff.mp ha))
-          (hin b (hg.mem_iff.mp hb)) (sa := eval a) (sb := eval b)
+        apply tellsApart_separates hwf hdb hcons hk (hsorts e orderBy rfl)
+          (hin a (hg.mem_iff.mp ha)) (hin b (hg.mem_iff.mp hb)) (sa := eval a) (sb := eval b)
         intro e' he'
         obtain ⟨⟨e'', d⟩, hed, rfl⟩ := List.mem_map.mp he'
         obtain ⟨hmem, hd⟩ := List.mem_filter.mp hed
@@ -780,14 +663,16 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
 /-- A core whose rows don't follow the order SQLite reads its bindings in
 gives, from any order of the bindings it keeps, the rows it gives from the
 order the model reads them in, in some order, on a database that keeps each
-row's rowid in its first column. With DISTINCT it keeps the first of each set
-of equal rows, and the model's equal rows are the same row. -/
-theorem orderFree_rows_perm {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
-    (hfree : s.followsOrder k = false) {eval : Bind → Nat → List Row} {outer : Bind}
-    {kept' : List Bind} (hperm : kept'.Perm (coreBindings s db eval outer k)) :
-    ((s.core k).result eval kept').Perm
-      ((s.core k).result eval (coreBindings s db eval outer k)) := by
-  have h := rows_perm_of_orderFree hdb hfree hperm
+row's rowid in its first column and holds its declared constraints. With
+DISTINCT it keeps the first of each set of equal rows, and the model's equal
+rows are the same row. -/
+theorem orderFree_rows_perm {s : Statement} (hwf : s.wellFormed = true) {db : Db}
+    (hdb : db.Keyed) (hcons : db.Constrained s) {q k g : Nat} (hk : k ∈ (s.query q).arms)
+    (hfree : s.followsOrder k = false) {outer : Bind} {kept' : List Bind}
+    (hperm : kept'.Perm (coreBindings s db (evalQuery s db g) outer k)) :
+    ((s.core k).result (evalQuery s db g) kept').Perm
+      ((s.core k).result (evalQuery s db g) (coreBindings s db (evalQuery s db g) outer k)) := by
+  have h := rows_perm_of_orderFree hwf hdb hcons hk hfree hperm
   unfold Core.result
   split
   · exact perm_eraseDups h

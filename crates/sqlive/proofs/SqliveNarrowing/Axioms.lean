@@ -34,6 +34,8 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Limit.runBound_passes
 #print axioms SqliveNarrowing.Limit.joined_passes
 #print axioms SqliveNarrowing.Pick.post_picks_any
+#print axioms SqliveNarrowing.Pick.tellsApart_separates
+#print axioms SqliveNarrowing.Pick.oneRow_sound
 #print axioms SqliveNarrowing.Pick.fullyOrders_sound
 #print axioms SqliveNarrowing.Pick.bare_picks_any
 #print axioms SqliveNarrowing.Pick.concat_follows_order

@@ -5,6 +5,7 @@
 //! takes the compiler of `sqlive-compose`, which reads these, and the live
 //! queries that run on them stay in `sqlive`.
 
+mod comparison;
 mod derived;
 mod from_item;
 mod from_star;
@@ -31,7 +32,9 @@ mod source_order;
 pub mod sql;
 mod sql_value;
 mod sql_walk;
+mod table_keys;
 mod token_scan;
+mod told_apart;
 mod unreported_columns;
 mod whole_view_names;
 

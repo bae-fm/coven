@@ -567,6 +567,7 @@ proofs() {
         step "Rust / Lean / SQLite live query narrowing"
         BUILDS_CARGO_LEAN="$(runner SQLIVE_NARROWING_LEAN sqlive narrowingRunner)" exact_ignored sqlive --all-features -- --nocapture \
             connection::live_judging::tests::narrowing_model::term_matches_lean \
+            connection::live_judging::tests::narrowing_model::unique_order_matches_lean \
             connection::live_judging::tests::narrowing_model::edge_matches_lean \
             connection::live_judging::tests::narrowing_model::row_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::row_member_matches_lean \

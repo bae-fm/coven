@@ -1,4 +1,4 @@
-import SqliveNarrowing.Plan
+import SqliveNarrowing.Tells
 
 /-! Whether a write reruns a live query, given each table's scope
 (`read_set.rs`): some row change of a table the statement reads inserts or
@@ -38,25 +38,10 @@ def lookupRows (s : Statement) (db : Db) (i : Nat) : List Row :=
   | .table t => db.rows t
   | .derived q _ => evalQuery s db (s.queries.length + 1) Bind.empty q
 
-/-- The columns a result column names. -/
-def OutCol.refs (o : OutCol) : List (Nat × Nat) := o.exprs.flatMap Expr.refs
-
-/-- The columns a core's clauses name. -/
-def Core.refs (c : Core) : List (Nat × Nat) :=
-  c.conds.flatMap (·.1.refs) ++ c.output.flatMap OutCol.refs ++ c.groupBy.flatMap Expr.refs
-
 /-- The expressions of the ORDER BY terms `orderBy` whose collation ties no two
 different values. -/
 def exactTerms (orderBy : List (Expr × Dir)) : List Expr :=
   (orderBy.filter (·.2.exact)).map (·.1)
-
-/-- Whether the expressions `sorted` sort the bindings of core `k` by the
-rowid of each of its items, each a table, its first column (`Json.readDb`):
-two bindings of such a core differ in some item's row, and so in its rowid
-(`Pick.bindings_eq_of_rowids`). -/
-def Statement.sortsByRowids (s : Statement) (k : Nat) (sorted : List Expr) : Bool :=
-  (s.core k).items.all fun i =>
-    (s.table? i).isSome && (s.item i).rowidFirst && sorted.contains (.col i 0)
 
 /-- The result columns' expressions that query `q`'s ORDER BY sorts by in a
 collation that ties no two different values. -/
@@ -69,14 +54,15 @@ def Statement.orderExprs (s : Statement) (q k : Nat) : List Expr :=
 /-- Whether query `q`'s ORDER BY tells every two of its rows apart. The query
 is one SELECT, and either it aggregates with no GROUP BY, so it returns one
 row, or it neither groups, aggregates, calls a window function nor is
-DISTINCT, as sqlive refuses, and its ORDER BY sorts by the rowid of each of
-its items as result columns (`Pick.fullyOrders_separates`). -/
+DISTINCT, as sqlive refuses, and the result columns its ORDER BY sorts by,
+with the equalities of its conditions, tell its bindings apart
+(`Statement.tellsApart`, `Pick.fullyOrders_separates`). -/
 def Statement.fullyOrders (s : Statement) (q : Nat) : Bool :=
   match (s.query q).arms with
   | [k] =>
     let c := s.core k
     (c.aggregated && c.groupBy.isEmpty) ||
-      (!c.aggregated && !c.windowed && !c.distinct && s.sortsByRowids k (s.orderExprs q k))
+      (!c.aggregated && !c.windowed && !c.distinct && s.tellsApart k (s.orderExprs q k))
   | _ => false
 
 /-- Whether `e` can take a different value in each binding of a group of a
@@ -99,15 +85,6 @@ def Expr.groupTerms (groupBy : List Expr) (e : Expr) : List Expr :=
     | .isNull e => e.groupTerms groupBy
     | .col .. | .lit _ | .sub _ => []
 
-/-- Whether two values of `e` in bindings of core `k` that compare equal are
-the same value: `e` is a column of one of the core's tables that sqlive gives
-an affinity other than BLOB, so it compares by BINARY and holds no integer
-and real that compare equal, as an untyped column can hold `1` and `1.0`. -/
-def Statement.comparesExactly (s : Statement) (k : Nat) : Expr → Bool
-  | .col i c => (s.core k).items.contains i && (s.table? i).isSome &&
-      (s.affinity i c).any (· != .blob)
-  | _ => false
-
 /-- Whether core `k`'s rows follow the order SQLite reads its bindings in: it
 aggregates, and a result column takes its value from one binding of a group,
 which that order decides, as a column outside every GROUP BY term
@@ -125,9 +102,9 @@ def Statement.followsOrder (s : Statement) (k : Nat) : Bool :=
   c.output.any fun
     | .expr e => c.aggregated &&
         (e.bare c.groupBy || (e.groupTerms c.groupBy).any (!s.comparesExactly k ·))
-    | .concat _ orderBy => !s.sortsByRowids k (exactTerms orderBy)
+    | .concat _ orderBy => !s.tellsApart k (exactTerms orderBy)
     | .max e => !s.comparesExactly k e
-    | .rowNumber _ orderBy => c.aggregated || !s.sortsByRowids k (exactTerms orderBy)
+    | .rowNumber _ orderBy => c.aggregated || !s.tellsApart k (exactTerms orderBy)
     | .count => false
 
 /-- Whether core `k`'s rows follow the order SQLite reads its rows in: it is

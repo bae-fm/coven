@@ -11,20 +11,21 @@
 //! query keeps some of its rows by a LIMIT or an OFFSET, or as a subquery whose
 //! first row an expression takes, and SQLite keeps the rows it reads first, in
 //! the order of the plan it chooses: an index on a column the statement never
-//! names can decide which rows those are. An ORDER BY that sorts by the rowid
-//! of each of the query's tables tells every two of its rows apart, so such a
-//! query depends only on the columns it names, as does one that aggregates
-//! with no GROUP BY, which returns one row. The tables a query reads are
-//! those of its FROM, of the views and CTEs it reads, and of every query inside
-//! it. The model states the rule as `Statement.picks` and proves it in
+//! names can decide which rows those are. An ORDER BY that, with the
+//! equalities of the query's conditions, tells every two of its rows apart
+//! (`told_apart.rs`) leaves that order no choice, so such a query depends only
+//! on the columns it names, as does one that aggregates with no GROUP BY,
+//! which returns one row. The tables a query reads are those of its FROM, of
+//! the views and CTEs it reads, and of every query inside it. The model states
+//! the rule as `Statement.picks` and proves it in
 //! `crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean`.
 //!
 //! A core that aggregates or calls a window function picks rows too, so every
 //! column of each table it reads counts as read when its rows follow the
 //! order SQLite reads its rows in. A window function numbers or reads the
 //! rows of a partition in that order among those its ORDER BY sorts the
-//! same, unless that ORDER BY sorts by the rowid of each of the core's
-//! tables in a core that doesn't aggregate. A result column, the HAVING or
+//! same, unless that ORDER BY tells the core's rows apart in a core that
+//! doesn't aggregate. A result column, the HAVING or
 //! an ORDER BY term that names a column
 //! outside every aggregate call and GROUP BY term takes the column's value
 //! from one row of its group, which that order decides. A GROUP BY term, and
@@ -33,8 +34,8 @@
 //! term follows that order, and so does a call of min or max, unless the term
 //! or the argument is a column whose equal values are the same, and any other
 //! aggregate but count reads its values in that order, as `group_concat`
-//! joins them, unless the call's own ORDER BY sorts by the rowid of each of
-//! the core's tables. The model states the rule as `Statement.followsOrder`.
+//! joins them, unless the call's own ORDER BY tells the core's rows apart. The
+//! model states the rule as `Statement.followsOrder`.
 //!
 //! DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that
 //! compare equal, which the order SQLite reads them in decides, so every
@@ -53,17 +54,17 @@
 use std::collections::BTreeSet;
 
 use crate::read_set::ColumnSet;
-use crate::schema_objects::{declared_columns, MAIN_TABLES, ROWID_NAMES};
-use crate::scope_term::Affinity;
+use crate::schema_objects::{declared_columns, MAIN_TABLES};
 use crate::select_syntax::{
     aggregate_call, order_term, parts, parts_outside, window_call, AggregateCall, Functions,
     OrderTerm, Part,
 };
 use crate::sql_walk::{Reads, Scope, Visit, Walk, Within};
+use crate::told_apart::{Item, OuterItems, Telling};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
-    As, CompoundOperator, Distinctness, Expr, FromClause, JoinConstraint, JoinOperator, JoinType,
-    Name, OneSelect, Over, ResultColumn, Select, SelectTable, SortedColumn, WindowDef,
+    CompoundOperator, Distinctness, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name,
+    OneSelect, Over, ResultColumn, Select, SelectTable, SortedColumn, WindowDef,
 };
 
 /// The columns a statement's rows depend on beyond those the authorizer
@@ -113,7 +114,12 @@ pub(crate) fn unreported_columns(
     functions: &Functions,
     select: &Select<'_>,
 ) -> rusqlite::Result<UnreportedColumns> {
-    let found = Found { connection, functions, picked: Vec::new(), found: Vec::new() };
+    let found = Found {
+        telling: Telling { connection, functions },
+        outer: Vec::new(),
+        picked: Vec::new(),
+        found: Vec::new(),
+    };
     let mut walk = Walk::new(connection, found);
     let reads = walk.select(select, false)?;
     if let Some(why) = walk.scope.unread() {
@@ -145,10 +151,10 @@ pub(crate) fn unreported_columns(
 /// with the CTE or view whose SQL holds it: what the walk finds there
 /// counts only when the statement runs it.
 struct Found<'c> {
-    connection: &'c Connection,
-    /// The connection's functions, which tell an aggregate call from a
-    /// scalar one.
-    functions: &'c Functions,
+    telling: Telling<'c>,
+    /// The names of each SELECT's FROM items around where the walk is, the
+    /// innermost last.
+    outer: Vec<OuterItems>,
     /// What each query whose rows SQLite picks reads, and where it is.
     picked: Vec<(Option<Within>, Reads)>,
     /// The columns USING and NATURAL joins compare, and where each join is.
@@ -156,6 +162,20 @@ struct Found<'c> {
 }
 
 impl Visit for Found<'_> {
+    fn enter(&mut self, scope: &Scope<'_>, core: &OneSelect<'_>) -> rusqlite::Result<()> {
+        let from = match core {
+            OneSelect::Select { from, .. } => from.as_ref(),
+            OneSelect::Values(_) => None,
+        };
+        let items = self.telling.items(scope, &self.outer, from)?;
+        self.outer.push(Telling::outer_items(items));
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.outer.pop();
+    }
+
     /// Note `select` when SQLite picks its rows.
     fn select(
         &mut self,
@@ -164,7 +184,8 @@ impl Visit for Found<'_> {
         first_row: bool,
         reads: &Reads,
     ) -> rusqlite::Result<()> {
-        if (select.limit.is_some() || first_row) && !self.fully_orders(scope, select)?
+        if (select.limit.is_some() || first_row)
+            && !self.telling.query_tells_apart(scope, &self.outer, select)?
             || self.compound_follows_order(scope, select)?
         {
             self.picked.push((scope.within(), reads.clone()));
@@ -292,63 +313,6 @@ impl Found<'_> {
         Ok(Some(names.iter().any(|found| found == column)))
     }
 
-    /// Whether `select`'s ORDER BY tells every two of its rows apart. The
-    /// query is one SELECT, and either it calls an aggregate function in its
-    /// result columns with no GROUP BY and no window, so it returns one row,
-    /// or it has no DISTINCT, neither groups nor calls an aggregate or window
-    /// function, each of its FROM items is a table of the main schema, and
-    /// its ORDER BY sorts by the rowid of each one.
-    fn fully_orders(&self, scope: &Scope<'_>, select: &Select<'_>) -> rusqlite::Result<bool> {
-        if select.body.compounds.is_some() {
-            return Ok(false);
-        }
-        let OneSelect::Select {
-            distinctness,
-            columns,
-            from,
-            group_by: None,
-            having,
-            window_clause: None,
-            ..
-        } = &select.body.select
-        else {
-            return Ok(false);
-        };
-        let order_by = select.order_by.unwrap_or_default();
-        let mut returned = Vec::new();
-        for column in columns.iter() {
-            if let ResultColumn::Expr(expr, _) = column {
-                parts(expr, &mut returned);
-            }
-        }
-        let mut sorted = Vec::new();
-        for term in order_by {
-            parts(&term.expr, &mut sorted);
-        }
-        let windowed = returned.iter().chain(&sorted).any(Part::windowed);
-        if !windowed && returned.iter().any(|part| part.aggregates(self.functions)) {
-            return Ok(true);
-        }
-        if windowed
-            || distinctness.is_some()
-            || having.is_some()
-            || sorted.iter().any(|part| part.aggregates(self.functions))
-        {
-            return Ok(false);
-        }
-        let Some(items) = self.table_items(scope, from.as_ref())? else { return Ok(false) };
-        let mut sorted = Vec::new();
-        for term in order_by {
-            sorted.push(match order_term(columns, &term.expr) {
-                OrderTerm::Position(expr) | OrderTerm::Alias(_, expr) | OrderTerm::Expr(expr) => {
-                    self.item_column(&items, expr)?
-                }
-                OrderTerm::Unknown => None,
-            });
-        }
-        self.sorts_by_rowids(&items, &sorted)
-    }
-
     /// Whether `core` is DISTINCT, which keeps one of each set of rows that
     /// compare equal, the one SQLite reads first, and one of its result
     /// columns can hold values that compare equal and differ: it is no column
@@ -389,11 +353,12 @@ impl Found<'_> {
     }
 
     /// Whether each result column of `core` is a column whose equal values
-    /// are the same (`compares_exactly`) of one of its FROM items, each a
-    /// table.
+    /// are the same (`compares_exactly`) of a table of its FROM.
     fn returns_exactly(&self, scope: &Scope<'_>, core: &OneSelect<'_>) -> rusqlite::Result<bool> {
         let OneSelect::Select { columns, from, .. } = core else { return Ok(false) };
-        let Some(items) = self.table_items(scope, from.as_ref())? else { return Ok(false) };
+        let Some(items) = self.telling.items(scope, &self.outer, from.as_ref())? else {
+            return Ok(false);
+        };
         for column in columns.iter() {
             let ResultColumn::Expr(expr, _) = column else { return Ok(false) };
             if !self.compares_exactly(&items, expr)? {
@@ -403,58 +368,19 @@ impl Found<'_> {
         Ok(true)
     }
 
-    /// Each FROM item of `from`, by the name the statement qualifies its
-    /// columns by, with its table, when each is a table of the main schema.
-    fn table_items<'a>(
-        &self,
-        scope: &Scope<'_>,
-        from: Option<&'a FromClause<'a>>,
-    ) -> rusqlite::Result<Option<Vec<(&'a str, String)>>> {
-        let mut items = Vec::new();
-        let listed = from.into_iter().flat_map(|from| {
-            from.select.into_iter().chain(from.joins.iter().flatten().map(|join| &join.table))
-        });
-        for item in listed {
-            let SelectTable::Table(name, alias, _) = item else { return Ok(None) };
-            // A CTE's name names no table (`main`).
-            let Some(table) = scope.object(name, &["table", "virtual"])? else { return Ok(None) };
-            let qualifier = match alias {
-                Some(As::As(alias) | As::Elided(alias)) => alias.0,
-                None => name.name.0,
-            };
-            items.push((qualifier, table));
+    /// Whether the expression `expr` names a column among `items` whose equal
+    /// values are the same.
+    fn compares_exactly(&self, items: &[Item<'_>], expr: &Expr<'_>) -> rusqlite::Result<bool> {
+        match Telling::own_column(items, &self.outer, expr) {
+            Some((item, column)) => self.telling.compares_exactly(items, item, &column),
+            None => Ok(false),
         }
-        Ok(Some(items))
-    }
-
-    /// Whether a sort by `sorted`, the FROM item and column each term
-    /// names among `items` (`item_column`), sorts by the rowid of each of
-    /// `items`, and so tells every two of their rows apart.
-    fn sorts_by_rowids(
-        &self,
-        items: &[(&str, String)],
-        sorted: &[Option<(usize, String)>],
-    ) -> rusqlite::Result<bool> {
-        for (position, (_, table)) in items.iter().enumerate() {
-            let mut found = false;
-            for (item, column) in sorted.iter().flatten() {
-                if *item == position && self.is_rowid(table, column)? {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     /// Whether the rows of a core follow the order SQLite reads its rows in.
     /// A window function numbers or reads the rows of a partition in that
     /// order among those its ORDER BY sorts the same, unless the ORDER BY
-    /// sorts by the rowid of each of the core's FROM items, each a table, in
-    /// a core that doesn't aggregate. In a core that aggregates, a result
+    /// tells the core's rows apart, in a core that doesn't aggregate. In a core that aggregates, a result
     /// column, the HAVING or a term of the
     /// ORDER BY `order_by` takes its value from one row of each group, which
     /// that order decides, when it names a column, or holds a subquery that
@@ -465,8 +391,8 @@ impl Found<'_> {
     /// call of min or max, unless the term or the argument is a column whose
     /// equal values are the same (`compares_exactly`). Any other aggregate but count reads
     /// its values in that order too, as `group_concat` joins them and a sum
-    /// of reals adds them, unless its own ORDER BY sorts by the rowid of each
-    /// of the core's FROM items, each a table.
+    /// of reals adds them, unless its own ORDER BY tells the core's rows
+    /// apart.
     fn follows_order(
         &self,
         scope: &Scope<'_>,
@@ -506,7 +432,7 @@ impl Found<'_> {
             .collect();
         let inside = |expr: &Expr<'_>| {
             grouped.contains(&crate::sql::unparenthesized(expr))
-                || aggregate_call(expr, self.functions).is_some()
+                || aggregate_call(expr, self.telling.functions).is_some()
                 || window_call(expr).is_some()
         };
         let mut outside = Vec::new();
@@ -518,7 +444,7 @@ impl Found<'_> {
             // core aggregate too.
             let mut found = Vec::new();
             parts(expr, &mut found);
-            aggregated |= found.iter().any(|part| part.aggregates(self.functions));
+            aggregated |= found.iter().any(|part| part.aggregates(self.telling.functions));
         }
         // The GROUP BY terms a result column, the HAVING or the ORDER BY
         // shows.
@@ -528,9 +454,11 @@ impl Found<'_> {
             .filter(|expr| grouped.contains(&crate::sql::unparenthesized(expr)))
             .collect();
         let windows: Vec<&Over<'_>> = stopped.iter().filter_map(|expr| window_call(expr)).collect();
-        let calls: Vec<AggregateCall<'_>> =
-            stopped.into_iter().filter_map(|expr| aggregate_call(expr, self.functions)).collect();
-        let items = self.table_items(scope, from.as_ref())?;
+        let calls: Vec<AggregateCall<'_>> = stopped
+            .into_iter()
+            .filter_map(|expr| aggregate_call(expr, self.telling.functions))
+            .collect();
+        let items = self.telling.items(scope, &self.outer, from.as_ref())?;
         // A window numbers or reads the rows of each partition in the order
         // its ORDER BY sorts them, and among those that sort the same in the
         // order SQLite reads them; in a core that aggregates, it reads the
@@ -538,14 +466,8 @@ impl Found<'_> {
         let definitions = window_clause.unwrap_or_default();
         for over in windows {
             let order = window_order(over, definitions);
-            let (false, Some(order), Some(items)) = (aggregated, order, &items) else {
-                return Ok(true);
-            };
-            let mut sorted = Vec::new();
-            for term in order {
-                sorted.push(self.item_column(items, &term.expr)?);
-            }
-            if !self.sorts_by_rowids(items, &sorted)? {
+            let (false, Some(order)) = (aggregated, order) else { return Ok(true) };
+            if !self.telling.core_tells_apart(scope, &self.outer, core, order)? {
                 return Ok(true);
             }
         }
@@ -580,107 +502,16 @@ impl Found<'_> {
                 ("min" | "max", ..) => return Ok(true),
                 _ => {}
             }
-            let Some(items) = &items else { return Ok(true) };
-            let mut sorted = Vec::new();
-            for term in call.order {
-                sorted.push(self.item_column(items, &term.expr)?);
-            }
-            if !self.sorts_by_rowids(items, &sorted)? {
+            if !self.telling.core_tells_apart(scope, &self.outer, core, call.order)? {
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    /// Whether two values that the column `expr` names among `items` holds
-    /// that compare equal are the same value: a rowid, or a stored column of
-    /// BINARY collation whose declared type gives it an affinity other than
-    /// BLOB, which stores an integer and a real that compare equal as one of
-    /// them. An untyped column can hold both `1` and `1.0`, and a NOCASE one
-    /// both `'Abc'` and `'ABC'`.
-    fn compares_exactly(
-        &self,
-        items: &[(&str, String)],
-        expr: &Expr<'_>,
-    ) -> rusqlite::Result<bool> {
-        let Some((item, column)) = self.item_column(items, expr)? else { return Ok(false) };
-        let table = &items[item].1;
-        if self.is_rowid(table, &column)? {
-            return Ok(true);
-        }
-        let columns =
-            crate::from_item::columns(self.connection, self.functions, items[item].0, table, true)?;
-        Ok(matches!(columns.affinity(&column), Some(Affinity::Numeric | Affinity::Text)))
-    }
-
-    /// The FROM item, by its place in `items`, and the column, lowercase,
-    /// that the name `expr` names, as SQLite resolves it among `items`.
-    fn item_column(
-        &self,
-        items: &[(&str, String)],
-        expr: &Expr<'_>,
-    ) -> rusqlite::Result<Option<(usize, String)>> {
-        let (qualifier, name) = match crate::sql::unparenthesized(expr) {
-            Expr::Id(name) => (None, name.0),
-            Expr::Qualified(table, name) => (Some(table), name.0),
-            Expr::DoublyQualified(db, table, name) if *db == "main" => (Some(table), name.0),
-            _ => return Ok(None),
-        };
-        let column = crate::sql::name(name).to_ascii_lowercase();
-        if let Some(qualifier) = qualifier {
-            let found = items.iter().position(|(named, _)| Name(named) == *qualifier);
-            return Ok(found.map(|item| (item, column)));
-        }
-        let mut having = Vec::new();
-        for (item, (_, table)) in items.iter().enumerate() {
-            if self.columns(table)?.contains(&column) {
-                having.push(item);
-            }
-        }
-        Ok(match having[..] {
-            [item] => Some((item, column)),
-            // A rowid's name that no column has names the rowid of the one
-            // table.
-            [] if items.len() == 1 && ROWID_NAMES.contains(&column.as_str()) => Some((0, column)),
-            _ => None,
-        })
-    }
-
-    /// Whether `column`, lowercase, names the rowid of `table`, a table of
-    /// the main schema: its INTEGER PRIMARY KEY column, or `rowid`, `oid` or
-    /// `_rowid_` where no column has that name. A WITHOUT ROWID table has no
-    /// rowid.
-    fn is_rowid(&self, table: &str, column: &str) -> rusqlite::Result<bool> {
-        let without_rowid: bool = self
-            .connection
-            .prepare_cached("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?1")?
-            .query_row([table], |row| row.get(0))?;
-        if without_rowid {
-            return Ok(false);
-        }
-        if ROWID_NAMES.contains(&column) {
-            return Ok(!self.columns(table)?.iter().any(|found| found == column));
-        }
-        // A rowid table's single primary key column holds the rowid exactly
-        // when SQLite keeps no index for the key: `INTEGER PRIMARY KEY`, but
-        // not `INT PRIMARY KEY` or `INTEGER PRIMARY KEY DESC`.
-        let keys = self
-            .connection
-            .prepare_cached("SELECT name FROM pragma_table_info(?1,'main') WHERE pk > 0")?
-            .query_map([table], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let indexed: bool = self
-            .connection
-            .prepare_cached(
-                "SELECT EXISTS (SELECT 1 FROM pragma_index_list(?1,'main') WHERE origin='pk')",
-            )?
-            .query_row([table], |row| row.get(0))?;
-        Ok(!indexed && matches!(&keys[..], [key] if key.eq_ignore_ascii_case(column)))
-    }
-
     /// A table's columns, lowercase.
     fn columns(&self, table: &str) -> rusqlite::Result<Vec<String>> {
-        Ok(declared_columns(self.connection, table)?
+        Ok(declared_columns(self.telling.connection, table)?
             .into_iter()
             .map(|column| column.name.to_ascii_lowercase())
             .collect())

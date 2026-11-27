@@ -20,6 +20,12 @@ structure Schema where
   /-- The tables whose first column sqlive doesn't know to hold their rowid,
   as a contentful FTS5 table's (`Item.rowidFirst`). -/
   unkeyed : List String := []
+  /-- The columns, by position, of each table's unique indexes, in the order
+  of `tables`. -/
+  keys : List (List (List Nat)) := []
+  /-- Each table's columns declared NOT NULL, by position, in the order of
+  `tables`. -/
+  notNull : List (List Nat) := []
 
 /-- What resolves a name to an item: its alias and its columns' names. -/
 structure Named where
@@ -268,6 +274,12 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
   let rowidFirst := match field j "table" with
     | some (.str name) => !schema.unkeyed.contains name
     | _ => true
+  let table : Option Nat := match field j "table" with
+    | some (.str name) => schema.tables.findIdx? fun t => t.1 == name
+    | _ => none
+  let keys := (table.bind (schema.keys[·]?)).getD []
+  let notNull := (table.bind (schema.notNull[·]?)).getD []
+  let written := (field j "query").isSome
   let (kind, columns, names, readable, collations) ← match field j "table", field j "view", field j "cte", field j "query" with
     | some (.str name), _, _, _ =>
       match schema.tables.findIdx? (·.1 == name) with
@@ -303,7 +315,7 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
   set { b with
     items := b.items.push
       { core := k, kind, left, columns, collated := collations.map Option.isSome, readable,
-        rowidFirst }
+        rowidFirst, keys, notNull, written }
     named := b.named.push { alias, columns := names, collations } }
   pure b.items.size
 
@@ -452,7 +464,12 @@ def readSchema (j : Json) : Except String Schema := do
     | some (.bool false) => pure (some (← str t "name"))
     | _ => pure none
   let views ← (list j "views").mapM fun v => do pure ((← str v "name"), (← v.getObjVal? "query"))
-  pure { tables, collations, views, unkeyed }
+  let keys ← (list j "tables").mapM fun t => (list t "keys").mapM fun key => do
+    (← key.getArr?).toList.mapM Json.getNat?
+  let notNull ← (list j "tables").mapM fun t => do
+    pure ((← (list t "columns").zipIdx.filterM fun (c, _) =>
+      pure ((field c "not_null").bind (·.getBool?.toOption) |>.getD false)).map (·.2))
+  pure { tables, collations, views, unkeyed, keys, notNull }
 
 /-- The statement the tree `j` holds. -/
 def readStatement (schema : Schema) (j : Json) : Except String Statement := do

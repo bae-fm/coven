@@ -39,5 +39,7 @@ mod subquery;
 mod subquery_window;
 #[path = "live_judging_tests/term.rs"]
 mod term;
+#[path = "live_judging_tests/unique_order.rs"]
+mod unique_order;
 #[path = "live_judging_tests/virtual_table.rs"]
 mod virtual_table;

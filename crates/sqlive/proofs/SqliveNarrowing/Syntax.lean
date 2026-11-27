@@ -93,6 +93,15 @@ structure Item where
   INTEGER PRIMARY KEY does: a contentful FTS5 table's first column is a
   column of its own, whatever values it holds (`Virtual`). -/
   rowidFirst : Bool := true
+  /-- The columns of each unique index of its table over plain columns, with
+  no WHERE, each column in the collation the index compares it by, BINARY or
+  the column's own. -/
+  keys : List (List Nat) := []
+  /-- Its table's columns declared NOT NULL. -/
+  notNull : List Nat := []
+  /-- Whether it is a FROM subquery written where it is read, not a CTE or one
+  of the app's views. -/
+  written : Bool := false
   deriving Repr, Inhabited
 
 /-- Where a condition is written: the WHERE or an inner join's ON, or the ON
