@@ -685,7 +685,11 @@ pub(crate) fn columns(
     let mut generated = Vec::new();
     for DeclaredColumn { name: column, declared, hidden, .. } in schema.columns(table)? {
         let hidden = *hidden;
-        let collation = if ordinary {
+        let collation = if schema.is_host_table(table) {
+            // A host table's values compare as BINARY, and SQLite keeps no
+            // metadata of a virtual table's columns.
+            Some("BINARY".to_owned())
+        } else if ordinary {
             let (_, collation, _, _, _) =
                 connection.column_metadata(Some("main"), table, column.as_str())?;
             collation.map(|collation| collation.to_string_lossy().into_owned())

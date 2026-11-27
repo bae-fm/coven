@@ -175,7 +175,7 @@ impl NetRows {
     /// or each column that changed, for each row that doesn't end as it
     /// began. A column whose value the transaction didn't keep counts as
     /// changed once an operation changed it.
-    fn finish(self, into: &mut Vec<RowChange>) {
+    pub(crate) fn finish(self, into: &mut Vec<RowChange>) {
         for row in self.rows {
             let whole = |rows| RowChange { table: row.table.clone(), column: String::new(), rows };
             match (row.before, row.after) {

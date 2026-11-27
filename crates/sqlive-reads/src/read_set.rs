@@ -31,6 +31,7 @@ pub struct TableRead {
 }
 
 /// One change a commit made to a table's column or row.
+#[derive(Clone)]
 pub struct RowChange {
     /// The table's name.
     pub table: String,

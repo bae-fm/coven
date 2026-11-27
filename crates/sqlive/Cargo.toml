@@ -21,7 +21,7 @@ profiles = ["rusqlite/trace"]
 sqlive-reads.workspace = true
 panic-as-error.workspace = true
 futures-lite = { workspace = true, features = ["std"] }
-rusqlite = { workspace = true, features = ["session", "hooks", "preupdate_hook", "functions", "limits", "blob", "collation", "column_metadata"] }
+rusqlite = { workspace = true, features = ["session", "hooks", "preupdate_hook", "functions", "limits", "blob", "collation", "column_metadata", "vtab"] }
 sqlite3-parser.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }

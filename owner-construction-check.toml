@@ -433,6 +433,9 @@ task_types = [
     "coven_database::write_batch::WriteBatch",
     "coven_database::read::SqlReadContext",
     "coven_database::read::Read",
+    # One search of a host table's rows, which SQLite closes before it
+    # disconnects the table.
+    "sqlive::host_tables::module::Cursor",
     "sqlive::connection::transaction_capture::ChangeCapture",
     "sqlive::connection::stream_capture::StreamCapture",
     "sqlive::connection::Observing",
@@ -1364,6 +1367,16 @@ tables = [
 # What a connection's setup registers on it, which `HostSql::open` makes as
 # it opens the connection.
 "crates/sqlive/src/connection_setup.rs" = ["Setup::new"]
+# The tables a host keeps in memory beside one database, which the database's
+# connections and the host share (§4). `judge_host_changes` attaches its
+# connection to them as the judge of their changes.
+"crates/sqlive/src/host_tables.rs" = ["HostTables::new"]
+# A database's judge of its host tables' changes, on a connection of its own,
+# which `Database::open_with` attaches to them.
+"crates/sqlive/src/host_judge.rs" = ["HostAttachment::attach"]
+# Each connection's virtual tables over the host tables' rows, which SQLite
+# connects and opens cursors on.
+"crates/sqlive/src/host_table_module.rs" = ["register", "HostTable::connect", "HostTable::open"]
 # One order per database, which its connections share, and each value a
 # connection's setup registers, which its transactions take (§4).
 "crates/sqlive/src/snapshot_values.rs" = ["CommitOrder::new", "SnapshotValues::value"]
@@ -1372,7 +1385,7 @@ tables = [
 # opens the connection (§4). A connection opened outside a database makes its
 # own map.
 "crates/sqlive/src/app_statements.rs" = ["ScopePlans::new", "AppStatements::new"]
-"crates/sqlive/src/connection.rs" = ["HostSql::open", "HostSql::open_sharing"]
+"crates/sqlive/src/connection.rs" = ["HostSql::open", "HostSql::open_sharing", "HostSql::judge_host_changes"]
 # Coven's policy for a connection's authorizer, whose state the connection
 # shares with the authorizer: one judging for the handle that holds the
 # writer lock, one for a read-only handle. Opening a connection makes its

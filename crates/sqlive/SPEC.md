@@ -333,6 +333,53 @@ When a value changes, the host calls `Handle::changed_without_write` with the
 view columns that show it, and each live query that read one of those columns
 runs again, as if a write had changed what it read.
 
+### Tables the host keeps in memory
+
+Some facts last only as long as the host's process and have a key, such as the
+files it is sending, each by its id. The host keeps such facts in a host table
+instead of a table of the database. It declares each one with a `CREATE TABLE`
+that has a primary key, in `HostTables::new`, and registers the `HostTables` on
+each connection of one database with `Setup::host_tables`. Every connection of
+that database then reads each table by its name, in statements, views and
+triggers, as a virtual table sqlive serves. SQL can't write it, `sqlite_schema`
+doesn't list it, and its rows come out in the key's order. Its key's columns
+hold no NULL and compare as BINARY.
+
+The host changes rows by their keys with `HostTables::change`: `put` adds a row
+in place of any row with its key, and `delete` removes the row with a key. One
+call's changes reach readers all at once. Changing rows writes nothing to the
+database, and a process starts with every host table empty. A read sees the
+rows as they stood when its snapshot was fixed, as it sees the database's
+tables (above, for values).
+
+A live query narrows a host table as it narrows a table of the database
+(sections 4 to 8), by its keys and other columns. A transfer screen reads one
+album's uploads with `SELECT s.sent FROM tracks AS t JOIN sending AS s ON
+s.track = t.id WHERE t.album = ?1`, where `sending` is a host table keyed by
+track: sending another album's track doesn't rerun it. A host table of one row,
+such as the device's network, which a query joins with no condition, reruns
+every query that reads a column that changes, and no others.
+
+sqlive judges a change to host rows as it judges a write that changes only
+those rows (section 7), in one order with the database's writes. A change waits
+while a write judges its own changes, commits and reports them. It doesn't wait
+while the write runs its statements. sqlive runs the change's lookups on a
+connection of its own, which reads the database's latest commit beside the rows
+as the change left them. A write's statements read the host rows as they were
+when it began, but its lookups read them as they are when it judges. The write
+commits after every change made until then. A screen lists each upload with its
+note. Say a write adds a track's first note while that track's upload starts,
+and the screen runs again before the write commits. The note joins the screen
+only through the upload's row. If the write's lookups read the rows as it
+began, they would find no upload, and the screen would never show the note. A
+lookup that fails, or a transaction for the lookups that fails to begin, leaves
+the change unjudged: each live query judges it counting every join's value as
+matched, so the change fails nothing.
+
+A build tool that reads a schema which declares a host table as an ordinary
+table, as sqlive-compose does, gets the scope plan the running database gets,
+since sqlive plans the two alike.
+
 ### Views read whole
 
 The host names, in `Options::whole_views`, the views and tables a live query

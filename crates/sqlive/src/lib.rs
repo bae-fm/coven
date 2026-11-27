@@ -32,6 +32,8 @@ mod database;
 mod database_changes;
 mod error;
 mod handle;
+mod host_judge;
+mod host_tables;
 mod kept_counts;
 mod live_query;
 #[cfg(any(test, feature = "test-utils"))]
@@ -69,6 +71,7 @@ pub use error::{EngineFailure, Error, RollbackJoin};
 pub use handle::{
     AttemptCommits, CommitState, CommitSubscription, Handle, Judged, UnrecordedTables,
 };
+pub use host_tables::{HostRows, HostTables};
 pub use live_query::{
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, Run,

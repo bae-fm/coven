@@ -18,23 +18,39 @@ pub struct Setup<'a, P: Policy> {
     /// The values the host's functions read as each transaction's snapshot
     /// saw them.
     values: RefCell<SnapshotValues>,
+    /// Where the setup keeps the tables whose rows the host keeps in memory,
+    /// once registered, for its connection to read.
+    host_tables: &'a RefCell<Option<crate::HostTables>>,
 }
 
 impl<'a, P: Policy> Setup<'a, P> {
     pub(crate) fn new(
         connection: &'a rusqlite::Connection,
         authorization: &SqlAuthorization<P>,
+        host_tables: &'a RefCell<Option<crate::HostTables>>,
     ) -> Self {
         Self {
             connection,
             functions: authorization.functions(),
             values: RefCell::new(SnapshotValues::new()),
+            host_tables,
         }
     }
 
     /// The values registered, which the connection's transactions take.
     pub(crate) fn into_snapshot_values(self) -> SnapshotValues {
         self.values.into_inner()
+    }
+
+    /// Read `tables`, whose rows the host keeps in memory, on this
+    /// connection, each as a virtual table of its name (`host_tables.rs`).
+    /// Every connection to one database registers the same tables, once.
+    pub fn host_tables(&self, tables: &crate::HostTables) -> rusqlite::Result<()> {
+        let taken = self.snapshot_value(tables.now());
+        crate::host_tables::register(tables, self.connection, &taken)?;
+        let previous = self.host_tables.replace(Some(tables.clone()));
+        assert!(previous.is_none(), "a connection registers its host tables once");
+        Ok(())
     }
 
     /// Run `register` on `connection`, a connection a test opened itself,
@@ -49,7 +65,7 @@ impl<'a, P: Policy> Setup<'a, P> {
             std::sync::Arc::new(crate::WholeViews::new([])),
             std::sync::Arc::new(policy),
         );
-        register(&Setup::new(connection, &authorization))
+        register(&Setup::new(connection, &authorization, &RefCell::new(None)))
     }
 
     /// Register `function` as `name`. rusqlite turns a function's panic into

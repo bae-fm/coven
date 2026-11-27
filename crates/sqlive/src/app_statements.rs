@@ -470,11 +470,21 @@ impl<P: Policy> HostSql<P> {
                 Err(differs) => Err(failed(crate::Error::CompiledSchemaDiffers(differs))),
             }
         };
-        let read = || self.authorization.unrecorded(|| MainSchema::read(&self.connection));
+        let read = || self.authorization.unrecorded(|| self.read_schema());
         match cookie {
             Some(cookie) => self.app_statements.plans.compiled(cookie, statement.plan, check, read),
             None => check(&read()?),
         }
+    }
+
+    /// The main schema as this connection's plans look it up, its host
+    /// tables among its tables.
+    fn read_schema(&self) -> rusqlite::Result<MainSchema> {
+        let mut schema = MainSchema::read(&self.connection)?;
+        if let Some(tables) = &self.host_tables {
+            schema.add_host_tables(tables.schema());
+        }
+        Ok(schema)
     }
 
     /// Build `statement`'s plan against the schema `cookie` counts, or, with
@@ -487,10 +497,9 @@ impl<P: Policy> HostSql<P> {
     ) -> rusqlite::Result<Arc<ScopePlan>> {
         let started = Instant::now();
         let plan = self.authorization.unrecorded(|| {
-            let read = || MainSchema::read(&self.connection);
             let schema = match cookie {
-                Some(cookie) => self.app_statements.plans.schema(cookie, read)?,
-                None => Arc::new(read()?),
+                Some(cookie) => self.app_statements.plans.schema(cookie, || self.read_schema())?,
+                None => Arc::new(self.read_schema()?),
             };
             let whole = self.authorization.whole_views();
             ScopePlan::build(&self.connection, &schema, sql, statement, whole)

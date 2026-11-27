@@ -62,6 +62,37 @@ impl<P: Policy> HostSql<P> {
         Ok(judged)
     }
 
+    /// Judge `changes` to the host tables, which no write made, for every
+    /// waiting live query, in a read transaction of this connection, and
+    /// report them. A transaction or lookup that fails leaves the changes
+    /// unjudged: each live query then judges them counting every join's value
+    /// as matched, which runs it again where a lookup might not have. A panic
+    /// fails the handle.
+    pub(crate) fn report_host_changes(&self, changes: Vec<crate::RowChange>) {
+        let handle = self.handle.as_ref().expect("a judge's connection serves a handle");
+        let told = panic_as_error::caught_sync(
+            "tell the live queries of the host's changes",
+            || {
+                let judged: Result<crate::Judged, PolicyError<P>> = self.read_transaction(|| {
+                    let _reading = self.authorization.reading();
+                    Ok(handle
+                        .judge(changes.clone(), None, &mut |judging| self.ask_judged(judging))?)
+                });
+                let judged = judged.unwrap_or_else(|error| {
+                tracing::warn!(
+                    %error,
+                    "judging a change to the host tables failed, so it counts every join as matched",
+                );
+                crate::Judged::unjudged(changes)
+            });
+                handle.commit(judged, None);
+            },
+        );
+        if let Err(bug) = told {
+            handle.fail_with_bug(bug);
+        }
+    }
+
     /// Answer one question about a changed row, read in this connection's
     /// transaction, a write's own or a live query's run, as sqlive's own
     /// SQL, without recording its reads. A question reads what a statement

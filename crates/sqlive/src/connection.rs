@@ -46,8 +46,10 @@ pub use schema_cookie::CookieScope;
 use transaction_capture::ChangeCapture;
 use write_transaction::WriteTransaction;
 
+use crate::host_judge::HostAttachment;
 use std::collections::BTreeSet;
 use std::path::Path;
+
 use std::sync::Arc;
 
 use rusqlite::{fallible_iterator::FallibleIterator, Batch, Connection, OpenFlags, Params, Row};
@@ -113,6 +115,9 @@ pub struct HostSql<P: Policy> {
     /// The host's values that this connection's functions read as each
     /// transaction's snapshot saw them (`snapshot_values.rs`).
     snapshot_values: crate::snapshot_values::SnapshotValues,
+    /// The tables whose rows the host keeps in memory, which each of this
+    /// connection's transactions takes among its values (`host_tables.rs`).
+    host_tables: Option<crate::HostTables>,
     /// Orders this connection's commits against the snapshots of the reads
     /// beside it: the database's connections share it.
     commit_order: Arc<crate::snapshot_values::CommitOrder>,
@@ -215,9 +220,11 @@ impl<P: Policy> HostSql<P> {
         // SQLite parse and plan it again on its next use, once per row of a
         // commit's lookups.
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG, true)?;
-        let registered = Setup::new(&connection, &authorization);
+        let host_tables = std::cell::RefCell::new(None);
+        let registered = Setup::new(&connection, &authorization, &host_tables);
         setup(&registered, &policy)?;
         let snapshot_values = registered.into_snapshot_values();
+        let host_tables = host_tables.into_inner();
         connection.authorizer(Some(authorization.callback()))?;
         let lookups = live_judging::LookupLimit::install(&mut connection)?;
         let db = Self {
@@ -239,6 +246,7 @@ impl<P: Policy> HostSql<P> {
             statistics: None,
             streaming: std::cell::Cell::new(false),
             snapshot_values,
+            host_tables,
             commit_order: Arc::new(crate::snapshot_values::CommitOrder::new()),
             #[cfg(any(test, feature = "test-utils"))]
             commit_points: std::cell::RefCell::new(None),
@@ -730,6 +738,18 @@ impl<P: Policy> HostSql<P> {
     /// other connections to its database share.
     pub(crate) fn share_commit_order(&mut self, order: Arc<crate::snapshot_values::CommitOrder>) {
         self.commit_order = order;
+    }
+
+    /// Whether the connection's setup registered host tables.
+    pub(crate) fn reads_host_tables(&self) -> bool {
+        self.host_tables.is_some()
+    }
+
+    /// Judge the changes to the host tables the connection's setup
+    /// registered on this connection, which serves its database's handle.
+    pub(crate) fn judge_host_changes(self) -> HostAttachment<P> {
+        let tables = self.host_tables.clone().expect("the connection reads host tables");
+        HostAttachment::attach(tables, self)
     }
 
     /// Serve an open handle once opening succeeds (SPEC.md section 1).

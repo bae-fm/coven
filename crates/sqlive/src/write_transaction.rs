@@ -121,6 +121,13 @@ impl<'a, P: Policy> WriteTransaction<'a, P> {
             None => outcome,
         };
         let result = outcome.and_then(|(result, changes)| {
+            // No change to the host tables comes between this write's
+            // judging, its commit and its report (`host_tables.rs`). The
+            // write's statements read the rows as it began; its lookups read
+            // them as they are now, since the write commits after every
+            // change made so far.
+            let _held = database.host_tables.as_ref().map(crate::HostTables::hold);
+            database.snapshot_values.take();
             let judged = match &database.handle {
                 Some(handle) => Some(database.judge(handle, changes.finish())?),
                 None => None,

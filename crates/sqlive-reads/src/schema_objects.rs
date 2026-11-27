@@ -53,6 +53,7 @@ pub struct MainSchema {
 }
 
 /// One table or view of the main schema.
+#[derive(Clone)]
 struct MainObject {
     /// Its name as the schema stores it.
     stored: String,
@@ -64,21 +65,29 @@ struct MainObject {
     columns: Result<Vec<DeclaredColumn>, Unlisted>,
 }
 
+#[derive(Clone)]
 enum ObjectKind {
     View,
     Table(MainTable),
 }
 
 /// What the schema holds of a table beyond what it holds of a view.
+#[derive(Clone)]
 struct MainTable {
     form: TableForm,
     without_rowid: bool,
     indexes: Vec<DeclaredIndex>,
 }
 
-/// A table's type, as `pragma_table_list` gives it.
+/// A table's type, as `pragma_table_list` gives it, or a table whose rows
+/// the host keeps in memory.
+#[derive(Clone)]
 enum TableForm {
     Ordinary,
+    /// A table the host declares and keeps the rows of in memory, which
+    /// SQLite reads through a virtual table of its name and `sqlite_schema`
+    /// doesn't list.
+    Host,
     /// A table that holds a virtual table's rows.
     Shadow,
     Virtual {
@@ -88,12 +97,14 @@ enum TableForm {
 }
 
 /// SQLite's error for a table or view whose columns it can't list.
+#[derive(Clone)]
 struct Unlisted {
     error: ffi::Error,
     message: Option<String>,
 }
 
 /// One column of a main schema table or view, as SQLite declares it.
+#[derive(Clone)]
 pub(crate) struct DeclaredColumn {
     pub(crate) name: String,
     pub(crate) declared: String,
@@ -103,6 +114,7 @@ pub(crate) struct DeclaredColumn {
 }
 
 /// One index of a main schema table.
+#[derive(Clone)]
 pub(crate) struct DeclaredIndex {
     /// Whether SQLite made it for the table's primary key.
     pub(crate) primary_key: bool,
@@ -168,6 +180,55 @@ impl MainSchema {
         Ok(Self { objects, main_tables })
     }
 
+    /// The tables `declarations` declare, each one a CREATE TABLE, whose
+    /// rows a host keeps in memory (SPEC.md section 3). The planner reads
+    /// them as it reads the main schema's ordinary tables.
+    pub fn of_host_tables(declarations: &[&str]) -> rusqlite::Result<Self> {
+        let connection = Connection::open_in_memory()?;
+        for declaration in declarations {
+            connection.execute_batch(declaration)?;
+        }
+        let mut schema = Self::read(&connection)?;
+        for object in schema.objects.values_mut() {
+            if let ObjectKind::Table(table) = &mut object.kind {
+                table.form = TableForm::Host;
+            }
+        }
+        // SQLite's own table of the schema is the scratch database's.
+        schema.objects.retain(|name, _| !name.starts_with("sqlite_"));
+        Ok(schema)
+    }
+
+    /// Add `host`'s tables (`of_host_tables`) to the schema.
+    pub fn add_host_tables(&mut self, host: &Self) {
+        self.objects
+            .extend(host.objects.iter().map(|(name, object)| (name.clone(), object.clone())));
+        self.main_tables.extend(host.main_tables.iter().cloned());
+    }
+
+    /// Each host table's name, as declared, with its columns' names,
+    /// declared types and whether the primary key holds them, in order.
+    pub fn host_table_columns(&self, name: &str) -> Option<Vec<(&str, &str, bool)>> {
+        let object = self.named(name)?;
+        let columns = object.columns.as_ref().ok()?;
+        Some(
+            columns
+                .iter()
+                .map(|column| (column.name.as_str(), column.declared.as_str(), column.primary_key))
+                .collect(),
+        )
+    }
+
+    /// The name, as declared, of every table `of_host_tables` read.
+    pub fn host_table_names(&self) -> impl Iterator<Item = &str> {
+        self.objects.values().filter_map(|object| match &object.kind {
+            ObjectKind::Table(MainTable { form: TableForm::Host, .. }) => {
+                Some(object.stored.as_str())
+            }
+            _ => None,
+        })
+    }
+
     /// The table or view named `name`, in any ASCII letter case.
     fn named(&self, name: &str) -> Option<&MainObject> {
         self.objects.get(&name.to_ascii_lowercase())
@@ -183,7 +244,8 @@ impl MainSchema {
         let kind = match &object.kind {
             ObjectKind::View => "view",
             ObjectKind::Table(table) => match table.form {
-                TableForm::Ordinary => "table",
+                // A build declares a host's table as an ordinary one.
+                TableForm::Ordinary | TableForm::Host => "table",
                 TableForm::Virtual { contentful: true } => "FTS5 table",
                 TableForm::Virtual { contentful: false } => "virtual table",
                 TableForm::Shadow => "shadow table",
@@ -248,7 +310,7 @@ impl<'s> SchemaLookups<'s> {
         let kind = match &object.kind {
             ObjectKind::View => "view",
             ObjectKind::Table(table) => match table.form {
-                TableForm::Ordinary => "table",
+                TableForm::Ordinary | TableForm::Host => "table",
                 TableForm::Virtual { contentful: true } => "virtual",
                 TableForm::Virtual { contentful: false } | TableForm::Shadow => return None,
             },
@@ -259,6 +321,13 @@ impl<'s> SchemaLookups<'s> {
     /// Every table of the main schema but SQLite's own (`MAIN_TABLES`).
     pub(crate) fn tables(&self) -> impl Iterator<Item = &'s str> {
         self.schema.main_tables.iter().map(String::as_str)
+    }
+
+    /// Whether the host keeps the rows of the table `name` in memory.
+    pub(crate) fn is_host_table(&self, name: &str) -> bool {
+        self.named(name).is_some_and(|object| {
+            matches!(&object.kind, ObjectKind::Table(MainTable { form: TableForm::Host, .. }))
+        })
     }
 
     /// Whether the schema holds a table or view named `name`.

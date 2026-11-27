@@ -9,6 +9,7 @@ mod read_pool;
 use crate::authorization::{Policy, PolicyError};
 use crate::connection::HostSql;
 use crate::connection_setup::Setup;
+use crate::host_judge::HostAttachment;
 use crate::planner_statistics::PlannerStatistics;
 use crate::upkeep::UpkeepThread;
 use crate::wal_checkpoints::WalCheckpointer;
@@ -61,6 +62,9 @@ pub struct Database<P: Policy> {
     readers: read_pool::ReadPool<P>,
     /// The handle the connections serve.
     handle: crate::Handle<P::Failure>,
+    /// The host tables' judge, on a connection of its own, while the
+    /// database declares any.
+    host_judge: Option<HostAttachment<P>>,
     checkpoints: Option<WalCheckpointer<P>>,
     statistics: Option<UpkeepThread<PlannerStatistics<P>>>,
     /// The main file's size after the latest checkpoint. The database keeps
@@ -153,6 +157,7 @@ impl<P: Policy> Database<P> {
             writer: Arc::new(Mutex::new(writer)),
             readers: read_pool::ReadPool::new(Vec::new()),
             handle: handle.clone(),
+            host_judge: None,
             checkpoints: None,
             statistics: None,
             checkpointed_size: sizes.subscribe(),
@@ -189,6 +194,12 @@ impl<P: Policy> Database<P> {
             reader.serve(handle.clone());
         }
         database.readers = read_pool::ReadPool::new(readers.into_iter().map(Mutex::new).collect());
+        let host_tables = lock_unpoisoned(&database.writer).reads_host_tables();
+        if host_tables {
+            let mut judge = open(true)?;
+            judge.serve(handle);
+            database.host_judge = Some(judge.judge_host_changes());
+        }
         Ok((database, prepared))
     }
 
@@ -227,6 +238,9 @@ impl<P: Policy> Database<P> {
     /// connection. Closing goes on past each failure, and returns them all.
     pub fn close(self) -> Vec<PolicyError<P>> {
         let mut failures = Vec::new();
+        if let Some(judge) = self.host_judge {
+            failures.extend(judge.close().err());
+        }
         if let Some(checkpoints) = self.checkpoints {
             failures.extend(checkpoints.stop().err());
         }

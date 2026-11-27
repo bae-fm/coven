@@ -395,7 +395,7 @@ pub struct Judged {
 impl Judged {
     /// Changes no live query judged, as those that name no row: each
     /// waiting query judges them as they reach it, without lookups.
-    fn unjudged(changes: Vec<RowChange>) -> Self {
+    pub(crate) fn unjudged(changes: Vec<RowChange>) -> Self {
         Self { changes: Arc::new(changes), verdicts: HashMap::new() }
     }
 

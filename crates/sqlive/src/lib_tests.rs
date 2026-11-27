@@ -115,6 +115,8 @@ pub(crate) struct TestOptions {
     pub(crate) readers: NonZeroUsize,
     /// The views and tables a live query reads whole.
     pub(crate) whole_views: Vec<&'static str>,
+    /// The tables whose rows the test keeps in memory.
+    pub(crate) host_tables: Option<crate::HostTables>,
     /// Checkpoint the WAL on a thread of its own at this many frames.
     pub(crate) checkpoint_pages: Option<std::num::NonZeroU32>,
     /// Keep the planner's statistics.
@@ -138,6 +140,7 @@ impl Default for TestOptions {
             settings: crate::SqliteSettings::default(),
             readers: NonZeroUsize::new(2).expect("two readers"),
             whole_views: Vec::new(),
+            host_tables: None,
             checkpoint_pages: None,
             statistics: false,
             unrecorded: Vec::new(),
@@ -190,6 +193,9 @@ impl TestDatabase {
                 whole_views: Arc::new(WholeViews::new(options.whole_views)),
                 policy: &|| NoPolicy,
                 setup: &|setup, _| {
+                    if let Some(tables) = &options.host_tables {
+                        setup.host_tables(tables)?;
+                    }
                     for (name, compare) in &options.collations {
                         setup.collation(name, *compare)?;
                     }
