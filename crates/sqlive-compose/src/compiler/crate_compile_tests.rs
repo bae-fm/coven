@@ -357,6 +357,43 @@ sqlive_compose::fragment!(Inner, r#"SELECT p.id AS person_id, p.name FROM people
     assert_eq!(outer["width"], 2);
 }
 
+/// A private fragment's type is written only where a read's row names it,
+/// itself or through another fragment's field, so that a crate that refuses
+/// dead code can spread a fragment in writes and FROM clauses alone. A
+/// fragment that other crates can name keeps its type.
+#[test]
+fn a_private_fragments_type_is_written_where_a_row_names_it() {
+    let output = compile_lib(
+        r##"
+mod private {
+    sqlive_compose::fragment!(Writer, r#"SELECT p.id, p.name FROM people AS p"#);
+    sqlive_compose::fragment!(Listed, r#"SELECT p.id, p.name FROM people AS p"#);
+    sqlive_compose::fragment!(Named, r#"SELECT p.id, p.name FROM people AS p"#);
+    sqlive_compose::fragment!(Authored, r#"
+        SELECT i.id AS issue_id, author.* FROM issues AS i
+        JOIN @crate::private::Named AS author ON author.id = i.author_id
+    "#);
+    sqlive_compose::write!(Redraft, r#"
+        INSERT INTO comment_reads (issue_id, person_id, read_at)
+        SELECT writer.name, writer.id, 0 FROM @crate::private::Writer AS writer
+    "#);
+    sqlive_compose::read!(ListedIds, r#"SELECT listed.id FROM @crate::private::Listed AS listed"#);
+    sqlive_compose::read!(Issues, r#"
+        SELECT authored.* FROM @crate::private::Authored AS authored
+    "#);
+}
+sqlive_compose::fragment!(Offered, r#"SELECT p.id FROM people AS p"#);
+"##,
+    )
+    .unwrap();
+    let written = |name: &str| !code_of(&output, name).is_empty();
+    assert!(!written("Writer.rs"), "only a write spreads Writer");
+    assert!(!written("Listed.rs"), "a read takes a column of Listed, not its type");
+    assert!(written("Authored.rs"), "a read's row has a field of Authored");
+    assert!(written("Named.rs"), "Authored has a field of Named");
+    assert!(written("Offered.rs"), "another crate can name Offered");
+}
+
 #[test]
 fn a_circle_of_fragments_names_its_members() {
     let errors = messages(compile_lib(

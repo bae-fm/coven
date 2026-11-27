@@ -1194,6 +1194,12 @@ impl Person {
 }
 ```
 
+The compiler writes the struct when other crates can name it, which is when
+every module around the call is `pub`, or when a read's row names it, as a
+field or through a field of another struct it writes. No code names the struct
+of any other fragment, so the fragment's file is empty: an app that refuses dead
+code can spread such a fragment in writes and FROM clauses alone.
+
 The fields are `pub(crate)`, so only the crate that writes the fragment reads
 its columns. The domain decides what other crates see, with methods it writes:
 

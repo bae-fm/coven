@@ -6,8 +6,8 @@ use super::error::{Cause, CompileError, Location};
 use super::header::Header;
 use super::source::Call;
 use super::spread::{spread_paths, Registry};
-use super::unit::{self, fragment_path};
-use super::{model, source, CompiledCall, Input, Output};
+use super::unit::{self, fragment_path, Product};
+use super::{generate, model, source, CompiledCall, Input, Output};
 
 /// Compile the crate `input` describes, or return every error.
 pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
@@ -47,7 +47,7 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
         }
     }
     let order = order(&input.crate_name, &registry, &calls, &mut errors);
-    let mut files = Vec::new();
+    let mut products = Vec::new();
     let mut manifest = model::Manifest::default();
     let mut warnings = Vec::new();
     let mut reported = BTreeMap::new();
@@ -68,11 +68,11 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
         };
         match unit::compile(&context, call, header) {
             Ok(compiled) => {
-                files.push((format!("{}.rs", header.name), compiled.code));
-                if let Some(record) = compiled.record {
+                if let Product::Fragment { record, .. } = &compiled.product {
                     registry.add(record.clone());
-                    manifest.fragments.push(record);
+                    manifest.fragments.push(record.clone());
                 }
+                products.push((call, header, compiled.product));
                 warnings.extend(compiled.warnings);
                 reported.insert(position, CompiledCall::of(call, header, compiled.reads));
             }
@@ -90,12 +90,43 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
     let manifest = serde_json::to_string_pretty(&manifest)
         .map_err(|error| setup_error(Cause::Manifest(error)))?;
     Ok(Output {
-        files,
+        files: files(&registry, products),
         manifest,
         read: walked.read,
         warnings,
         calls: reported.into_values().collect(),
     })
+}
+
+/// Each call's generated file, from the calls' `products` in the order they
+/// compiled: each fragment before what spreads it.
+///
+/// A fragment's file has its type when other crates can name it, or when a
+/// read's row names it, itself or through the field of a type that is written.
+/// No code names the type of any other fragment, whose file is empty, so a
+/// crate that refuses dead code can spread it in writes and FROM clauses alone.
+fn files(registry: &Registry, products: Vec<(&Call, &Header, Product)>) -> Vec<(String, String)> {
+    let mut named = BTreeSet::new();
+    let mut files: Vec<(String, String)> = products
+        .into_iter()
+        .rev()
+        .map(|(call, header, product)| {
+            let (code, fields) = match product {
+                Product::Statement { code, fields } => (code, fields),
+                Product::Fragment { record, fields }
+                    if call.exported || named.contains(&record.path) =>
+                {
+                    (generate::fragment(header, &fields, call.exported), fields)
+                }
+                Product::Fragment { .. } => (String::new(), Vec::new()),
+            };
+            let fragments = fields.iter().filter_map(|field| field.reading.fragment());
+            named.extend(fragments.map(|path| registry.key(path)));
+            (format!("{}.rs", header.name), code)
+        })
+        .collect();
+    files.reverse();
+    files
 }
 
 fn error_of(call: &Call, concerns: &str, cause: Cause) -> CompileError {

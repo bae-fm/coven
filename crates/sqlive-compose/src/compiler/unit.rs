@@ -27,12 +27,18 @@ pub(crate) struct Context<'a> {
     pub(crate) registry: &'a Registry,
 }
 
+/// The Rust of a call, or what it is written from.
+pub(crate) enum Product {
+    /// A fragment: its record, for the crates that spread it, and the fields
+    /// of its type, which the compile of the whole crate writes or leaves out.
+    Fragment { record: Record, fields: Vec<Field> },
+    /// A read's or a write's Rust, and the fields of its row.
+    Statement { code: String, fields: Vec<Field> },
+}
+
 /// What a call compiles to.
 pub(crate) struct Compiled {
-    /// The Rust the call's macro includes.
-    pub(crate) code: String,
-    /// The fragment's record, for the crates that spread it.
-    pub(crate) record: Option<Record>,
+    pub(crate) product: Product,
     /// The read's warnings.
     pub(crate) warnings: Vec<Warning>,
     /// The tables and views the call's own SQL reads.
@@ -177,7 +183,7 @@ pub(crate) fn compile(
         &tokens,
     )
     .map_err(&fail)?;
-    let (code, record) = match &header.kind {
+    let product = match &header.kind {
         HeaderKind::Fragment { parent, relations } => {
             let record = Record {
                 path: fragment_path(context.crate_name, &call.module, &header.name),
@@ -189,15 +195,16 @@ pub(crate) fn compile(
                 required: required(&fields),
                 one_row: outline.one_row(),
             };
-            (generate::fragment(header, &fields, call.exported), Some(record))
+            Product::Fragment { record, fields }
         }
         HeaderKind::Read(handle) => {
             let plan = plan.as_deref().expect("a read's plan is built before its columns");
-            (generate::read(header, sql, *handle, plan, &fields, call.exported), None)
+            let code = generate::read(header, sql, *handle, plan, &fields, call.exported);
+            Product::Statement { code, fields }
         }
         HeaderKind::Write => unreachable!("a write compiles in compile_write"),
     };
-    Ok(Compiled { code, record, warnings, reads })
+    Ok(Compiled { product, warnings, reads })
 }
 
 /// Compile the write `call`, whose header is `header`. It has no relations
@@ -237,9 +244,9 @@ fn compile_write(
     let fields =
         columns::fields(header, &returning, &prepared, &[], context.registry, sql, &tokens)
             .map_err(&fail)?;
+    let code = generate::write(header, sql, &fields);
     Ok(Compiled {
-        code: generate::write(header, sql, &fields),
-        record: None,
+        product: Product::Statement { code, fields },
         warnings: Vec::new(),
         reads: own_reads(header),
     })

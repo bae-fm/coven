@@ -33,6 +33,16 @@ pub(crate) enum Reading {
     },
 }
 
+impl Reading {
+    /// The path of the fragment whose type the field names.
+    pub(crate) fn fragment(&self) -> Option<&str> {
+        match self {
+            Reading::Spread { path, .. } | Reading::MissingSpread { path, .. } => Some(path),
+            Reading::Value | Reading::Json => None,
+        }
+    }
+}
+
 /// The name of a field: an identifier, raw when the name is a keyword.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FieldName(syn::Ident);
