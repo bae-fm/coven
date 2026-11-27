@@ -242,8 +242,8 @@ theorem PushDown.pushDown_pushed (s : Statement) (narrowFuel : Nat) :
           | nil => intro st; rfl
           | cons x l ih => intro st; rw [List.foldl_cons, ih, hg]
         refine hfold _ _ (fun st0 arm => hfold _ _ (fun st1 target => ?_) st0) st
-        simp only [List.filter_nil, List.filterMap_nil, List.append_nil, List.isEmpty_nil,
-          Bool.not_true, Bool.or_false]
+        simp only [PushDown.passedInto, List.filter_nil, List.filterMap_nil, List.append_nil,
+          List.isEmpty_nil, Bool.not_true, Bool.or_false]
         rw [PushDown.pushDown_pushed]
         split
         · rw [PState.joinInner_pushed]
@@ -481,7 +481,7 @@ theorem PState.Sem.pushDown {s : Statement} (h : s.wellFormed = true) {P : Cls}
           split
           · exact h2.trans ((hrec _).trans (PState.termGrows_joinInner _ _ _))
           · exact h2.trans (hrec _)
-        simp only [List.filter_nil, List.filterMap_nil] at hfin hstep ⊢
+        simp only [PushDown.passedInto, List.filter_nil, List.filterMap_nil] at hfin hstep ⊢
         refine PState.TermGrows.foldl_until (Q := fun x => x.Sem s P)
           (fun st0 arm => PState.TermGrows.foldl (fun st1 target => hstep st1 target _) _ st0) _
           (fun st0 arm harm hs0 hfin0 => ?_) st hs hfin
@@ -524,17 +524,11 @@ theorem PState.Sem.pushDown {s : Statement} (h : s.wellFormed = true) {P : Cls}
                 rw [hterm0] at hren
                 simp only at hren
                 have hu := hterm u hterm0 row (hGood item row hgood)
-                refine PushDown.renamed_sound hren (fun c c' hc => ?_) hu
-                split at hc
-                · rename_i t c'' hthc
-                  split at hc
-                  · rename_i htt
-                    subst htt
-                    obtain rfl := Option.some.inj hc
-                    obtain ⟨_, hagg, hout'⟩ := hthr c c'' hthc
-                    exact hcells c t c'' hout' hagg
-                  · cases hc
-                · cases hc
+                have hcols : ∀ c c', PushDown.renameInto arm t0 c = some c' →
+                    row.cell c = cellOf (b t0) c' := fun c c' hc => by
+                  obtain ⟨_, hagg, hout'⟩ := hthr c c' (PushDown.renameInto_some hc)
+                  exact hcells c t0 c' hout' hagg
+                exact PushDown.renamed_sound hren hcols (PushDown.judgedOn_sound hcols) hu
             · cases hr
           · cases hr
 

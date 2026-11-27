@@ -14,7 +14,7 @@
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::from_star::StarItem;
 use crate::schema_objects::read_view;
-use crate::scope_edge::{Edge, Member, MemberValue};
+use crate::scope_edge::Edge;
 use crate::scope_one_of::constant;
 use crate::scope_plan::{is_name, read_select, Object, Planner, Source, Unread};
 use crate::scope_term::{Affinity, ScopeTerm};
@@ -522,7 +522,7 @@ pub(crate) fn pulled(planner: &Planner, item: usize, column: &str) -> Option<Sco
     let mut terms = passed_on(&planner.items[item].columns, rows, column).into_iter().map(|arm| {
         let (source, passed) = arm?;
         let term = planner.items[*source].source.term.as_ref()?;
-        term.renamed(&|tested| (tested == passed).then(|| column.to_owned()))
+        term.renamed(&|tested| (tested == passed).then(|| column.to_owned()), None)
     });
     let first = terms.next()??;
     let rest: Option<Vec<ScopeTerm>> = terms.collect();
@@ -585,7 +585,7 @@ pub(crate) fn push_down(
     let reached: Vec<&str> = tested
         .iter()
         .map(String::as_str)
-        .chain(edges.iter().filter_map(|edge| edge.member.column()))
+        .chain(edges.iter().flat_map(|edge| edge.member.columns()))
         .collect();
     // What each arm passes on in each column the term and edges reach.
     let passed: Vec<(&str, Passed)> = reached
@@ -614,29 +614,23 @@ pub(crate) fn push_down(
             }
             // A term a row of NULLs can pass narrows nothing on a LEFT JOIN's
             // right side that stays one, and doesn't make it inner.
-            let left = planner.items[target].left_on.is_some();
+            let left = found.left_on.is_some();
+            let rows = &found.source.qualifier;
+            let column = |column: &str| {
+                through(column).filter(|(passed, _)| *passed == target).map(|(_, column)| column)
+            };
             let renamed = term
                 .as_ref()
-                .and_then(|term| {
-                    term.renamed(&|column| {
-                        through(column)
-                            .filter(|(passed, _)| *passed == target)
-                            .map(|(_, column)| column)
-                    })
-                })
+                .and_then(|term| term.renamed(&column, Some(rows)))
                 .filter(|renamed| !(left && renamed.may_hold_on_nulls()));
             // An `IS` edge is the same.
+            let missing = !found.always_bound();
             let passed: Vec<Edge> = edges
                 .iter()
                 .filter(|edge| !(left && edge.nulls))
                 .filter_map(|edge| {
-                    let (passed, column) = through(edge.member.column()?)?;
-                    let member = Member {
-                        item: target,
-                        value: MemberValue::Column(column),
-                        affinity: edge.member.affinity,
-                    };
-                    (passed == target).then(|| Edge { member, pushed: true, ..edge.clone() })
+                    let member = edge.member.over(target, rows, missing, &column)?;
+                    Some(Edge { member, pushed: true, ..edge.clone() })
                 })
                 .collect();
             if let Some(renamed) = &renamed {

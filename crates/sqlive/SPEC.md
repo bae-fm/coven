@@ -583,20 +583,27 @@ The question is a SELECT over the changed row's values, with a text kept as
 numeric one, so `name = 5` is true of the text `'5'` there as it is in the
 table.
 
-A condition is judged this way when it names columns of one table of its own
-SELECT and no other table, each a column sqlive narrows by (stored, BINARY), and
-holds no subquery, no `rowid`, no clock (`CURRENT_TIME`, `date('now')` and the
-other date and time functions) and no function that isn't deterministic. A
-condition that doesn't qualify, such as `b = (SELECT b FROM u LIMIT 1)`, `c >
-unixepoch('now')` or `t.a + u.a = 3`, narrows nothing, and a statement with no
-condition that narrows depends on every row of each table it read. When sqlive
-can't tell, it counts the row as a match, so the query runs again: a value with
-no cast that keeps it, such as a blob in a TEXT column, a value the write didn't
-record, and an error. When a question runs past the lookups' step limit
-(section 7), sqlive runs the query again whatever the write's other questions
-answer. A condition judged this way is never read from a view's or subquery's
-rows: it narrows the tables the statement reads directly, and the tables behind
-a view keep the conditions they have.
+A condition is judged this way when it names columns of one table, FROM
+subquery, CTE or view of its own SELECT and of no other, each a column sqlive
+narrows by (stored, BINARY), and holds no subquery, no `rowid`, no clock
+(`CURRENT_TIME`, `date('now')` and the other date and time functions) and no
+function that isn't deterministic. A condition that doesn't qualify, such as
+`b = (SELECT b FROM u LIMIT 1)`, `c > unixepoch('now')` or `t.a + u.a = 3`,
+narrows nothing, and a statement with no condition that narrows depends on every
+row of each table it read. When sqlive can't tell, it counts the row as a match,
+so the query runs again: a value with no cast that keeps it, such as a blob in a
+TEXT column, a value the write didn't record, and an error. When a question runs
+past the lookups' step limit (section 7), sqlive runs the query again whatever
+the write's other questions answer.
+
+A condition on the columns of a FROM subquery, CTE or view narrows the table
+those columns come from, as the same condition on that table's own columns would
+(section 8). The album grid's cover subquery can be spliced into another
+statement as `FROM (SELECT c.id, c.kind, c.album_id FROM covers AS c) AS shown`,
+and `shown.kind <> 'back'` then narrows `covers` as `c.kind <> 'back'` would. A
+write asks SQLite the condition as the statement wrote it, over the changed
+row's values under the names the subquery gives them. A lookup that reads the
+table asks the same condition of the table's rows.
 
 A condition SQLite judges costs a write one small SELECT for each row it changes
 and each such condition a live query holds, and rows that agree on the columns a
@@ -876,8 +883,10 @@ An album choice joins a record to its owner by `(CASE WHEN rr.kind =
 changes, sqlive asks SQLite for the CASE's value in the record's row and whether
 an owner in the query's scope holds it, so a record of another album doesn't
 rerun the choice. SQLite gives such an expression's value the other side's
-affinity, and sqlive compares it the same way. An expression of a table's own
-columns that holds a COLLATE narrows nothing, and one over a table a LEFT JOIN
+affinity, and sqlive compares it the same way. An expression over the columns of
+a FROM subquery, CTE or view narrows the table those columns come from, as that
+expression over the table's own columns would (section 8). An expression of a
+table's own columns that holds a COLLATE narrows nothing, and one over a table a LEFT JOIN
 adds narrows that table only when it is NULL wherever a column it names is
 NULL, as the next paragraph says of an expression over the other table.
 
@@ -1196,7 +1205,12 @@ release of an album the grid shows still reruns it, since the lookup of
 
 A subquery in FROM, a CTE and one of the app's own views are read as queries of
 their own. A condition on one of their columns that passes a table's column on
-unchanged narrows that table. A music app defines `CREATE VIEW album_tracks AS
+unchanged narrows that table, whether sqlive compares the condition itself or
+SQLite judges it row by row (section 5), and so does an equality with a value
+computed from such columns (section 7). A condition or computed value that names
+columns passed on from two tables narrows by neither. A computed value that can
+be other than NULL where its columns are NULL, as a CASE, passes into no table a
+LEFT JOIN adds. A music app defines `CREATE VIEW album_tracks AS
 SELECT r.album_id, t.title FROM releases AS r JOIN tracks AS t ON t.release_id =
 r.id`, and its album page reads `SELECT title FROM album_tracks WHERE album_id =
 ?1`: that narrows `releases` to the album's releases and `tracks` to theirs, as
@@ -1982,6 +1996,7 @@ the model and states its assumptions.
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `proofs/SqliveNarrowing/Rules/View.lean` | 8 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `proofs/SqliveNarrowing/Rules/View.lean` | 8 |
 | An expression over one item's own columns, compared with another item's value, has in a binding the value it gives that item's row, so an equality with it narrows the item as one with its column does | `row_member_sound` | `proofs/SqliveNarrowing/Rules/RowMember.lean` | 7 |
+| A condition SQLite judges, or a value an equality computes, over a derived item's columns, rewritten to the columns of an item its arm passes them on from, holds of that item's row, or has its value there, wherever it did of the derived item's row; a strict value is NULL where that item has no row | `judgedOn_sound`, `value_passed_sound`, `value_passed_none` | `proofs/SqliveNarrowing/Rules/PushDown.lean` | 8 |
 | A parenthesized join gives the rows its tables give joined one after another: an inner join of one always, its ON read with the WHERE, and a LEFT JOIN of one when its ON names no table of the join but the first and each later table is a LEFT JOIN's whose ON can't hold where a table before it has no row | `left_group_flat`, `inner_group_flat` | `proofs/SqliveNarrowing/Rules/Parenthesized.lean` | 7 |
 | A FROM item that names a CTE reads the innermost CTE of that name visible where it is, and a WITH that doesn't declare the name changes nothing of what it names inside, so an outer CTE's query reads the outer CTEs | `resolve_inner`, `resolve_outer` | `proofs/SqliveNarrowing/Rules/CteNames.lean` | 8 |
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row; an ORDER BY term that is a column or an expression over one table's columns, in any collation that orders values by a key, gives each binding the value its key gives the table's row; a run of terms over one table bounds that table's rows at or before the last row's values of the run, a row that ties with the last row's values counting as at or before them, and a later run's table by those rows or by the rows that join an earlier run's table's rows that sort before that run's values, so each table's bound passes its row in each binding that sorts at or before the last row | `limit_sound`, `sortKey_value`, `termKey_value`, `sortedBefore_passes`, `atOrBefore_passes`, `runBound_passes`, `joined_passes` | `proofs/SqliveNarrowing/Rules/Limit.lean` | 6 |

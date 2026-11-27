@@ -4,6 +4,7 @@
 use super::*;
 use crate::row_scope::RowImage;
 use crate::scope_plan::is_name;
+use crate::scope_row::RowColumn;
 use rusqlite::params_from_iter;
 use sqlite3_parser::{
     ast::{Cmd, OneSelect, Stmt},
@@ -126,7 +127,11 @@ fn a_term_lists_each_column_it_tests_once() {
         ScopeTerm::Row(Arc::new(RowTerm {
             sql: String::new(),
             qualifier: "t".to_owned(),
-            columns: columns.iter().map(|column| ((*column).to_owned(), Affinity::Blob)).collect(),
+            columns: columns
+                .iter()
+                .map(|column| RowColumn::written((*column).to_owned(), Affinity::Blob))
+                .collect(),
+            passed_to: None,
         }))
     };
     let term = null("a").and(truth("b")).and(truth("a")).and(row(&["c", "b", "d"]));

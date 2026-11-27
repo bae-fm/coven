@@ -136,7 +136,7 @@ JOIN adds, so where such a part holds, its item has a row.
 
 - **A condition on one item's own columns.** `term_sound` proves the promise
   for comparisons with a constant, IN lists, NULL tests, and AND and OR of
-  these, and for any other condition on one table's columns, which SQLite
+  these, and for any other condition on one item's columns, which SQLite
   judges row by row.
 - **An equality between two items.** `edge_sound` proves that `a.x = b.y`, true
   of a binding, makes `a.x` hold a value that `b`'s row gives, neither NULL,
@@ -151,7 +151,7 @@ JOIN adds, so where such a part holds, its item has a row.
   binding with no row of `b`, as an `IS` edge's does: no binding a core keeps
   lacks one.
 - **An expression of the member's own row.** The member of an equality can
-  be an expression over one table item's own columns, as `CASE WHEN a.k = 1
+  be an expression over one item's own columns, as `CASE WHEN a.k = 1
   THEN a.x ELSE a.y END = b.z`. `row_member_sound` proves that the member's
   value in a binding's row of its item is the value the expression has in
   the binding, so `edge_sound` holds of such a member as of a column: where
@@ -225,6 +225,16 @@ JOIN adds, so where such a part holds, its item has a row.
   that a row of an arm that doesn't aggregate holds, in each column that is a
   bare column of one of the arm's items, that item's value. `renamed_sound`
   proves that a term true of the derived row is then true of the item's row.
+  A condition SQLite judges passes as the same condition over the item's
+  columns (`Cond.passed`), when each column it names passes on from that item,
+  and so does the value an edge computes from its member's row
+  (`PValue.passed`): `judgedOn_sound` and `value_passed_sound` prove that
+  each holds, or gives its value, on the item's row as on the derived item's.
+  A value that isn't strict passes into no item a LEFT JOIN adds, and
+  `value_passed_none` proves that a strict one is NULL where such an item has
+  no row. sqlive keeps the condition's SQL and the names it reads: a write
+  asks it over the changed row's values under those names, and a lookup over
+  a SELECT that gives the table's columns those names (`scope_row.rs`).
   An arm that groups its rows or calls an aggregate passes on only the
   columns its GROUP BY lists as bare columns: `group_key_sound` proves that a
   row of such an arm is the row of a group of the bindings the arm keeps, and

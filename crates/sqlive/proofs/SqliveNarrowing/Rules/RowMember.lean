@@ -2,10 +2,12 @@ import SqliveNarrowing.Reader
 
 /-! An expression of the member's own row compared with a partner: an edge's
 member is a column of one of a core's items, or an expression over the
-columns of one table item of the core, with no subquery, each column one
-sqlive narrows by (`Planner::member_expression`). A write asks SQLite for the
-expression's value in each row it changes, and the edge narrows the table to
-the rows whose value some row of the partner gives. The expression is NULL
+columns of one item of the core, with no subquery, each column one sqlive
+narrows by (`Planner::member_expression`). A write asks SQLite for the
+expression's value in each row of a table it changes, and the edge narrows
+the table to the rows whose value some row of the partner gives. On a derived
+item the edge passes into the items its columns come from
+(`PValue.passed`). The expression is NULL
 wherever its columns are, or its item is no LEFT JOIN's: another, as a CASE
 or COALESCE, could make the equality true of the NULLs a missing right row
 gives, which no row of the table holds, and the equality would then make the
@@ -15,8 +17,8 @@ of any affinity gives it values, as SQLite gives the expression's value the
 column's affinity. -/
 namespace SqliveNarrowing.RowMember
 
-/-- The item an expression member `e`, written in core `k`, reads: a table
-item of the core whose columns, each one sqlive narrows by, are all `e`
+/-- The item an expression member `e`, written in core `k`, reads: an item of
+the core whose columns, each one sqlive narrows by, are all `e`
 names, with no subquery, and that is no LEFT JOIN's unless `e` is NULL
 wherever they are. -/
 def exprItem (s : Statement) (k : Nat) (e : Expr) : Option Nat :=
@@ -24,7 +26,7 @@ def exprItem (s : Statement) (k : Nat) (e : Expr) : Option Nat :=
   | none => none
   | some m =>
     if e.queries.isEmpty && e.items.all (· == m) && (s.item m).core == k &&
-        (s.table? m).isSome && e.refs.all (fun (_, c) => (s.affinity m c).isSome) &&
+        e.refs.all (fun (_, c) => (s.affinity m c).isSome) &&
         (e.strict || s.alwaysBound m) then some m
     else none
 
@@ -47,7 +49,7 @@ theorem exprItem_facts {s : Statement} {k : Nat} {e : Expr} {m : Nat}
       cases h
       simp only [Bool.and_eq_true, List.isEmpty_iff, List.all_eq_true, beq_iff_eq,
         Bool.or_eq_true] at hok
-      refine ⟨hok.1.1.1.1.1, hok.1.1.1.1.2, hok.1.1.1.2, hok.2, fun hnil => ?_⟩
+      refine ⟨hok.1.1.1.1, hok.1.1.1.2, hok.1.1.2, hok.2, fun hnil => ?_⟩
       simp [Expr.items, hnil] at hhead
     · cases h
 

@@ -119,7 +119,7 @@ pub(crate) fn source_scopes(
                 // A write asks SQLite for the expression's value in the
                 // changed row and whether a partner row gives it, compared
                 // as the statement compares them (`scope_row.rs`).
-                MemberValue::Expression(term) => RowScope::Row(Arc::new(RowCondition {
+                MemberValue::Expression { term, .. } => RowScope::Row(Arc::new(RowCondition {
                     term: Arc::clone(term),
                     parameters: parameters.to_vec(),
                     test: RowTest::Joined(lookup),

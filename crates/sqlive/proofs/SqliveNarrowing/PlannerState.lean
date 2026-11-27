@@ -26,13 +26,15 @@ derived item holds an edge, as a membership or as an edge pushed into it,
 with the same partner, partner value and NULL matching. -/
 def PState.PushedFrom (s : Statement) (st : PState) (e : Edge) : Prop :=
   (st.items e.member).leftOn = none ∧ e.pushed = true ∧
-  ∃ d q v k c c', (s.item d).kind = .derived q v ∧ (s.query q).limit = none ∧
+  ∃ d q v k rename, (s.item d).kind = .derived q v ∧ (s.query q).limit = none ∧
     (s.query q).offset = none ∧ k ∈ (s.query q).arms ∧
-    ((s.core k).aggregated = false ∨ (s.core k).groupBy.contains (.col e.member c') = true) ∧
     (s.core k).windowed = false ∧ (s.item e.member).core = k ∧
-    (s.core k).output[c]? = some (.expr (.col e.member c')) ∧ e.memberValue = .column c' ∧
+    (∀ c c', rename c = some c' →
+      ((s.core k).aggregated = false ∨ (s.core k).groupBy.contains (.col e.member c') = true) ∧
+      (s.core k).output[c]? = some (.expr (.col e.member c'))) ∧
     ∃ e0, (e0 ∈ (st.items d).memberships ∨ (e0 ∈ st.pushed ∧ e0.member = d)) ∧
-      e0.memberValue = .column c ∧ e0.partner = e.partner ∧ e0.value = e.value ∧ e0.nulls = e.nulls
+      e0.memberValue.passed e0.member e.member rename = some e.memberValue ∧
+      e0.partner = e.partner ∧ e0.value = e.value ∧ e0.nulls = e.nulls
 
 /-- `st'` holds an ON narrowing back only for items `st` holds one back for,
 and keeps each membership and pushed edge `st` holds. -/
@@ -53,8 +55,8 @@ def PState.Keeps (s : Statement) (st st' : PState) : Prop :=
 /-- A state that grows from `st` keeps where its pushed edges come from. -/
 theorem PState.PushedFrom.mono {s : Statement} {st st' : PState} (h : st.Grows st')
     {e : Edge} (he : PState.PushedFrom s st e) : PState.PushedFrom s st' e := by
-  obtain ⟨hleft, hpushed, d, q, v, k, c, c', hd, hl, ho, hk, hagg, hwin, hcore, hout, hmv, e0, he0, hrest⟩ := he
-  refine ⟨?_, hpushed, d, q, v, k, c, c', hd, hl, ho, hk, hagg, hwin, hcore, hout, hmv, e0, ?_, hrest⟩
+  obtain ⟨hleft, hpushed, d, q, v, k, rename, hd, hl, ho, hk, hwin, hcore, hout, e0, he0, hrest⟩ := he
+  refine ⟨?_, hpushed, d, q, v, k, rename, hd, hl, ho, hk, hwin, hcore, hout, e0, ?_, hrest⟩
   · cases h' : (st'.items e.member).leftOn with
     | none => rfl
     | some _ =>
@@ -240,33 +242,57 @@ theorem PushDown.mem_arms {s : Statement} {item : Nat} {found : List (List (Opti
         · cases hc
 
 /-- An edge `pushDown` passes to a target comes from one of the edges it
-was given, through the column the arm passes on to the target. -/
-theorem PushDown.mem_passed {edges : List Edge} {keep : Edge → Bool}
-    {through : Nat → Option (Nat × Nat)} {target : Nat} {e : Edge}
-    (he : e ∈ (edges.filter keep).filterMap fun e =>
-      match e.memberValue with
-      | .column c => (match through c with
-          | some (t, c') => if t = target then some c' else none
-          | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true }
-      | .expr _ => none) :
-    ∃ e0 ∈ edges, ∃ c c', e0.memberValue = .column c ∧ through c = some (target, c') ∧
-      e = { e0 with member := target, memberValue := .column c', pushed := true } := by
+was given, its member value passed to the target. -/
+theorem PushDown.mem_passed {s : Statement} {left : Bool} {target : Nat}
+    {rename : Nat → Option Nat} {edges : List Edge} {e : Edge}
+    (he : e ∈ PushDown.passedInto s left target rename edges) :
+    ∃ e0 ∈ edges, ∃ value, e0.memberValue.passed e0.member target rename = some value ∧
+      e = { e0 with member := target, memberValue := value, pushed := true } := by
   obtain ⟨e0, he0, hmap⟩ := List.mem_filterMap.mp he
-  refine ⟨e0, (List.mem_filter.mp he0).1, ?_⟩
-  split at hmap
-  · rename_i c hc
-    obtain ⟨c', hc', rfl⟩ := Option.map_eq_some_iff.mp hmap
-    refine ⟨c, c', hc, ?_, rfl⟩
-    split at hc'
-    · rename_i t c'' ht
-      split at hc'
-      · rename_i htt
-        subst htt
-        cases hc'
-        exact ht
-      · cases hc'
-    · cases hc'
-  · cases hmap
+  obtain ⟨value, hvalue, rfl⟩ := Option.map_eq_some_iff.mp hmap
+  exact ⟨e0, (List.mem_filter.mp he0).1, value, hvalue, rfl⟩
+
+/-- An edge `pushDown` passes comes from an edge that is no `IS` edge where
+the target stays a LEFT JOIN's right side, and whose member value is strict
+where a LEFT JOIN adds the target. -/
+theorem PushDown.mem_passed_kept {s : Statement} {left : Bool} {target : Nat}
+    {rename : Nat → Option Nat} {edges : List Edge} {e : Edge}
+    (he : e ∈ PushDown.passedInto s left target rename edges) :
+    ∃ e0 ∈ edges, ∃ value, e0.memberValue.passed e0.member target rename = some value ∧
+      e = { e0 with member := target, memberValue := value, pushed := true } ∧
+      (left = true → e0.nulls = false) ∧
+      (s.alwaysBound target = true ∨ e0.memberValue.strict = true) := by
+  obtain ⟨e0, he0, hmap⟩ := List.mem_filterMap.mp he
+  obtain ⟨value, hvalue, rfl⟩ := Option.map_eq_some_iff.mp hmap
+  obtain ⟨he0, hkeep⟩ := List.mem_filter.mp he0
+  simp only [Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true'] at hkeep
+  refine ⟨e0, he0, value, hvalue, rfl, fun hl => ?_, hkeep.2⟩
+  simpa [hl] using hkeep.1
+
+/-- The column `renameInto` gives is the one the arm passes on to the
+target. -/
+theorem PushDown.renameInto_some {arm : List (Option (Nat × Nat))} {target c c' : Nat}
+    (h : PushDown.renameInto arm target c = some c') : (arm[c]?).join = some (target, c') := by
+  unfold PushDown.renameInto at h
+  split at h
+  · rename_i t c'' ht
+    split at h
+    · rename_i htt
+      subst htt
+      cases h
+      exact ht
+    · cases h
+  · cases h
+
+/-- A target `pushDown` passes into is an item the arm passes a column of. -/
+theorem PushDown.mem_targets {arm : List (Option (Nat × Nat))} {reached : List Nat} {target : Nat}
+    (h : target ∈ (reached.filterMap fun c => ((arm[c]?).join).map (·.1)).eraseDups) :
+    ∃ (c c' : Nat), (arm[c]?).join = some (target, c') := by
+  obtain ⟨c, _, hc⟩ := List.mem_filterMap.mp (List.mem_eraseDups.mp h)
+  obtain ⟨⟨t, c'⟩, hc', ht⟩ := Option.map_eq_some_iff.mp hc
+  simp only at ht
+  subst ht
+  exact ⟨c, c', hc'⟩
 
 /-- One target's step of `pushDown` keeps, when each edge it passes comes
 from where `PushedFrom` says once its target is an inner join's. -/
@@ -361,15 +387,20 @@ theorem PushDown.pushDown_keeps (s : Statement) (narrowFuel : Nat) :
           (PState.Keeps.refl s st)
         obtain ⟨q, v, k, hkind, hlim, hoff, hk, hwin, hthrough⟩ := PushDown.mem_arms hfound harm
         have hpass0 := hpass.mono hst0.1
-        refine PState.Keeps.foldl_from (base := st0) (fun st1 target _ hst1 => ?_) st0
+        refine PState.Keeps.foldl_from (base := st0) (fun st1 target htarget hst1 => ?_) st0
           (PState.Keeps.refl s st0)
         have hpass1 := hpass0.mono hst1.1
+        obtain ⟨ct, ct', hct⟩ := PushDown.mem_targets htarget
         refine PushDown.step_keeps (fun e he => ?_)
           (fun st' h => PushDown.pushDown_keeps s narrowFuel fuel st' target _ _ h)
-        obtain ⟨e0, he0, c, c', hc, hthr, rfl⟩ := PushDown.mem_passed (through := fun c => arm[c]?.join) he
-        obtain ⟨hcore, hagg, hout⟩ := hthrough c target c' hthr
-        refine ⟨rfl, fun st' hgrow hleft => ⟨hleft, rfl, item, q, v, k, c, c', hkind, hlim, hoff, hk, hagg,
-          hwin, hcore, hout, rfl, e0, ?_, hc, rfl, rfl, rfl⟩⟩
+        obtain ⟨e0, he0, value, hvalue, rfl⟩ := PushDown.mem_passed he
+        have hcore : (s.item target).core = k := (hthrough ct target ct' hct).1
+        refine ⟨rfl, fun st' hgrow hleft => ⟨hleft, rfl, item, q, v, k,
+          PushDown.renameInto arm target, hkind, hlim, hoff, hk, hwin, hcore,
+          fun c c' hc =>
+            ⟨(hthrough c target c' (PushDown.renameInto_some hc)).2.1,
+              (hthrough c target c' (PushDown.renameInto_some hc)).2.2⟩,
+          e0, ?_, hvalue, rfl, rfl, rfl⟩⟩
         rcases hpass1 e0 he0 with hm | ⟨hm, hi⟩
         · exact Or.inl (hgrow.2.1 item e0 hm)
         · exact Or.inr ⟨hgrow.2.2 e0 hm, hi⟩
@@ -691,8 +722,9 @@ theorem PState.NestedOK.carry {s : Statement} {st : PState} (h : st.NestedOK s) 
 
 /-- An edge `pushDown` passes into an arm keeps its partner, partner value,
 NULL matching and whether the partner is a subquery's source. -/
-theorem Edge.NestedOK.moved {s : Statement} {e : Edge} (h : e.NestedOK s) (m c : Nat) :
-    Edge.NestedOK s { e with member := m, memberValue := .column c } := h
+theorem Edge.NestedOK.moved {s : Statement} {e : Edge} (h : e.NestedOK s) (m : Nat)
+    (value : PValue) : Edge.NestedOK s { e with member := m, memberValue := value, pushed := true } :=
+  h
 
 theorem PState.NestedOK.pushDown {s : Statement} (narrowFuel : Nat) :
     ∀ (fuel : Nat) {st : PState} (item : Nat) (term : Option STerm) {edges : List Edge},
@@ -708,15 +740,11 @@ theorem PState.NestedOK.pushDown {s : Statement} (narrowFuel : Nat) :
       · refine foldl_invariant _ (fun st0 arm _ hst0 => ?_) _ h
         refine foldl_invariant _ (fun st1 target _ hst1 => ?_) _ hst0
         apply PState.NestedOK.pushDown narrowFuel fuel
-        · have hpassed : ∀ e ∈ (edges.filter fun e => !((st1.items target).leftOn.isSome && e.nulls)).filterMap
-              (fun e => match e.memberValue with
-                | .column c => ((match arm[c]?.join with
-                    | some (t, c') => if t = target then some c' else none
-                    | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true })
-                | .expr _ => none), e.NestedOK s := by
+        · have hpassed : ∀ e ∈ PushDown.passedInto s (st1.items target).leftOn.isSome target
+              (PushDown.renameInto arm target) edges, e.NestedOK s := by
             intro e he
-            obtain ⟨e0, he0, _, c', _, _, rfl⟩ := PushDown.mem_passed he
-            exact (hedges e0 he0).moved target c'
+            obtain ⟨e0, he0, value, _, rfl⟩ := PushDown.mem_passed he
+            exact (hedges e0 he0).moved target value
           have hst2 : ∀ (renamed : Option STerm), (match renamed with
               | some r => st1.addTerm target r
               | none => st1).NestedOK s := by
@@ -731,8 +759,8 @@ theorem PState.NestedOK.pushDown {s : Statement} (narrowFuel : Nat) :
           · exact ⟨fun e he => (List.mem_append.mp he).elim ((hst2 _).1 e) (hpassed e),
               (hst2 _).2.1, (hst2 _).2.2⟩
         · intro e he
-          obtain ⟨e0, he0, _, c', _, _, rfl⟩ := PushDown.mem_passed he
-          exact (hedges e0 he0).moved target c'
+          obtain ⟨e0, he0, value, _, rfl⟩ := PushDown.mem_passed he
+          exact (hedges e0 he0).moved target value
 
 /-- The subqueries of a core's conditions are the core's subqueries. -/
 theorem Core.cond_queries {c : Core} {cd : Cond} {p : Place} (hcd : (cd, p) ∈ c.conds) {q : Nat}

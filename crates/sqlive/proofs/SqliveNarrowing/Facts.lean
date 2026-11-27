@@ -563,7 +563,7 @@ theorem Transfer.mem_carried {s : Statement} {st : PState} {k : Nat} {x : Nat ×
     (hx : x ∈ Transfer.carried s st k) :
     ∃ e ∈ st.edges, (s.item e.member).core = k ∧ (s.item e.partner).core = k ∧ e.nested = false ∧
       ∃ y mc, e.value = .column y ∧ e.memberValue = .column mc ∧ x.1 = e.member ∧
-        ∃ u, u.renamed (fun c => if c = y then some mc else none) = some x.2 ∧
+        ∃ u, u.renamed (fun c => if c = y then some mc else none) (fun _ _ => none) = some x.2 ∧
           ((st.items e.partner).term = some u ∨
             (e.nulls = false ∧ Transfer.pulled s st e.partner y = some u)) := by
   obtain ⟨e, he, hx⟩ := List.mem_flatMap.mp hx

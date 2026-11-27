@@ -295,15 +295,10 @@ theorem PushDown.untouched_pushDown (s : Statement) (narrowFuel : Nat) :
             subst hp
             intro i _
             exact ⟨rfl, fun e he _ => by simpa using he⟩
-        have hpm : ∀ {target : Nat} {through : Nat → Option (Nat × Nat)} {keep : Edge → Bool} {e : Edge},
-            e ∈ (edges.filter keep).filterMap (fun e =>
-              match e.memberValue with
-              | .column c => (match through c with
-                  | some (t, c') => if t = target then some c' else none
-                  | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true }
-              | .expr _ => none) → e.member = target := by
-          intro target through keep e he
-          obtain ⟨e0, _, c, c', _, _, rfl⟩ := PushDown.mem_passed he
+        have hpm : ∀ {left : Bool} {target : Nat} {rename : Nat → Option Nat} {e : Edge},
+            e ∈ PushDown.passedInto s left target rename edges → e.member = target := by
+          intro left target rename e he
+          obtain ⟨e0, _, value, _, rfl⟩ := PushDown.mem_passed he
           rfl
         exact PState.Untouched.foldl (fun st0 arm => PState.Untouched.foldl
           (fun st1 target => hstep st1 target _ _ fun e he => hpm he) _ st0) _ st

@@ -47,7 +47,7 @@ use std::sync::Arc;
 use crate::from_item::ColumnValue;
 use crate::row_scope::RowScope;
 use crate::scope_plan::{is_name, Membership, Planner};
-use crate::scope_row::{item_row_term, RowCondition, RowExpression, RowTerm, RowTest};
+use crate::scope_row::{item_row_term, RowColumn, RowCondition, RowExpression, RowTerm, RowTest};
 use crate::scope_term::{operand, Affinity, Operand, RunValues};
 use crate::select_syntax::{order_term, parts, Functions, OrderTerm, Part};
 use crate::sql::unparenthesized;
@@ -433,7 +433,8 @@ fn column_expression(
     let term = RowTerm {
         sql: crate::sql::identifier(column),
         qualifier: from.source.qualifier.clone(),
-        columns: vec![(column.to_owned(), affinity)],
+        columns: vec![RowColumn::written(column.to_owned(), affinity)],
+        passed_to: None,
     };
     RowExpression { term: Arc::new(term), affinity: Affinity::Blob }
 }

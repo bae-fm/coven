@@ -16,6 +16,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Edge.orPassed_sound
 #print axioms SqliveNarrowing.RowSubqueryEdge.row_subquery_edge_sound
 #print axioms SqliveNarrowing.PushDown.renamed_sound
+#print axioms SqliveNarrowing.PushDown.judgedOn_sound
+#print axioms SqliveNarrowing.PushDown.value_passed_sound
+#print axioms SqliveNarrowing.PushDown.value_passed_none
 #print axioms SqliveNarrowing.PushDown.push_down_sound
 #print axioms SqliveNarrowing.PushDown.group_key_sound
 #print axioms SqliveNarrowing.Transfer.transfer_sound

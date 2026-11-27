@@ -190,9 +190,9 @@ impl ScopeTerm {
                 }
             }
             Self::Row(term) => {
-                for (column, _) in &term.columns {
-                    if !into.contains(column) {
-                        into.push(column.clone());
+                for read in &term.columns {
+                    if !into.contains(&read.column) {
+                        into.push(read.column.clone());
                     }
                 }
             }
@@ -207,7 +207,15 @@ impl ScopeTerm {
     /// for each of this one's holds the same value in each row: what holds
     /// of every row here holds of those. A part testing a column it gives
     /// none for is left out of an AND, and leaves an OR with nothing.
-    pub(crate) fn renamed(&self, column: &dyn Fn(&str) -> Option<String>) -> Option<Self> {
+    /// A condition SQLite judges passes to rows the statement names `rows`,
+    /// and is left out like the rest when there is no such name: a term that
+    /// edges carry between columns, or that a derived item takes from its
+    /// arms, holds none.
+    pub(crate) fn renamed(
+        &self,
+        column: &dyn Fn(&str) -> Option<String>,
+        rows: Option<&str>,
+    ) -> Option<Self> {
         match self {
             Self::Compare { column: tested, affinity, operand, ordering, inclusive } => {
                 Some(Self::Compare {
@@ -226,9 +234,7 @@ impl ScopeTerm {
             Self::Null { column: tested, not } => {
                 Some(Self::Null { column: column(tested)?, not: *not })
             }
-            // It stays with the table it was written for: a view's own
-            // tables keep the conditions they have.
-            Self::Row(_) => None,
+            Self::Row(term) => term.over(rows?, column).map(Self::Row),
             Self::Truth { condition, ordering, inclusive, is, operand } => Some(Self::Truth {
                 condition: condition.renamed(column)?,
                 ordering: *ordering,
@@ -241,13 +247,16 @@ impl ScopeTerm {
                 affinity: *affinity,
                 operand: operand.clone(),
             }),
-            Self::And(left, right) => match (left.renamed(column), right.renamed(column)) {
-                (Some(left), Some(right)) => Some(left.and(right)),
-                (term, None) | (None, term) => term,
-            },
-            Self::Or(left, right) => {
-                Some(Self::Or(Box::new(left.renamed(column)?), Box::new(right.renamed(column)?)))
+            Self::And(left, right) => {
+                match (left.renamed(column, rows), right.renamed(column, rows)) {
+                    (Some(left), Some(right)) => Some(left.and(right)),
+                    (term, None) | (None, term) => term,
+                }
             }
+            Self::Or(left, right) => Some(Self::Or(
+                Box::new(left.renamed(column, rows)?),
+                Box::new(right.renamed(column, rows)?),
+            )),
         }
     }
 }

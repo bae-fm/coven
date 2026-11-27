@@ -4,7 +4,7 @@ import SqliveNarrowing.Rules.Passed
 of one other item narrows the first to the rows whose value is one some row
 of the other gives, in its own scope (`Planner::edge`).
 
-The member is a column sqlive narrows by, or an expression over one table
+The member is a column sqlive narrows by, or an expression over one
 item's own columns (`RowMember`); the partner is readable alone, since a
 write's lookup reads it alone; a bare partner column has a member column's
 affinity, or none (BLOB), whose values SQLite gives the member's affinity, and

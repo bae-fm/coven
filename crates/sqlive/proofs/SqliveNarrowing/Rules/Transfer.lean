@@ -30,7 +30,8 @@ def armTerm (s : Statement) (st : PState) (k y : Nat) : Option STerm :=
   match (s.core k).output[y]? with
   | some (.expr (.col j c)) =>
     if (s.item j).core = k then
-      (st.items j).term.bind (·.renamed fun c' => if c' = c then some y else none)
+      (st.items j).term.bind
+        (·.renamed (fun c' => if c' = c then some y else none) fun _ _ => none)
     else none
   | _ => none
 
@@ -58,8 +59,9 @@ def carried (s : Statement) (st : PState) (k : Nat) : List (Nat × STerm) :=
       | .column y, .column mc =>
         let rename (c : Nat) : Option Nat := if c = y then some mc else none
         let pulledTerm := if e.nulls then none else pulled s st e.partner y
-        ((st.items e.partner).term.bind (·.renamed rename)).toList.map (e.member, ·) ++
-          (pulledTerm.bind (·.renamed rename)).toList.map (e.member, ·)
+        ((st.items e.partner).term.bind (·.renamed rename fun _ _ => none)).toList.map
+            (e.member, ·) ++
+          (pulledTerm.bind (·.renamed rename fun _ _ => none)).toList.map (e.member, ·)
       | _, _ => []
     else []
 
@@ -81,7 +83,8 @@ def carry (s : Statement) (st : PState) (k : Nat) : PState :=
 
 /-- A term over a missing row, whose columns `rename` passes on to another
 row that is NULL in each of them, holds of that row as renamed. -/
-theorem renamed_none {t t' : STerm} {rename : Nat → Option Nat} (h : t.renamed rename = some t')
+theorem renamed_none {t t' : STerm} {rename : Nat → Option Nat}
+    (h : t.renamed rename (fun _ _ => none) = some t')
     {row : Option Row} (hcols : ∀ c c', rename c = some c' → none = cellOf row c')
     (ht : t.holds none) : t'.holds row := by
   induction t generalizing t' with
@@ -126,14 +129,14 @@ theorem transfer_sound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
     {mc : Nat} {t t' : STerm} (hv : e.value = .column y) (hm : e.memberValue = .column mc)
     (hn : e.nested = false)
     (hh : e.HoldsIn s db f b) (ht : t.holds (b e.partner))
-    (hr : t.renamed (fun c => if c = y then some mc else none) = some t') :
+    (hr : t.renamed (fun c => if c = y then some mc else none) (fun _ _ => none) = some t') :
     t'.holds (b e.member) := by
   rcases hh with ⟨x, hx, hp⟩ | ⟨_, _, _, hx, hnull⟩ | ⟨hvs, _⟩ | ⟨_, _, _, _, hnt, _⟩
   · simp only [hm, PValue.on] at hx
     simp only [hn, Bool.false_eq_true, ite_false] at hp
     obtain ⟨r, hb, hval⟩ := hp
     rw [hb] at ht
-    refine PushDown.renamed_sound hr (fun c c' hc => ?_) ht
+    refine PushDown.renamed_sound hr (fun c c' hc => ?_) (fun _ _ _ h => by cases h) ht
     by_cases hcy : c = y
     · subst hcy
       simp only [ite_true, Option.some.injEq] at hc
@@ -160,7 +163,7 @@ theorem transfer_sound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
       · simp [hcy] at hc
     | some r =>
       rw [hb] at ht
-      refine PushDown.renamed_sound hr (fun c c' hc => ?_) ht
+      refine PushDown.renamed_sound hr (fun c c' hc => ?_) (fun _ _ _ h => by cases h) ht
       by_cases hcy : c = y
       · subst hcy
         simp only [ite_true, Option.some.injEq] at hc
@@ -259,7 +262,7 @@ theorem pulled_sound {s : Statement} {st : PState} {i y q : Nat} {view : Bool}
           exact absurd hcell hy
         | some r0 =>
           have hv := hterms k hk' b' hb' j v r0 hj hterm hbj
-          refine PushDown.renamed_sound hu (fun c₁ c₂ hc => ?_) hv
+          refine PushDown.renamed_sound hu (fun c₁ c₂ hc => ?_) (fun _ _ _ h => by cases h) hv
           by_cases hc₁ : c₁ = c
           · subst hc₁
             simp only [ite_true, Option.some.injEq] at hc

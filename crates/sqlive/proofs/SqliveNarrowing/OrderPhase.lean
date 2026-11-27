@@ -143,7 +143,7 @@ theorem PState.Sem.pushEdges {s : Statement} (h : s.wellFormed = true) {P : Cls}
     (hP : ∀ Z f k b, P Z f k b → s.KeptIn Z f k b) {Fin : PState} {Src : Nat → Prop}
     {Good : Nat → Row → Prop}
     (hGood : ∀ i r, Good i r → ∀ e ∈ Fin.pushed, e.member = i → e.nulls = false →
-      ∀ c, e.memberValue = .column c → r.cell c ≠ none)
+      (e.memberValue.eval r).isSome = true)
     (hcls : ∀ Z f k b d q v, Src d → (s.item d).kind = .derived q v → k ∈ (s.query q).arms →
       (s.core k).windowed = false → (s.query q).limit = none → (s.query q).offset = none →
       P Z f k b → ∃ r, Good d r ∧ s.PassedCells k r b)
@@ -151,8 +151,7 @@ theorem PState.Sem.pushEdges {s : Statement} (h : s.wellFormed = true) {P : Cls}
       t ∈ (s.core k).items → Src t) (narrowFuel : Nat) :
     ∀ (fuel : Nat) (st : PState) (item : Nat) (edges : List Edge), Src item → st.Sem s P →
       st.Passes item edges → (PushDown.pushDown s narrowFuel fuel st item none edges).Grows Fin →
-      (∀ e ∈ edges, e.nulls = false → ∀ c, e.memberValue = .column c → ∀ r, Good item r →
-        r.cell c ≠ none) →
+      (∀ e ∈ edges, e.nulls = false → ∀ r, Good item r → (e.memberValue.eval r).isSome = true) →
       (PushDown.pushDown s narrowFuel fuel st item none edges).Sem s P
   | 0, st, _, _, _, hs, _, _, _ => hs
   | fuel + 1, st, item, edges, hsrc0, hs, hpass, hfin, hedge => by
@@ -204,15 +203,10 @@ theorem PState.Sem.pushEdges {s : Statement} (h : s.wellFormed = true) {P : Cls}
             exact (h13.trans h34).trans (hgrow _ _ _ fun e he =>
               ⟨by rw [PState.joinInner_pushed]; exact List.mem_append_right _ he, hpm e he⟩)
           · exact h13.trans (hgrow _ _ _ fun e he => ⟨List.mem_append_right _ he, hpm e he⟩)
-        have hpm : ∀ {target : Nat} {through : Nat → Option (Nat × Nat)} {keep : Edge → Bool} {e : Edge},
-            e ∈ (edges.filter keep).filterMap (fun e =>
-              match e.memberValue with
-              | .column c => (match through c with
-                  | some (t, c') => if t = target then some c' else none
-                  | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true }
-              | .expr _ => none) → e.member = target := by
-          intro target through keep e he
-          obtain ⟨e0, _, c, c', _, _, rfl⟩ := PushDown.mem_passed he
+        have hpm : ∀ {left : Bool} {target : Nat} {rename : Nat → Option Nat} {e : Edge},
+            e ∈ PushDown.passedInto s left target rename edges → e.member = target := by
+          intro left target rename e he
+          obtain ⟨e0, _, value, _, rfl⟩ := PushDown.mem_passed he
           rfl
         refine foldl_until_rel (R := PState.Grows) PState.Grows.refl (fun hab hbc => hab.trans hbc)
           (fun st0 arm => PState.Grows.foldl (fun st1 target => hstep st1 target _ _ rfl fun e he => hpm he) _ st0)
@@ -230,34 +224,26 @@ theorem PState.Sem.pushEdges {s : Statement} (h : s.wellFormed = true) {P : Cls}
         have hlisted := s.output_listed h hklt hcore hout
         refine hs1.pushStepEdges h hP rfl (fun hne hl Z f b hb => ?_) (fun X hX hXp hXfin => ?_) hfin1
         · obtain ⟨e, he⟩ := List.exists_mem_of_ne_nil _ hne
-          obtain ⟨e0, he0f, hmap⟩ := List.mem_filterMap.mp he
-          obtain ⟨he0, hkeep⟩ := List.mem_filter.mp he0f
-          have hnull : e0.nulls = false := by
-            simp only [hl, Bool.true_and, Bool.not_eq_true'] at hkeep
-            exact hkeep
-          split at hmap
-          · rename_i c hmv
-            obtain ⟨c', hc', _⟩ := Option.map_eq_some_iff.mp hmap
-            split at hc'
-            · rename_i t c'' hthc
-              split at hc'
-              · rename_i htt
-                subst htt
-                obtain ⟨hcore', hagg, hout'⟩ := hthrough c t c'' hthc
-                rw [hcore'] at hb
-                obtain ⟨r, hgood, hcells⟩ := hcls Z f k b item q v hsrc0 hkind hk hwin hlim hoff hb
-                have hval := hedge e0 he0 hnull c hmv r hgood
-                rw [hcells c t c'' hout' hagg] at hval
-                intro hbt
-                rw [hbt] at hval
-                exact hval rfl
-              · cases hc'
-            · cases hc'
-          · cases hmap
+          obtain ⟨e0, he0, value, hvalue, _, hnotis, hbound⟩ := PushDown.mem_passed_kept he
+          have hnull : e0.nulls = false := hnotis hl
+          rw [hcore] at hb
+          rcases hbound with hbound | hstrict
+          · exact ((hP Z f k b hb).facts h).1 t0 hlisted hbound
+          · obtain ⟨r, hgood, hcells⟩ := hcls Z f k b item q v hsrc0 hkind hk hwin hlim hoff hb
+            have hval := hedge e0 he0 hnull r hgood
+            intro hbt
+            have hcols : ∀ c c', PushDown.renameInto arm t0 c = some c' →
+                r.cell c = cellOf (b t0) c' := fun c c' hc => by
+              obtain ⟨_, hagg, hout'⟩ := hthrough c t0 c' (PushDown.renameInto_some hc)
+              exact hcells c t0 c' hout' hagg
+            have hsame := PushDown.value_passed_sound hvalue hcols
+            rw [hbt, PushDown.value_passed_none hvalue hstrict, PValue.on_some] at hsame
+            rw [← hsame] at hval
+            cases hval
         · have hXpass : ∀ e ∈ _, e ∈ X.pushed ∧ e.member = t0 := fun e he => ⟨hXp e he, hpm he⟩
           refine ih X t0 _ (hsrc item q v k t0 hsrc0 hkind hk hlisted) hX
-            (fun e he => Or.inr (hXpass e he)) hXfin fun e he hnull c hmv r hg => ?_
-          exact hGood t0 r hg e (hXfin.2.2 e ((hgrow X t0 _ hXpass).2.2 e (hXp e he))) (hpm he) hnull c hmv
+            (fun e he => Or.inr (hXpass e he)) hXfin fun e he hnull r hg => ?_
+          exact hGood t0 r hg e (hXfin.2.2 e ((hgrow X t0 _ hXpass).2.2 e (hXp e he))) (hpm he) hnull
 
 /-! Placing every item. -/
 
@@ -282,7 +268,7 @@ and passed edges that a row of NULLs fails. -/
 def Planned.Good (Fin : PState) (d : Nat) (r : Row) : Prop :=
   (∀ u, (Fin.items d).term = some u → u.holds (some r) = true) ∧
   ∀ e, (e ∈ (Fin.items d).memberships ∨ (e ∈ Fin.pushed ∧ e.member = d)) → e.nulls = false →
-    ∀ c, e.memberValue = .column c → r.cell c ≠ none
+    (e.memberValue.eval r).isSome = true
 
 /-- Placing an item keeps the invariant for the bindings that matter. -/
 theorem PState.Sem.placed {s : Statement} (h : s.wellFormed = true) {rel : Nat → Row → Bool}
@@ -320,11 +306,11 @@ theorem PState.Sem.placed {s : Statement} (h : s.wellFormed = true) {rel : Nat �
   · intro d q v k t _ _ _ ht
     rw [((s.wellFormed_parts h).items k (s.core_lt ht) t ht).2]
     exact ht
-  · intro e he hnull c hmv r hg
+  · intro e he hnull r hg
     rcases hpass e he with hm | ⟨_, hm⟩
-    · exact hg.2 e (Or.inl ((hgrow.trans hfin).2.1 next e hm)) hnull c hmv
+    · exact hg.2 e (Or.inl ((hgrow.trans hfin).2.1 next e hm)) hnull
     · exact hg.2 e (Or.inl ((hgrow.trans hfin).2.1 next e (by
-        simp only [PState.update, ↓reduceIte]; exact List.mem_append_right _ he))) hnull c hmv
+        simp only [PState.update, ↓reduceIte]; exact List.mem_append_right _ he))) hnull
 
 theorem PState.Sem.ordered_go {s : Statement} (h : s.wellFormed = true) {rel : Nat → Row → Bool}
     {Fin : PState}
@@ -480,18 +466,12 @@ theorem queryTest_good {s : Statement} (last : Option (List (List Value)))
   obtain ⟨bound, hbound, _⟩ := (plan s).scopes_eq last hnd (hall _ hdk d hd)
   rw [hbound] at hsc
   obtain ⟨hterm, _, hmem⟩ := scopeAt_parts hsc
-  refine ⟨hterm, fun e he hn c hc => ?_⟩
+  refine ⟨hterm, fun e he hn => ?_⟩
   rcases he with he | ⟨he, hm⟩
-  · have := membershipScope_value (hmem e he) hn
-    rw [hc] at this
-    simp only [PValue.eval] at this
-    exact Option.isSome_iff_ne_none.mp this
+  · exact membershipScope_value (hmem e he) hn
   · rcases hpushed e he with hne | hp
     · exact absurd hm hne
-    · have := membershipScope_value hp hn
-      rw [hc] at this
-      simp only [PValue.eval] at this
-      exact Option.isSome_iff_ne_none.mp this
+    · exact membershipScope_value hp hn
 
 /-- The planned state says only what holds of each binding a core keeps that
 matters to its query's test, the test the planner's scopes give. -/

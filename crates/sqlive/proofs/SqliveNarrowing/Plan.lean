@@ -55,22 +55,41 @@ def STerm.columns : STerm → List Nat
   | .row i cd => (cd.refs.filterMap fun (j, c) => if j = i then some c else none).eraseDups
   | .and l r | .or l r => (l.columns ++ r.columns).eraseDups
 
+/-- Whether each column `refs` names is one of item `i`'s that `rename` gives
+a column for. -/
+def renames (i : Nat) (rename : Nat → Option Nat) (refs : List (Nat × Nat)) : Bool :=
+  refs.all fun (j, c) => j == i && (rename c).isSome
+
+/-- The condition `cd` on item `i`'s columns, with no subquery, over item
+`target`, whose column `rename c` holds column `c`'s value; `none` when
+`rename` gives no column for one it names (`RowTerm::over`). -/
+def Cond.passed (i target : Nat) (rename : Nat → Option Nat) (cd : Cond) : Option Cond :=
+  if cd.queries.isEmpty && renames i rename cd.refs then
+    some (cd.over target fun c => (rename c).getD c)
+  else none
+
+/-- A condition SQLite judges, passed to item `target` (`Cond.passed`). -/
+def STerm.judgedOn (target : Nat) (rename : Nat → Option Nat) (i : Nat) (cd : Cond) :
+    Option STerm :=
+  (cd.passed i target rename).map (.row target)
+
 /-- The term over another source whose column `rename c` holds column `c`'s
 value: a part testing a column it gives none for is left out of an AND and
-leaves an OR with nothing; a condition SQLite judges stays where it is
-(`ScopeTerm::renamed`). -/
-def STerm.renamed (rename : Nat → Option Nat) : STerm → Option STerm
+leaves an OR with nothing; a condition SQLite judges becomes what `judged`
+gives for it (`ScopeTerm::renamed`). -/
+def STerm.renamed (rename : Nat → Option Nat) (judged : Nat → Cond → Option STerm) :
+    STerm → Option STerm
   | .compare c op v => (rename c).map fun c => .compare c op v
   | .inList c vs => (rename c).map fun c => .inList c vs
   | .null c n => (rename c).map fun c => .null c n
-  | .row .. => none
+  | .row i cd => judged i cd
   | .and l r =>
-    match l.renamed rename, r.renamed rename with
+    match l.renamed rename judged, r.renamed rename judged with
     | some l, some r => some (.and l r)
     | some t, none | none, some t => some t
     | none, none => none
   | .or l r =>
-    match l.renamed rename, r.renamed rename with
+    match l.renamed rename judged, r.renamed rename judged with
     | some l, some r => some (.or l r)
     | _, _ => none
 
@@ -114,6 +133,21 @@ theorem columnValue_eval {affinity pa : Affinity} {p pc : Nat} {v : PValue}
   · split at h
     · cases h; simp [PValue.eval, Expr.eval, rowBind, cellOf]
     · cases h
+
+/-- The columns of its item, `i`, that the value reads. -/
+def PValue.columns : PValue → List Nat
+  | .column c => [c]
+  | .expr e => e.refs.map (·.2)
+
+/-- The value of item `i`'s row over item `target`, whose column `rename c`
+holds column `c`'s value; `none` when `rename` gives no column for one it
+reads (`Member::over`). -/
+def PValue.passed (i target : Nat) (rename : Nat → Option Nat) : PValue → Option PValue
+  | .column c => (rename c).map .column
+  | .expr e =>
+    if !e.refs.isEmpty && e.queries.isEmpty && renames i rename e.refs then
+      some (.expr (e.over target fun c => (rename c).getD c))
+    else none
 
 /-- Whether the value is NULL where every column of its item is: a column
 is, and so is a strict expression. -/

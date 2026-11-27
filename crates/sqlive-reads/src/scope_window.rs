@@ -224,10 +224,9 @@ impl RowWindow {
     /// it passes.
     pub(crate) fn columns(&self) -> impl Iterator<Item = &String> {
         let window = &self.window;
-        window
-            .partition
-            .iter()
-            .chain(window.keys.iter().flat_map(|(term, _)| term.columns.iter().map(|(c, _)| c)))
+        window.partition.iter().chain(
+            window.keys.iter().flat_map(|(term, _)| term.columns.iter().map(|read| &read.column)),
+        )
     }
 
     /// Whether the row `image` passes, or what to ask SQLite. A row with
@@ -259,19 +258,20 @@ impl RowWindow {
         let mut row: Vec<String> = Vec::new();
         let mut named: Vec<&str> = Vec::new();
         for (term, _) in &window.keys {
-            for (column, affinity) in &term.columns {
-                if named.contains(&column.as_str()) {
+            for read in &term.columns {
+                if named.contains(&read.name.as_str()) {
                     continue;
                 }
-                let Some(value) = image.get(column) else {
+                let Some(value) = image.get(&read.column) else {
                     return WindowQuestion::Answered(true);
                 };
-                let Some(typed) = typed(&format!("?{}", bound.len() + 1), *affinity, value) else {
+                let Some(typed) = typed(&format!("?{}", bound.len() + 1), read.affinity, value)
+                else {
                     return WindowQuestion::Answered(true);
                 };
                 bound.push(value.clone());
-                row.push(format!("{typed} AS {}", crate::sql::identifier(column)));
-                named.push(column);
+                row.push(format!("{typed} AS {}", crate::sql::identifier(&read.name)));
+                named.push(&read.name);
             }
         }
         let keys: Vec<String> = window

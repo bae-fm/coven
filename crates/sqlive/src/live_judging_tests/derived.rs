@@ -437,3 +437,81 @@ INSERT INTO u VALUES (1,1,1),(2,2,1)",
     .await;
     db.close();
 }
+
+/// A condition SQLite judges on a subquery's columns passes into the table
+/// the columns come from, as that condition on the table's own columns would,
+/// though the subquery names them its own way: a write to a row it leaves out
+/// wakes nothing. A lookup of the table reads it too, so a row joined to such
+/// a row alone wakes nothing.
+#[tokio::test]
+async fn a_judged_condition_on_a_subquerys_columns_narrows_its_table() {
+    let db = TestDatabase::open(
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, x INTEGER, y INTEGER, v INTEGER);
+CREATE TABLE u(id INTEGER PRIMARY KEY, t INTEGER, w INTEGER);
+INSERT INTO t VALUES (1,1,1,0),(2,2,3,0);
+INSERT INTO u VALUES (1,1,0),(2,2,0)",
+    );
+    for sql in [
+        "SELECT s.p FROM (SELECT id, x AS p, y AS q, v FROM t) AS s WHERE s.p = s.q ORDER BY s.id",
+        // The subquery's alias is the table's name inside it.
+        "SELECT t.p FROM (SELECT id, x AS p, y AS q, v FROM t) AS t WHERE max(t.p, t.q) < 2 ORDER BY t.id",
+        "SELECT r.p FROM (SELECT * FROM (SELECT id, x AS p, y AS q FROM t) AS i) AS r WHERE r.p = r.q ORDER BY r.id",
+    ] {
+        follows(&db, sql, vec![], &[
+            ("INSERT INTO t VALUES (3,4,5,0)", false),
+            ("DELETE FROM t WHERE id = 3", false),
+            ("INSERT INTO t VALUES (3,1,1,0)", true),
+            ("DELETE FROM t WHERE id = 3", true),
+        ]).await;
+    }
+    follows(
+        &db,
+        "SELECT u.w FROM (SELECT id, x AS p, y AS q FROM t) AS s JOIN u ON u.t = s.id WHERE s.p = s.q ORDER BY u.id",
+        vec![],
+        &[
+            ("UPDATE u SET w = w + 1 WHERE id = 2", false),
+            ("UPDATE u SET w = w + 1 WHERE id = 1", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// A value SQLite computes from a subquery's columns narrows the table the
+/// columns come from in a join, as the same value of the table's own columns
+/// would: a write to a row whose value no joined row holds wakes nothing. A
+/// value that is other than NULL where the columns are passes to no table a
+/// LEFT JOIN adds, where it could match with no row.
+#[tokio::test]
+async fn a_computed_value_of_a_subquerys_columns_narrows_its_table() {
+    let db = TestDatabase::open(
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, x INTEGER);
+CREATE TABLE u(id INTEGER PRIMARY KEY, t INTEGER);
+INSERT INTO t VALUES (1,1),(2,2);
+INSERT INTO u VALUES (1,2),(2,3)",
+    );
+    follows(
+        &db,
+        "SELECT s.id FROM (SELECT id, x AS p FROM t) AS s, u WHERE u.id < 10 AND u.t = s.p + 1 ORDER BY s.id",
+        vec![],
+        &[
+            ("INSERT INTO t VALUES (3,9)", false),
+            ("DELETE FROM t WHERE id = 3", false),
+            ("INSERT INTO t VALUES (3,1)", true),
+            ("DELETE FROM t WHERE id = 3", true),
+        ],
+    )
+    .await;
+    // A row of `u` that no row of `t` joins matches `z`'s 0 inside the
+    // statement: the value says nothing of `t`'s rows there, so `t` stays a
+    // LEFT JOIN's, and `u` keeps every row.
+    db.commit("INSERT INTO u VALUES (3,0)");
+    follows(
+        &db,
+        "SELECT s.k FROM (SELECT u.id AS k, t.x AS p FROM u LEFT JOIN t ON t.id = u.id) AS s, u AS z WHERE z.id = 3 AND z.t = CASE WHEN s.p IS NULL THEN 0 ELSE s.p END ORDER BY s.k",
+        vec![],
+        &[("INSERT INTO u VALUES (4,9)", true), ("DELETE FROM u WHERE id = 4", true)],
+    )
+    .await;
+    db.close();
+}

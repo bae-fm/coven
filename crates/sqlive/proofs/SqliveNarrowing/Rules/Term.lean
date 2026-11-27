@@ -72,10 +72,11 @@ def read (s : Statement) (i : Nat) : Cond → Option STerm
     | _, _ => none
   | _ => none
 
-/-- The condition SQLite judges row by row, when item `i` is a table and each
-column `cd` names is one sqlive narrows by (`row_term`). -/
+/-- The condition SQLite judges row by row, when each column `cd` names, of
+item `i`, is one sqlive narrows by (`row_term`). On a derived item it passes
+into the items its columns come from (`Cond.passed`). -/
 def rowTerm (s : Statement) (i : Nat) (cd : Cond) : Option STerm :=
-  if (s.table? i).isSome ∧ cd.refs.all (fun (_, c) => (s.affinity i c).isSome) then
+  if cd.refs.all (fun (_, c) => (s.affinity i c).isSome) then
     some (.row i cd)
   else none
 

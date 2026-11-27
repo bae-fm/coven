@@ -242,6 +242,18 @@ def Expr.queries : Expr → List Nat
   | .isNull e => e.queries
   | .sub q => [q]
 
+/-- `e` over item `target`, whose column `rename c` stands for each column
+`c` it names. -/
+def Expr.over (target : Nat) (rename : Nat → Nat) : Expr → Expr
+  | .col _ c => .col target (rename c)
+  | .lit v => .lit v
+  | .add l r => .add (l.over target rename) (r.over target rename)
+  | .greatest l r => .greatest (l.over target rename) (r.over target rename)
+  | .sub q => .sub q
+  | .coalesce l r => .coalesce (l.over target rename) (r.over target rename)
+  | .iif t y n => .iif (t.over target rename) (y.over target rename) (n.over target rename)
+  | .isNull e => .isNull (e.over target rename)
+
 /-- Whether `e` is NULL wherever every column it names is NULL and its
 subqueries return NULL: each operation in it is NULL where an operand is.
 COALESCE returns a later argument where an earlier one is NULL, a CASE the
@@ -264,6 +276,20 @@ def Cond.refs : Cond → List (Nat × Nat)
   | .not c => c.refs
 
 def Cond.items (c : Cond) : List Nat := c.refs.map (·.1)
+
+/-- `c` over item `target`, as `Expr.over` gives its expressions. -/
+def Cond.over (target : Nat) (rename : Nat → Nat) : Cond → Cond
+  | .cmp op l r => .cmp op (l.over target rename) (r.over target rename)
+  | .collated key op l r => .collated key op (l.over target rename) (r.over target rename)
+  | .null e n => .null (e.over target rename) n
+  | .inList e vs => .inList (e.over target rename) (vs.map (Expr.over target rename))
+  | .inQuery e q n => .inQuery (e.over target rename) q n
+  | .exists q n => .exists q n
+  | .rowSub vs q isIn n => .rowSub (vs.map (Expr.over target rename)) q isIn n
+  | .rowEq ls rs => .rowEq (ls.map (Expr.over target rename)) (rs.map (Expr.over target rename))
+  | .and l r => .and (l.over target rename) (r.over target rename)
+  | .or l r => .or (l.over target rename) (r.over target rename)
+  | .not c => .not (c.over target rename)
 
 def Cond.queries : Cond → List Nat
   | .cmp _ l r | .collated _ _ l r => l.queries ++ r.queries

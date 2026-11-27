@@ -112,7 +112,9 @@ impl Planner<'_> {
         let mut found = Vec::new();
         parts(member_expr, &mut found);
         let term = item_row_term(self, core, item, member_expr, &found)?;
-        Some(Member { item, value: MemberValue::Expression(term), affinity: Affinity::Blob })
+        let strict = strict(member_expr, self.functions);
+        let value = MemberValue::Expression { term, strict };
+        Some(Member { item, value, affinity: Affinity::Blob })
     }
 
     /// The edge `member_expr = other` gives, written in `core` with `other`
@@ -277,7 +279,7 @@ impl Planner<'_> {
             }
             // SQLite gives an expression's value the column's affinity, and
             // so does the question that judges a changed row (`scope_row.rs`).
-            (Some(_), MemberValue::Expression(_)) => PartnerValue::Column(column),
+            (Some(_), MemberValue::Expression { .. }) => PartnerValue::Column(column),
             // A column sqlive gives no affinity, as a view's or a
             // function's: a lookup compares it as the statement does, with
             // whatever affinity SQLite gives it.
@@ -405,11 +407,11 @@ impl Planner<'_> {
                 .source
                 .term
                 .as_ref()
-                .and_then(|term| term.renamed(&rename));
+                .and_then(|term| term.renamed(&rename, None));
             let pulled = (!edge.nulls)
                 .then(|| crate::derived::pulled(self, edge.partner, compared))
                 .flatten()
-                .and_then(|term| term.renamed(&rename));
+                .and_then(|term| term.renamed(&rename, None));
             carried.extend(own.into_iter().chain(pulled).map(|term| (edge.member.item, term)));
         }
         for (item, term) in carried {
@@ -479,9 +481,10 @@ impl From<MemberColumn> for Member {
 pub(crate) enum MemberValue {
     /// One of its columns, lowercase.
     Column(String),
-    /// An expression over a table's own columns, whose value in a changed
-    /// row a write asks SQLite for (`scope_row.rs`).
-    Expression(Arc<RowTerm>),
+    /// An expression over a source's own columns, whose value in a changed
+    /// row a write asks SQLite for (`scope_row.rs`), and whether it is NULL
+    /// wherever those columns are.
+    Expression { term: Arc<RowTerm>, strict: bool },
 }
 
 impl Member {
@@ -489,8 +492,40 @@ impl Member {
     pub(crate) fn column(&self) -> Option<&str> {
         match &self.value {
             MemberValue::Column(column) => Some(column),
-            MemberValue::Expression(_) => None,
+            MemberValue::Expression { .. } => None,
         }
+    }
+
+    /// The columns of its item that its value reads.
+    pub(crate) fn columns(&self) -> impl Iterator<Item = &str> {
+        let (column, term) = match &self.value {
+            MemberValue::Column(column) => (Some(column.as_str()), None),
+            MemberValue::Expression { term, .. } => (None, Some(term)),
+        };
+        let read = term.into_iter().flat_map(|term| term.columns.iter());
+        column.into_iter().chain(read.map(|read| read.column.as_str()))
+    }
+
+    /// This member of the item `item`, whose rows the statement names `rows`
+    /// and whose column `column` gives for each of the columns it reads holds
+    /// the same value in each row, or `None` when it gives none for one. An
+    /// expression that can give a value where those columns are NULL passes
+    /// to no item that can be missing (`Planner::source_of`).
+    pub(crate) fn over(
+        &self,
+        item: usize,
+        rows: &str,
+        missing: bool,
+        column: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<Self> {
+        let value = match &self.value {
+            MemberValue::Column(read) => MemberValue::Column(column(read)?),
+            MemberValue::Expression { strict, .. } if missing && !strict => return None,
+            MemberValue::Expression { term, strict } => {
+                MemberValue::Expression { term: term.over(rows, column)?, strict: *strict }
+            }
+        };
+        Some(Self { item, value, affinity: self.affinity })
     }
 }
 

@@ -200,7 +200,7 @@ impl RowScope {
             }
             Self::JoinedAll(group) => into.extend(group.columns().cloned()),
             Self::Row(condition) => {
-                into.extend(condition.term.columns.iter().map(|(column, _)| column.clone()));
+                into.extend(condition.term.columns.iter().map(|read| read.column.clone()));
             }
             Self::Window(window) => into.extend(window.columns().cloned()),
             Self::And(left, right) | Self::Or(left, right) => {

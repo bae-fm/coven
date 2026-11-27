@@ -58,9 +58,7 @@ placed: those an arm passes on a column an edge of `d` compares, at every
 depth (`derived::receivers`). -/
 def receivers (s : Statement) (st : PState) (d : Nat) : List Nat :=
   (st.edges.filter (·.member == d)).flatMap fun e =>
-    match e.memberValue with
-    | .column c => PushDown.reached s s.fuel d c
-    | .expr _ => []
+    e.memberValue.columns.flatMap (PushDown.reached s s.fuel d)
 
 /-- `found` with each item of `items` that `adds` takes, given those found,
 added one at a time until it takes none, in at most `fuel` steps. -/

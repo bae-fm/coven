@@ -295,7 +295,7 @@ impl Planner<'_> {
     /// compared with.
     fn receiving(&self, edges: &EdgesOfItems, item: usize) -> Vec<usize> {
         let compared =
-            edges.by_member[item].iter().filter_map(|edge| self.edges[*edge].member.column());
+            edges.by_member[item].iter().flat_map(|edge| self.edges[*edge].member.columns());
         crate::derived::receivers(self, item, compared)
     }
 }

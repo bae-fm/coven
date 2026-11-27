@@ -15,8 +15,9 @@
 //! as a match.
 //!
 //! The condition may be true of the NULLs a missing right row gives, so it
-//! never makes a LEFT JOIN inner, and it isn't passed into a view's or
-//! subquery's rows.
+//! never makes a LEFT JOIN inner. A condition on a view's or subquery's
+//! columns passes into the table those columns come from, as a condition on
+//! that table's own columns (`RowTerm::over`).
 //!
 //! An expression over such columns that an equality compares with another
 //! source's value narrows the table to the rows whose value some row of that
@@ -43,17 +44,85 @@ use crate::select_syntax::{Functions, Part};
 use crate::sql_value::SqlValue as Value;
 use sqlite3_parser::ast::Expr;
 
-/// An expression over one table's row, a conjunct or an ORDER BY term's
+/// An expression over one source's row, a conjunct or an ORDER BY term's
 /// value, and what it names, before a run's values.
 #[derive(Debug)]
 pub(crate) struct RowTerm {
     /// The expression as SQL, its parameters numbered as the plan's
     /// statement numbers them.
     pub(crate) sql: String,
-    /// How the statement names the table's rows.
+    /// The name the SQL gives the row it reads.
     pub(crate) qualifier: String,
-    /// The columns it names, lowercase, with their affinities.
-    pub(crate) columns: Vec<(String, Affinity)>,
+    /// The columns the SQL names.
+    pub(crate) columns: Vec<RowColumn>,
+    /// How the statement names the rows the term is of, when they are not the
+    /// ones the SQL was written over: those of a source a derived item passes
+    /// its columns on from.
+    pub(crate) passed_to: Option<String>,
+}
+
+/// A column a row term's SQL names.
+#[derive(Clone, Debug)]
+pub(crate) struct RowColumn {
+    /// The name the SQL gives it, lowercase.
+    pub(crate) name: String,
+    /// The column of the term's rows that holds its value, lowercase.
+    pub(crate) column: String,
+    pub(crate) affinity: Affinity,
+}
+
+impl RowColumn {
+    /// The column `column` of the rows the SQL is written over.
+    pub(crate) fn written(column: String, affinity: Affinity) -> Self {
+        Self { name: column.clone(), column, affinity }
+    }
+}
+
+impl RowTerm {
+    /// This term over the rows the statement names `rows`, of a source whose
+    /// column `column` gives for each of this one's rows' columns holds the
+    /// same value, or `None` when it gives none for one of them.
+    pub(crate) fn over(
+        &self,
+        rows: &str,
+        column: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<Arc<Self>> {
+        let columns = self
+            .columns
+            .iter()
+            .map(|read| Some(RowColumn { column: column(&read.column)?, ..read.clone() }))
+            .collect::<Option<_>>()?;
+        Some(Arc::new(Self {
+            sql: self.sql.clone(),
+            qualifier: self.qualifier.clone(),
+            columns,
+            passed_to: Some(rows.to_owned()),
+        }))
+    }
+
+    /// The expression as SQL over the rows the term is of, as a lookup that
+    /// reads them writes it. Over rows the SQL was not written over, it reads
+    /// each name from them. SQLite keeps a column's type through such a
+    /// SELECT over a table, though not over a row of cast values, so a
+    /// question about a changed row writes its values under the SQL's own
+    /// names instead (`RowCondition::question`).
+    fn over_rows(&self) -> String {
+        let Some(rows) = &self.passed_to else {
+            return self.sql.clone();
+        };
+        let columns: Vec<String> = self
+            .columns
+            .iter()
+            .map(|read| {
+                format!(
+                    "{rows}.{} AS {}",
+                    crate::sql::identifier(&read.column),
+                    crate::sql::identifier(&read.name)
+                )
+            })
+            .collect();
+        format!("(SELECT ({}) FROM (SELECT {}) AS {})", self.sql, columns.join(","), self.qualifier)
+    }
 }
 
 /// An expression over one table's row, with the affinity SQLite gives its
@@ -64,9 +133,9 @@ pub(crate) struct RowExpression {
     pub(crate) affinity: Affinity,
 }
 
-/// The term `expr`, a condition or a value whose names resolve to the table
-/// item `item` of `core`, gives, when SQLite can evaluate it row by row;
-/// `parts` are its parts.
+/// The term `expr`, a condition or a value whose names resolve to item `item`
+/// of `core`, a table or a derived item, gives, when SQLite can evaluate it
+/// row by row; `parts` are its parts.
 pub(crate) fn item_row_term(
     planner: &Planner,
     core: usize,
@@ -75,7 +144,9 @@ pub(crate) fn item_row_term(
     parts: &[Part<'_>],
 ) -> Option<Arc<RowTerm>> {
     let from = &planner.items[item];
-    from.source.table()?;
+    if from.source.table().is_none() && from.derived.is_none() {
+        return None;
+    }
     row_term(planner.functions, &from.source.qualifier, expr, parts, &|name| {
         let (_, column) = planner.resolve(core, name)?;
         let affinity = from.columns.affinity(&column)?;
@@ -95,7 +166,7 @@ pub(crate) fn row_term(
     parts: &[Part<'_>],
     column: &dyn Fn(&Expr<'_>) -> Option<(String, Affinity)>,
 ) -> Option<Arc<RowTerm>> {
-    let mut columns: Vec<(String, Affinity)> = Vec::new();
+    let mut columns: Vec<RowColumn> = Vec::new();
     for part in parts {
         match part {
             Part::Name(name) => {
@@ -105,8 +176,8 @@ pub(crate) fn row_term(
                     return None;
                 }
                 let (column, affinity) = column(name)?;
-                if !columns.iter().any(|(named, _)| *named == column) {
-                    columns.push((column, affinity));
+                if !columns.iter().any(|read| read.name == column) {
+                    columns.push(RowColumn::written(column, affinity));
                 }
             }
             Part::Function(name, arguments, window) => {
@@ -121,7 +192,12 @@ pub(crate) fn row_term(
     if columns.is_empty() {
         return None;
     }
-    Some(Arc::new(RowTerm { sql: expr.to_string(), qualifier: qualifier.to_owned(), columns }))
+    Some(Arc::new(RowTerm {
+        sql: expr.to_string(),
+        qualifier: qualifier.to_owned(),
+        columns,
+        passed_to: None,
+    }))
 }
 
 /// A run's condition: what it tests of a term, with the run's parameters.
@@ -155,7 +231,11 @@ impl RowCondition {
     /// `None` when no cast gives that value the term's affinity and keeps it
     /// as it is.
     pub(crate) fn sql(&self, bound: &mut Vec<Value>) -> Option<String> {
-        let sql = &self.term.sql;
+        self.testing(&self.term.over_rows(), bound)
+    }
+
+    /// What the condition tests of `sql`, its term's expression.
+    fn testing(&self, sql: &str, bound: &mut Vec<Value>) -> Option<String> {
         Some(match &self.test {
             RowTest::Holds => format!("({sql})"),
             RowTest::Null { not } => {
@@ -191,12 +271,12 @@ impl RowCondition {
     pub(crate) fn question(&self, image: &RowImage) -> Option<(String, Vec<Value>)> {
         let term = &self.term;
         let mut bound = self.parameters.clone();
-        let condition = self.sql(&mut bound)?;
+        let condition = self.testing(&term.sql, &mut bound)?;
         let mut row = Vec::with_capacity(term.columns.len());
-        for (column, affinity) in &term.columns {
-            let value = image.get(column)?;
-            let typed = typed(&format!("?{}", bound.len() + 1), *affinity, value)?;
-            row.push(format!("{typed} AS {}", crate::sql::identifier(column)));
+        for read in &term.columns {
+            let value = image.get(&read.column)?;
+            let typed = typed(&format!("?{}", bound.len() + 1), read.affinity, value)?;
+            row.push(format!("{typed} AS {}", crate::sql::identifier(&read.name)));
             bound.push(value.clone());
         }
         let sql = format!(

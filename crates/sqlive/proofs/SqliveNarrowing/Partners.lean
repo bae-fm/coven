@@ -156,18 +156,14 @@ theorem PState.Lookups.pushDown {s : Statement} (hwf : s.wellFormed = true) (nar
       split
       · exact h
       · refine foldl_invariant _ (fun st0 arm harm hst0 => ?_) _ h
-        refine foldl_invariant _ (fun st1 target _ hst1 => ?_) _ hst0
+        refine foldl_invariant _ (fun st1 target htarget hst1 => ?_) _ hst0
         obtain ⟨q, v, k, _, _, _, hk, _, harmk⟩ := PushDown.mem_arms hfound harm
-        have hpassed : ∀ e ∈ (edges.filter fun e => !((st1.items target).leftOn.isSome && e.nulls)).filterMap
-            (fun e => match e.memberValue with
-              | .column c => ((match arm[c]?.join with
-                  | some (t, c') => if t = target then some c' else none
-                  | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true })
-              | .expr _ => none),
+        obtain ⟨ct, ct', hct⟩ := PushDown.mem_targets htarget
+        have hpassed : ∀ e ∈ PushDown.passedInto s (st1.items target).leftOn.isSome target (PushDown.renameInto arm target) edges,
             (s.item e.partner).readable = true ∧ e.member ∈ (s.core (s.item e.member).core).items := by
           intro e he
-          obtain ⟨e0, he0, c, c', _, hthrough, rfl⟩ := PushDown.mem_passed he
-          obtain ⟨hcore, _, hout⟩ := harmk c target c' hthrough
+          obtain ⟨e0, he0, value, _, rfl⟩ := PushDown.mem_passed he
+          obtain ⟨hcore, _, hout⟩ := harmk ct target ct' hct
           have hklt := ((s.wellFormed_parts hwf).arms q (s.query_lt hk) k hk).1
           exact ⟨hedges e0 he0, by
             show target ∈ (s.core (s.item target).core).items
@@ -186,20 +182,10 @@ theorem PState.Lookups.pushDown {s : Statement} (hwf : s.wellFormed = true) (nar
               | none => st1) with
               edges := (match renamed with
                 | some r => st1.addTerm target r
-                | none => st1).edges ++ (edges.filter fun e => !((st1.items target).leftOn.isSome && e.nulls)).filterMap
-                  (fun e => match e.memberValue with
-                    | .column c => ((match arm[c]?.join with
-                        | some (t, c') => if t = target then some c' else none
-                        | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true })
-                    | .expr _ => none),
+                | none => st1).edges ++ PushDown.passedInto s (st1.items target).leftOn.isSome target (PushDown.renameInto arm target) edges,
               pushed := (match renamed with
                 | some r => st1.addTerm target r
-                | none => st1).pushed ++ (edges.filter fun e => !((st1.items target).leftOn.isSome && e.nulls)).filterMap
-                  (fun e => match e.memberValue with
-                    | .column c => ((match arm[c]?.join with
-                        | some (t, c') => if t = target then some c' else none
-                        | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true })
-                    | .expr _ => none) } := by
+                | none => st1).pushed ++ PushDown.passedInto s (st1.items target).leftOn.isSome target (PushDown.renameInto arm target) edges } := by
             intro renamed
             refine ⟨fun e he => (List.mem_append.mp he).elim ((hst2 _).1 e) (fun he => (hpassed e he).1),
               (hst2 _).2.1, (hst2 _).2.2.1, (hst2 _).2.2.2.1, fun e he => ?_⟩

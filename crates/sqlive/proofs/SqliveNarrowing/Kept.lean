@@ -129,26 +129,47 @@ theorem coreBindings_within {s : Statement} {Z : Db} {E : Bind → Nat → List 
 /-! Pushed edges. -/
 
 /-- A pushed edge's scope passes the target's row when the derived item's
-edge's scope passes the derived row, whose column `c` holds the target's
-column `c'`. -/
+edge's scope passes the derived row, whose columns the target's row holds in
+the columns `rename` gives. -/
 theorem membershipScope_pushed {bound : Nat → RScope} {rowsOf : Nat → List Row} {e0 e : Edge}
-    {c c' : Nat} {r0 r : Row} (h0 : e0.memberValue = .column c) (h : e.memberValue = .column c')
+    {rename : Nat → Option Nat} {r0 r : Row}
+    (h : e0.memberValue.passed e0.member e.member rename = some e.memberValue)
     (hp : e0.partner = e.partner) (hv : e0.value = e.value) (hn : e0.nulls = e.nulls)
-    (hcell : r0.cell c = r.cell c')
+    (hcols : ∀ c c', rename c = some c' → r0.cell c = cellOf (some r) c')
     (hpass : (Planned.membershipScope bound e0).passes rowsOf r0 = true) :
     (Planned.membershipScope bound e).passes rowsOf r = true := by
+  have hsame : e.memberValue.eval r = e0.memberValue.eval r0 := by
+    have := PushDown.value_passed_sound h hcols
+    rwa [PValue.on_some, PValue.on_some] at this
   unfold Planned.membershipScope at hpass ⊢
-  rw [h0] at hpass
-  rw [h, ← hp, ← hv, ← hn]
-  cases hval : e0.value with
-  | column y =>
-    rw [hval] at hpass
-    simp only at hpass ⊢
-    cases hvs : RScope.equalValues y (bound e0.partner) <;> rw [hvs] at hpass <;>
-      simpa [RScope.passes, PValue.eval, hcell] using hpass
-  | expr x =>
-    rw [hval] at hpass
-    simpa [RScope.passes, PValue.eval, hcell] using hpass
+  rw [← hp, ← hv, ← hn]
+  cases h0 : e0.memberValue with
+  | column c =>
+    rw [h0] at hpass h hsame
+    simp only [PValue.passed, Option.map_eq_some_iff] at h
+    obtain ⟨c', _, hc'⟩ := h
+    rw [← hc'] at hsame ⊢
+    simp only [PValue.eval] at hsame
+    cases hval : e0.value with
+    | column y =>
+      rw [hval] at hpass
+      simp only at hpass ⊢
+      cases hvs : RScope.equalValues y (bound e0.partner) <;> rw [hvs] at hpass <;>
+        simpa [RScope.passes, PValue.eval, hsame] using hpass
+    | expr x =>
+      rw [hval] at hpass
+      simpa [RScope.passes, PValue.eval, hsame] using hpass
+  | expr m =>
+    rw [h0] at hpass h hsame
+    simp only [PValue.passed] at h
+    split at h
+    · cases h' : e.memberValue with
+      | column c' => rw [h'] at h; cases h
+      | expr m' =>
+        rw [h'] at hsame
+        cases hval : e0.value <;> rw [hval] at hpass <;> simp only at hpass ⊢ <;>
+          simp only [RScope.passes] at hpass ⊢ <;> rw [hsame] <;> exact hpass
+    · cases h
 
 /-- The derived item a pushed edge comes from is an item its core lists. -/
 theorem pushed_source_listed {s : Statement} (hwf : s.wellFormed = true) {d : Nat} {e0 : Edge}
@@ -164,7 +185,7 @@ theorem pushed_source_listed {s : Statement} (hwf : s.wellFormed = true) {d : Na
 item reads the statement's own query. -/
 theorem pushed_not_root {s : Statement} (hwf : s.wellFormed = true) {e : Edge}
     (he : e ∈ (plan s).state.pushed) (hroot : (s.item e.member).core ∈ (s.query s.root).arms) : False := by
-  obtain ⟨_, _, d, q0, v, k0, _, _, hd, _, _, hk0, _, _, hcore0, _, _, e0, he0, _⟩ := plan_pushed s he
+  obtain ⟨_, _, d, q0, v, k0, _, hd, _, _, hk0, _, hcore0, _, e0, he0, _⟩ := plan_pushed s he
   have hdl := pushed_source_listed hwf he0
   have hq0 : q0 ∈ s.nestedQueries (s.item d).core :=
     List.mem_append_left _ (List.mem_filterMap.mpr ⟨d, hdl, by simp [hd]⟩)
@@ -181,17 +202,18 @@ theorem pushed_passes {s : Statement} (hwf : s.wellFormed = true) {Y : Db}
     (hrel : relevant s (planRel s Y last) q k (evalQuery s Z g) b = true)
     (hbi : b i = some r) (he : e ∈ (plan s).state.pushed) (hm : e.member = i) :
     (Planned.membershipScope ((plan s).scopes last) e).passes (lookupRows s Y) r = true := by
-  obtain ⟨_, _, d, q0, v, k0, c, c', hd, hlim, hoff, hk0, hagg, hwin, hcore0, hout, hmv, e0, he0, hmv0, hp,
+  obtain ⟨_, _, d, q0, v, k0, rename, hd, hlim, hoff, hk0, hwin, hcore0, hout, e0, he0, hpassed, hp,
     hv, hn⟩ := plan_pushed s he
   have hcorei : (s.item i).core = k := ((s.wellFormed_parts hwf).items k (s.core_lt hi) i hi).2
   rw [hm, hcorei] at hcore0
   subst hcore0
   obtain rfl := s.wellFormed_armOf hwf hk0 hk
-  rw [hm] at hagg hout
   obtain ⟨r0, hr0, hcells⟩ := relevant_cells hrel hwin
-  have hcell : r0.cell c = r.cell c' := by
-    rw [hcells c i c' hout hagg, hbi]
-    rfl
+  have hcols : ∀ c c', rename c = some c' → r0.cell c = cellOf (some r) c' := by
+    intro c c' hc
+    obtain ⟨hagg, hout'⟩ := hout c c' hc
+    rw [hm] at hagg hout'
+    rw [hcells c i c' hout' hagg, hbi]
   have htest := queryTest_scope (pushed_source_listed hwf he0) hd hlim hoff hr0
   simp only [Planned.scopeTest, Bool.and_eq_true, List.all_eq_true, Bool.or_eq_true, bne_iff_ne,
     ne_eq] at htest
@@ -202,7 +224,7 @@ theorem pushed_passes {s : Statement} (hwf : s.wellFormed = true) {Y : Db}
     · rcases htest.2 e0 he0 with h | h
       · exact absurd hm0 h
       · exact h
-  exact membershipScope_pushed hmv0 hmv hp hv hn hcell h0
+  exact membershipScope_pushed hpassed hp hv hn hcols h0
 
 /-! Partners. -/
 
