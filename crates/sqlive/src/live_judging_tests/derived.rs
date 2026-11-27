@@ -600,3 +600,28 @@ async fn a_column_passed_on_under_several_names_takes_each_condition_once() {
     );
     db.close();
 }
+
+/// An ordered window that joins a one-table subquery looks the window's table
+/// up first, as it would the subquery's table written out, so the subquery's
+/// table narrows to the rows that join the window.
+#[tokio::test]
+async fn an_ordered_window_joining_a_subquery_narrows_its_table() {
+    let db = TestDatabase::open(
+        "CREATE TABLE listing(release TEXT PRIMARY KEY, title TEXT NOT NULL);
+CREATE TABLE storage(release TEXT PRIMARY KEY, stored INTEGER NOT NULL);
+CREATE INDEX by_title ON listing(title, release);
+INSERT INTO listing VALUES ('b','B'),('c','C'),('d','D');
+INSERT INTO storage VALUES ('b',1),('c',1),('d',1)",
+    );
+    follows(
+        &db,
+        "SELECT l.release, s.stored FROM listing AS l CROSS JOIN (SELECT release, stored FROM storage) AS s ON s.release = l.release ORDER BY l.title, l.release LIMIT 2",
+        vec![],
+        &[
+            ("INSERT INTO storage VALUES ('e',1)", false),
+            ("UPDATE storage SET stored = 0 WHERE release = 'b'", true),
+        ],
+    )
+    .await;
+    db.close();
+}
