@@ -140,6 +140,17 @@ pub enum Cause {
         /// The column.
         column: String,
     },
+    /// SQL that reads a table function names a column without its table.
+    #[error(
+        "{concerns} reads a table function, so each column it names needs its table: \
+         `{column}` has none"
+    )]
+    BareColumn {
+        /// The call's name.
+        concerns: String,
+        /// The column, as the SQL writes it.
+        column: String,
+    },
     /// sqlive can't read the statement's conditions.
     #[error("sqlive can't analyze {concerns}: {why}")]
     Unanalyzable {

@@ -79,6 +79,10 @@ pub(crate) struct Expansion {
     pub(crate) placed: Vec<Placed>,
     /// Each spread's range in the SQL before, and the text that replaces it.
     pub(crate) edits: Vec<(Range<usize>, String)>,
+    /// The SQL before, as a SELECT the parser reads that holds what it
+    /// writes and none of its fragments' SQL: each spread is a subquery of
+    /// its relations' arguments, and each `@parent.column` is NULL.
+    pub(crate) own: String,
 }
 
 /// The paths the markers of `sql` name, as written, and not `@parent`.
@@ -117,6 +121,7 @@ pub(crate) fn expand(
 ) -> Result<Expansion, Cause> {
     let tokens = lex::tokens(sql);
     let mut edits = Vec::new();
+    let mut own = Vec::new();
     let mut placed = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
@@ -137,6 +142,8 @@ pub(crate) fn expand(
                     text: "@parent".to_owned(),
                 });
             }
+            let column = tokens[index + 2].range.end;
+            own.push((token.range.start..column, "NULL".to_owned()));
             index += 3;
             continue;
         }
@@ -164,12 +171,15 @@ pub(crate) fn expand(
             next = close + 1;
         }
         let alias = alias_at(sql, &tokens, next, tokens.len()).map(|(alias, _)| alias);
-        let (text, place) = instantiate(registry, concerns, record, &arguments)?;
+        let (text, place, relations) = instantiate(registry, concerns, record, &arguments)?;
         edits.push((token.range.start..end, text));
+        let written: String = relations.iter().map(|relation| format!(", {relation}")).collect();
+        own.push((token.range.start..end, format!("(SELECT 1{written})")));
         placed.push(Placed { alias, record: record.clone(), place });
         index = next;
     }
-    Ok(Expansion { sql: lex::apply(sql, &edits), placed, edits })
+    let own = lex::apply(sql, &own);
+    Ok(Expansion { sql: lex::apply(sql, &edits), placed, edits, own })
 }
 
 fn arguments_of(
@@ -220,13 +230,14 @@ fn arguments_of(
 }
 
 /// The SQL of `record` as a subquery for the spread whose arguments are
-/// `arguments`, and the alias that gives its parent row.
+/// `arguments`, the alias that gives its parent row, and the `own` SQL of
+/// each relation's argument.
 fn instantiate(
     registry: &Registry,
     concerns: &str,
     record: &Record,
     arguments: &[Argument],
-) -> Result<(String, Place), Cause> {
+) -> Result<(String, Place, Vec<String>), Cause> {
     let fragment = record.path.clone();
     for (position, argument) in arguments.iter().enumerate() {
         let known = argument.name == "parent"
@@ -276,12 +287,14 @@ fn instantiate(
         }
     }
     let mut ctes = Vec::new();
+    let mut written = Vec::new();
     for relation in &record.relations {
         let argument = find(&relation.name).ok_or_else(|| Cause::MissingRelation {
             fragment: fragment.clone(),
             relation: relation.name.clone(),
         })?;
-        let rows = expand(registry, concerns, false, &argument.value)?.sql;
+        let Expansion { sql: rows, own, .. } = expand(registry, concerns, false, &argument.value)?;
+        written.push(own);
         if !rows.trim_start().starts_with('(') {
             return Err(Cause::BadArgument { fragment, argument: relation.name.clone() });
         }
@@ -297,7 +310,7 @@ fn instantiate(
         Some((_, parent, table)) => Place::Value { parent, table },
         None => Place::Table,
     };
-    Ok((format!("({})", with_ctes(&ctes, &body)), place))
+    Ok((format!("({})", with_ctes(&ctes, &body)), place, written))
 }
 
 /// The prefix of the CTE names of the fragment at `path`: its crate and its

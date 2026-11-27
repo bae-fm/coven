@@ -110,6 +110,11 @@ pub(crate) fn compile(
         return Err(fail(Cause::WriteInRead { concerns: header.name.clone() }));
     }
     check_parameters(header, &prepared).map_err(&fail)?;
+    let bare = sqlive_reads::bare_column_beside_table_function(&expansion.own)
+        .map_err(|error| fail(Cause::Sqlite(error)))?;
+    if let Some(column) = bare {
+        return Err(fail(Cause::BareColumn { concerns: header.name.clone(), column }));
+    }
     let mut warnings = Vec::new();
     // A read ships its scope plan, built from the SQL it runs; a fragment
     // runs only inside the reads that spread it.

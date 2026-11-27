@@ -44,6 +44,7 @@ pub const FTS5_CONTENT: &str = "SELECT v.name,c.name FROM pragma_table_list AS v
 ///
 /// `read` reads every table and view, with the SQL that made each, its
 /// columns and its indexes, so no lookup asks SQLite again.
+#[derive(Default)]
 pub struct MainSchema {
     /// Each table and view, by its name, ASCII lowercased as SQLite compares
     /// names.

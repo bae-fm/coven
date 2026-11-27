@@ -167,7 +167,7 @@ sqlive_compose::read!(Case { said: Option<String> }, r#"
 #[test]
 fn a_table_functions_column_takes_a_declared_type_that_holds_null() {
     for sql in [
-        "SELECT value FROM json_each(:list)",
+        "SELECT w.value FROM json_each(:list) AS w",
         "SELECT s.value FROM (SELECT j.value FROM json_each(:list) AS j) AS s",
     ] {
         let lib = format!(

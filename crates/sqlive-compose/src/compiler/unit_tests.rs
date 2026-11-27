@@ -237,3 +237,73 @@ sqlive_compose::read!(After { total: i64, titles: i64 }, r#"
         ]
     );
 }
+
+/// A call whose own SQL reads a table function qualifies each column it
+/// names, wherever it names it, its spreads' arguments included. A name of
+/// a result column that is a whole ORDER BY term, which nothing can qualify,
+/// and `true` and `false` are no column's name.
+#[test]
+fn sql_that_reads_a_table_function_qualifies_every_column() {
+    let failures = |sql: &str| {
+        messages(compile_lib(&format!(
+            "sqlive_compose::read!(Picked {{ n: Option<i64> }}, r#\"{sql}\"#);"
+        )))
+    };
+    for sql in [
+        "SELECT 1 AS n FROM issues AS i, json_each('[1]') AS w WHERE title = w.value",
+        "SELECT (SELECT count(*) FROM json_each('[1]') AS w WHERE w.value = 1) AS n \
+         FROM issues AS i WHERE title = ''",
+        "SELECT title AS n FROM issues AS i JOIN json_tree('[1]') AS w ON w.value = i.id",
+        "SELECT 1 AS n FROM issues AS i, json_each('[1]') AS w ORDER BY title",
+        "SELECT 1 AS n FROM issues AS i, json_each('[1]') AS w ORDER BY lower(title)",
+    ] {
+        assert_eq!(
+            failures(sql),
+            ["src/lib.rs:1:1: Picked reads a table function, so each column it names \
+              needs its table: `title` has none"],
+            "{sql}"
+        );
+    }
+    for sql in [
+        "SELECT w.value + 0 AS n FROM json_each('[1]') AS w WHERE true ORDER BY n, w.key",
+        "SELECT w.value + 0 AS n FROM json_each('[1]') AS w \
+         UNION SELECT i.rowid FROM issues AS i ORDER BY n",
+        "SELECT i.rowid AS n FROM issues AS i WHERE title = ''",
+    ] {
+        compile_lib(&format!("sqlive_compose::read!(Picked {{ n: Option<i64> }}, r#\"{sql}\"#);"))
+            .unwrap_or_else(|error| panic!("{sql}: {error:?}"));
+    }
+}
+
+/// A fragment is checked by its own SQL, so a read that spreads one that
+/// reads no table function leaves its bare names alone, and so does a
+/// `@parent` marker.
+#[test]
+fn each_call_is_checked_by_the_sql_it_writes() {
+    compile_lib(
+        r##"
+sqlive_compose::fragment!(Titles { title: String }, r#"SELECT title FROM issues"#);
+sqlive_compose::read!(Picked, r#"
+    SELECT t.* FROM json_each('[1]') AS w JOIN @crate::Titles AS t ON t.title = w.value
+"#);
+"##,
+    )
+    .unwrap();
+}
+
+/// A relation's argument is SQL the call writes, in the spread though it is.
+#[test]
+fn a_relations_argument_qualifies_every_column_beside_a_table_function() {
+    let lib = r##"
+sqlive_compose::fragment!(Chosen with chosen(issue_id TEXT) { issue_id: String },
+    r#"SELECT chosen.issue_id FROM chosen"#);
+sqlive_compose::read!(Picked, r#"
+    SELECT c.* FROM @crate::Chosen(chosen: (SELECT value FROM json_each('["a"]'))) AS c
+"#);
+"##;
+    assert_eq!(
+        messages(compile_lib(lib)),
+        ["src/lib.rs:4:1: Picked reads a table function, so each column it names needs its \
+          table: `value` has none"]
+    );
+}

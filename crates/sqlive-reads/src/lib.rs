@@ -5,6 +5,7 @@
 //! takes the compiler of `sqlive-compose`, which reads these, and the live
 //! queries that run on them stay in `sqlive`.
 
+mod bare_names;
 mod comparison;
 mod compiled_plan;
 mod derived;
@@ -44,6 +45,7 @@ mod unreported_columns;
 mod view_trees;
 mod whole_view_names;
 
+pub use bare_names::bare_column_beside_table_function;
 pub use compiled_plan::{
     CompiledPlan, CompiledStatement, SchemaDiffers, Unanalyzable, UndecodablePlan,
 };

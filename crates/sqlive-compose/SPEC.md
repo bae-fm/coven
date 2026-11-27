@@ -781,9 +781,10 @@ sqlive reports this one's `issues` whole, with the reason
 
 A list whose length the request decides, such as the issues the person selected,
 goes in one parameter: a JSON array of their ids, read with `json_each`. SQL
-that reads `json_each` qualifies every column it names. sqlive doesn't know the
-columns of a table function, so beside one it can't tell which table a bare name
-belongs to, and a condition on a bare name narrows nothing.
+that reads a table function, such as `json_each`, qualifies every column it
+names, or the build fails (section 8). sqlive doesn't know the columns of a
+table function, so beside one it can't tell which table a bare name belongs to,
+and a condition on a bare name narrows nothing.
 
 ## 8. What the build checks
 
@@ -854,6 +855,28 @@ does a header field that the SQL doesn't name:
 tracker/src/issue_page.rs:6:1: IssuePage reads :isue, which its header does not declare
 tracker/src/issue_page.rs:6:1: IssuePage declares issue, which its SQL does not read
 ```
+
+**Columns beside a table function.** When the own SQL of a `read!` or a
+`fragment!` reads a table function anywhere, every column that SQL names has its
+table (section 7):
+
+```sql
+SELECT i.title FROM issues AS i, json_each(:ids) AS w WHERE id = w.value
+```
+
+```text
+tracker/src/picked.rs:3:1: Picked reads a table function, so each column it names needs its table: `id` has none
+```
+
+A call's own SQL includes what it writes in the arguments that its spreads bind
+to relations. It doesn't include the SQL of the fragments it spreads, which the
+compiler checks where it compiles each fragment. Two kinds of bare name pass,
+because no table can qualify them: `true` and `false`, and a whole `ORDER BY`
+term that is the name `AS` gives a result column. In a compound, whose
+`ORDER BY` names only result columns, the term can also be the name of a column
+that one of its `SELECT`s takes. Every other bare name fails, among them a
+result column's name in a `WHERE` or a `GROUP BY`, and a text in double quotes.
+The compiler doesn't check a `write!` this way, since no live query runs it.
 
 **Column types.** A computed column with no declaration fails:
 
