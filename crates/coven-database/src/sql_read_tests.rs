@@ -32,7 +32,7 @@ const PANTRY: &str = "SELECT title FROM notes WHERE id = :id";
 /// `PANTRY` with the scope plan built against `schema`, as an app's build
 /// compiles it.
 fn compiled(schema: &str) -> sqlive::CompiledStatement {
-    let probe = sqlive::SchemaProbe::open(&[schema.to_owned()], &[], &[], &[]).unwrap();
+    let probe = sqlive::SchemaProbe::open(&[schema.to_owned()], &[], &[]).unwrap();
     let plan = probe.compiled_plan(PANTRY).unwrap().unwrap().encode();
     sqlive::CompiledStatement { sql: PANTRY, plan: Box::leak(plan.into_boxed_str()) }
 }

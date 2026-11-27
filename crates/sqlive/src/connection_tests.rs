@@ -319,7 +319,6 @@ fn a_profile_inside_another_leaves_the_outer_tracing() {
             settings: crate::SqliteSettings::default(),
             readers: std::num::NonZeroUsize::MIN,
             prepare_on_reader: false,
-            whole_views: Arc::new(crate::WholeViews::new([])),
             policy: &|| crate::NoPolicy,
             setup: &|_, _| Ok(()),
             capture: None,

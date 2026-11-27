@@ -18,17 +18,10 @@ pub struct Setup {
     pub functions: Vec<Function>,
     /// The collations the schema uses, by name.
     pub collations: Vec<String>,
-    /// The views and tables the host's live queries read whole, by name.
-    pub whole_views: Vec<String>,
 }
 
 impl Setup {
     pub(crate) fn probe(&self) -> sqlive_reads::SqliteResult<sqlive_reads::SchemaProbe> {
-        sqlive_reads::SchemaProbe::open(
-            &self.sql,
-            &self.functions,
-            &self.collations,
-            &self.whole_views,
-        )
+        sqlive_reads::SchemaProbe::open(&self.sql, &self.functions, &self.collations)
     }
 }

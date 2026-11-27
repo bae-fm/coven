@@ -592,8 +592,7 @@ const STEPS: usize = 12;
 /// a compiler ships it, when sqlive can analyze it.
 fn compiled(sql: &str) -> Option<crate::CompiledStatement> {
     let nz = crate::StandInFunction { name: "nz".into(), arguments: 1, deterministic: true };
-    let probe =
-        crate::SchemaProbe::open(&[schema_sql()], &[nz], &["fold".to_owned()], &[]).unwrap();
+    let probe = crate::SchemaProbe::open(&[schema_sql()], &[nz], &["fold".to_owned()]).unwrap();
     crate::tests::compiled(&probe, sql)
 }
 

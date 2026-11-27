@@ -215,18 +215,13 @@ fn why_whole(
     matches!(scope, RowScope::All).then(|| format!("nothing narrows `{}`", source.qualifier))
 }
 
-/// What the live query that reads `whole` whole depends on when it runs
-/// `sql` on `connection`.
+/// What a live query depends on when it runs `sql` on `connection`.
 #[cfg(any(test, feature = "test-utils"))]
-pub fn read_report(
-    connection: &rusqlite::Connection,
-    sql: &str,
-    whole: &crate::read_capture::WholeViews,
-) -> rusqlite::Result<ReadReport> {
+pub fn read_report(connection: &rusqlite::Connection, sql: &str) -> rusqlite::Result<ReadReport> {
     let sql = crate::sql::up_to_nul(sql);
     let statement = connection.prepare(sql)?;
     let schema = crate::schema_objects::MainSchema::read(connection)?;
-    let (plan, _) = ScopePlan::read(connection, &schema, sql, &statement, whole, Places::Find)?;
+    let (plan, _) = ScopePlan::read(connection, &schema, sql, &statement, Places::Find)?;
     Ok(ReadReport::of(&plan))
 }
 

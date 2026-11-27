@@ -9,7 +9,6 @@ use std::fmt;
 use rusqlite::{Connection, Statement};
 use serde::{Deserialize, Serialize};
 
-use crate::read_capture::WholeViews;
 use crate::read_report::ReadReport;
 use crate::schema_objects::MainSchema;
 use crate::scope_plan::{Found, ScopePlan};
@@ -56,8 +55,6 @@ struct FoundObject {
     /// The SQL that made it, then each of its unique indexes: every other
     /// fact a plan reads of the object follows from those.
     definition: Vec<String>,
-    /// Whether the host names it among those a live query reads whole.
-    whole: bool,
 }
 
 /// Why sqlive can't analyze a statement, which so has no compiled plan.
@@ -112,10 +109,8 @@ impl CompiledPlan {
         schema: &MainSchema,
         sql: &str,
         statement: &Statement<'_>,
-        whole: &WholeViews,
     ) -> rusqlite::Result<Result<Self, Unanalyzable>> {
-        let (plan, found) =
-            ScopePlan::read(connection, schema, sql, statement, whole, Places::Find)?;
+        let (plan, found) = ScopePlan::read(connection, schema, sql, statement, Places::Find)?;
         if let ReadReport::Whole { why } = ReadReport::of(&plan) {
             return Ok(Err(Unanalyzable { why }));
         }
@@ -123,7 +118,7 @@ impl CompiledPlan {
             return Ok(Err(Unanalyzable { why: why.clone() }));
         }
         let functions = Functions::read(connection)?;
-        let schema = PlanSchema::of(schema, &functions, whole, &found);
+        let schema = PlanSchema::of(schema, &functions, &found);
         Ok(Ok(Self { plan, schema }))
     }
 
@@ -146,22 +141,20 @@ impl CompiledPlan {
         ReadReport::of(&self.plan)
     }
 
-    /// Whether `schema`, `connection`'s, where a live query reads `whole`
-    /// whole, and the functions `connection` defines show each object and
-    /// function as building the plan found it; or else what they show
-    /// otherwise.
+    /// Whether `schema`, `connection`'s, and the functions `connection`
+    /// defines show each object and function as building the plan found it;
+    /// or else what they show otherwise.
     pub fn check(
         &self,
         connection: &Connection,
         schema: &MainSchema,
-        whole: &WholeViews,
     ) -> rusqlite::Result<Result<(), SchemaDiffers>> {
         let functions = Functions::read(connection)?;
         let found = Found {
             objects: self.schema.objects.keys().cloned().collect(),
             functions: self.schema.functions.keys().cloned().collect(),
         };
-        let now = PlanSchema::of(schema, &functions, whole, &found);
+        let now = PlanSchema::of(schema, &functions, &found);
         let differ = self.schema.differences(&now);
         Ok(if differ.is_empty() { Ok(()) } else { Err(SchemaDiffers { differ }) })
     }
@@ -173,20 +166,15 @@ impl CompiledPlan {
 }
 
 impl PlanSchema {
-    /// What `schema` and `functions`, where a live query reads `whole`
-    /// whole, show of the names `found` holds.
-    fn of(schema: &MainSchema, functions: &Functions, whole: &WholeViews, found: &Found) -> Self {
+    /// What `schema` and `functions` show of the names `found` holds.
+    fn of(schema: &MainSchema, functions: &Functions, found: &Found) -> Self {
         let objects = found
             .objects
             .iter()
             .map(|name| {
-                let object =
-                    schema.definition(name).map(|(stored, kind, definition)| FoundObject {
-                        whole: whole.contains(&stored),
-                        stored,
-                        kind: kind.to_owned(),
-                        definition,
-                    });
+                let object = schema.definition(name).map(|(stored, kind, definition)| {
+                    FoundObject { stored, kind: kind.to_owned(), definition }
+                });
                 (name.clone(), object)
             })
             .collect();

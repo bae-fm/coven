@@ -460,9 +460,7 @@ impl<P: Policy> HostSql<P> {
             let started = Instant::now();
             let plan = CompiledPlan::decode(statement.plan)
                 .map_err(|error| failed(crate::Error::UndecodablePlan(error)))?;
-            let whole = self.authorization.whole_views();
-            let checked =
-                self.authorization.unrecorded(|| plan.check(&self.connection, schema, whole))?;
+            let checked = self.authorization.unrecorded(|| plan.check(&self.connection, schema))?;
             let checked_in = started.elapsed();
             tracing::debug!(?checked_in, "sqlive checked a compiled scope plan");
             match checked {
@@ -501,8 +499,7 @@ impl<P: Policy> HostSql<P> {
                 Some(cookie) => self.app_statements.plans.schema(cookie, || self.read_schema())?,
                 None => Arc::new(self.read_schema()?),
             };
-            let whole = self.authorization.whole_views();
-            ScopePlan::build(&self.connection, &schema, sql, statement, whole)
+            ScopePlan::build(&self.connection, &schema, sql, statement)
         })?;
         let built_in = started.elapsed();
         let ScopePlanSize { sources, cores, edges } = plan.size;

@@ -48,7 +48,6 @@ pub(crate) fn setup() -> Setup {
         sql: vec![SCHEMA.to_owned()],
         functions: vec![Function { name: "fold_case".into(), arguments: 1, deterministic: true }],
         collations: vec![],
-        whole_views: vec![],
     }
 }
 

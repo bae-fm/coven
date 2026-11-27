@@ -28,7 +28,7 @@ table, adds a row, and receives the new count.
 use panic_as_error::{Bug, BugSink, BugSinkRef, CarriesBug};
 use sqlive::{
     Database, Error, Handle, HandleFailure, LiveQuery, NoPolicy, Options, PolicyError,
-    ReconfigurableLiveQuery, Recorded, SqliteSettings, WholeViews,
+    ReconfigurableLiveQuery, Recorded, SqliteSettings,
 };
 use std::sync::Arc;
 
@@ -72,7 +72,6 @@ fn main() {
             settings: SqliteSettings::default(),
             readers: 2.try_into().unwrap(),
             prepare_on_reader: false,
-            whole_views: Arc::new(WholeViews::new(Vec::new())),
             policy: &|| NoPolicy,
             setup: &|_, _| Ok(()),
             capture: Some(Default::default()),
@@ -144,7 +143,6 @@ database in memory, with no rows, that has run the schema's SQL texts in order.
 SQLite refuses to prepare SQL that names a function or a collation it doesn't
 know, so the caller lists the functions (`StandInFunction`) and the collations
 that the schema's SQL uses by name, and the probe registers a stand-in for each.
-The caller also names the views and tables the host's live queries read whole.
 `SchemaProbe::prepare` prepares a statement and returns its result columns, with
 the table column each one is when it is one unchanged (`ColumnOrigin`) and
 whether the statement can give NULL in it, the parameters it reads, and whether

@@ -1,12 +1,11 @@
 //! Each place a statement reads a table has its own entry.
 
-use super::{report_with, SCHEMA};
-use crate::read_capture::WholeViews;
+use super::{report_of, SCHEMA};
 use crate::read_report::read_report;
 
 #[track_caller]
 fn assert_report(sql: &str, entries: &[&str]) {
-    assert_eq!(report_with(sql, &[]).to_string(), entries.join("\n"), "{sql}");
+    assert_eq!(report_of(sql).to_string(), entries.join("\n"), "{sql}");
 }
 
 #[test]
@@ -60,6 +59,6 @@ fn a_table_a_view_names_is_in_the_view() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     connection.execute_batch(SCHEMA).unwrap();
     connection.execute_batch("CREATE VIEW every AS SELECT id FROM releases").unwrap();
-    let report = read_report(&connection, "SELECT id FROM every", &WholeViews::new([])).unwrap();
+    let report = read_report(&connection, "SELECT id FROM every").unwrap();
     assert_eq!(report.to_string(), "releases in `every`: whole: nothing narrows `releases`");
 }

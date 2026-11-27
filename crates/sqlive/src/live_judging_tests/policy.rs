@@ -8,7 +8,7 @@ use rusqlite::hooks::AuthAction;
 use crate::tests::HeardBugs;
 use crate::{
     Database, EngineFailure, Handle, HostSql, LiveQuery, Options, Policy, PolicyAction,
-    ReconfigurableLiveQuery, Recorded, Refresh, WholeViews,
+    ReconfigurableLiveQuery, Recorded, Refresh,
 };
 
 /// The table the policy refused app SQL.
@@ -114,7 +114,6 @@ async fn a_lookup_reads_a_table_app_sql_reads_only_through_a_view() {
             settings: crate::SqliteSettings::default(),
             readers: std::num::NonZeroUsize::MIN,
             prepare_on_reader: false,
-            whole_views: Arc::new(WholeViews::new([])),
             policy: &|| ThroughTheView,
             setup: &|_, _| Ok(()),
             capture: Some(Default::default()),

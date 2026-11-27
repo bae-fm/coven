@@ -1,5 +1,5 @@
 use crate::tests::{HeardBugs, TestError};
-use crate::{Database, Handle, NoPolicy, Options, Setup, WholeViews};
+use crate::{Database, Handle, NoPolicy, Options, Setup};
 use rusqlite::functions::FunctionFlags;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -21,7 +21,6 @@ fn open(directory: &tempfile::TempDir, held: &Arc<AtomicI64>) -> Database<NoPoli
             settings: crate::SqliteSettings::default(),
             readers: std::num::NonZeroUsize::MIN,
             prepare_on_reader: false,
-            whole_views: Arc::new(WholeViews::new([])),
             policy: &|| NoPolicy,
             setup: &setup,
             capture: Some(Default::default()),

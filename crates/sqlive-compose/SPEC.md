@@ -1357,12 +1357,10 @@ the read's name, the table, the place and the reason. The build script turns bot
 name, argument count and determinism of each SQL function, and the name of each
 collation, that the schema uses. SQLite fails to prepare a statement that names
 an unknown function or collation, so the compiler registers a stand-in under
-each of those names. The setup step also names the views and tables the host's
-live queries read whole: a read through one depends on the object itself, so
-each read's scope plan depends on the list. A store checks a plan against its
-own schema, its functions and its list before it first runs the read, and the
-read fails when one of them shows an object or a function otherwise than the
-compiler's schema did ([sqlive's spec](../sqlive/SPEC.md), section 4). The
+each of those names. A store checks each read's scope plan against its own
+schema and functions before it first runs the read, and the read fails when one
+of them shows an object or a function otherwise than the compiler's schema
+did ([sqlive's spec](../sqlive/SPEC.md), section 4). The
 tracker's setup step runs its migrations in order:
 
 ```rust
@@ -1375,7 +1373,6 @@ pub fn setup() -> Setup {
         ],
         functions: vec![Function { name: "fold_case".into(), arguments: 1, deterministic: true }],
         collations: vec![],
-        whole_views: vec![],
     }
 }
 ```

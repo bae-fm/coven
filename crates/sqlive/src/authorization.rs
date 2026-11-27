@@ -9,7 +9,7 @@ use panic_as_error::Bug;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
-use crate::{ReadCapture, ReadFrame, ReadSet, Scopes, WholeViews};
+use crate::{ReadCapture, ReadFrame, ReadSet, Scopes};
 
 /// Whose statement SQLite is preparing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,9 +132,9 @@ impl Judgment {
 
     /// Add `action`, which SQLite reports as it prepares the statement,
     /// through the view or CTE `accessor` when it names one.
-    fn add(&mut self, action: AuthAction<'_>, accessor: Option<&str>, whole: &WholeViews) {
+    fn add(&mut self, action: AuthAction<'_>, accessor: Option<&str>) {
         if let AuthAction::Read { table_name, column_name } = action {
-            self.reads.read(table_name, column_name, accessor, whole);
+            self.reads.read(table_name, column_name, accessor);
         }
         self.refused_in_read |= read_refusal(action).is_some();
         self.refused_in_write |= write_refusal(action).is_some();
@@ -221,8 +221,6 @@ pub(crate) struct SqlAuthorization<P: Policy> {
     /// The handle the connection serves, once it serves one, which a panic
     /// in the authorizer fails.
     handle: Arc<OnceLock<crate::Handle<P::Failure>>>,
-    /// The views and tables a live query reads whole.
-    whole: Arc<WholeViews>,
     /// What the host adds to the rules. The authorizer asks it after its own
     /// rules allow an action.
     policy: Arc<P>,
@@ -264,7 +262,7 @@ struct AuthorizationState<P: Policy> {
 impl<P: Policy> SqlAuthorization<P> {
     /// An authorizer that asks `policy` about each action its own rules
     /// allow.
-    pub(crate) fn new(whole: Arc<WholeViews>, policy: Arc<P>) -> Self {
+    pub(crate) fn new(policy: Arc<P>) -> Self {
         Self {
             state: Arc::new(Mutex::new(AuthorizationState {
                 internal: false,
@@ -285,14 +283,8 @@ impl<P: Policy> SqlAuthorization<P> {
                 panic_next_function: false,
             })),
             handle: Arc::new(OnceLock::new()),
-            whole,
             policy,
         }
-    }
-
-    /// The views and tables a live query reads whole.
-    pub(crate) fn whole_views(&self) -> &WholeViews {
-        &self.whole
     }
 
     /// Panic in the next judgment, as a bug in the authorizer would.
@@ -324,7 +316,6 @@ impl<P: Policy> SqlAuthorization<P> {
         let state = Arc::clone(&self.state);
         let handle = Arc::clone(&self.handle);
         let policy = Arc::clone(&self.policy);
-        let whole = Arc::clone(&self.whole);
         move |context| {
             let mut state = lock_unpoisoned(&state);
             if let Some(bug) = &state.broken {
@@ -337,7 +328,7 @@ impl<P: Policy> SqlAuthorization<P> {
             // and this connection refuses every later statement, repeating
             // the bug its first refusal returned (E15).
             match panic_as_error::caught_sync("authorize a statement", || {
-                state.judge(context, &*policy, &whole)
+                state.judge(context, &*policy)
             }) {
                 Ok(authorization) => authorization,
                 Err(bug) => {
@@ -422,7 +413,7 @@ impl<P: Policy> SqlAuthorization<P> {
     /// so a commit that changes it runs the query again (SPEC.md section 3).
     pub(crate) fn live_reading(&self) -> ReadingSql<'_, P> {
         let reading = self.reading();
-        lock_unpoisoned(&self.state).reads = Some(ReadCapture::new(Arc::clone(&self.whole)));
+        lock_unpoisoned(&self.state).reads = Some(ReadCapture::new());
         reading
     }
 
@@ -686,11 +677,11 @@ impl<P: Policy> AuthorizationState<P> {
 
     /// Judge the statement being prepared, `context`, recording what it
     /// reads and changes.
-    fn judge(&mut self, context: AuthContext<'_>, policy: &P, whole: &WholeViews) -> Authorization {
+    fn judge(&mut self, context: AuthContext<'_>, policy: &P) -> Authorization {
         #[cfg(any(test, feature = "test-utils"))]
         assert!(!std::mem::take(&mut self.panic_next), "the authorizer's state is past repair");
         if let Some(judgment) = &mut self.judgment {
-            judgment.get_or_insert_default().add(context.action, context.accessor, whole);
+            judgment.get_or_insert_default().add(context.action, context.accessor);
         }
         if let (
             AuthAction::Insert { table_name }

@@ -35,8 +35,6 @@ pub struct Options<'a, P: Policy> {
     /// the file or the schema the checks look for. Otherwise the writer
     /// switches the database to WAL and runs `prepare`.
     pub prepare_on_reader: bool,
-    /// The views and tables a live query reads whole.
-    pub whole_views: Arc<crate::WholeViews>,
     /// Each connection's policy, made as the connection opens.
     pub policy: &'a dyn Fn() -> P,
     /// What each connection registers, given that connection's policy,
@@ -98,7 +96,6 @@ impl<P: Policy> Database<P> {
                 path,
                 read_only,
                 (options.policy)(),
-                Arc::clone(&options.whole_views),
                 &options.settings,
                 options.setup,
                 Arc::clone(&plans),

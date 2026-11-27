@@ -1,5 +1,4 @@
 use super::CompiledPlan;
-use crate::read_capture::WholeViews;
 use crate::{MainSchema, SchemaProbe, StandInFunction};
 use rusqlite::Connection;
 
@@ -11,10 +10,9 @@ const SCHEMA: &str = "
 const TRACKS_OF: &str = "SELECT t.title FROM tracks AS t JOIN releases AS r ON r.id = t.release_id
      WHERE r.id = :release AND r.year < 1e999";
 
-fn probe(schema: &str, whole: &[&str]) -> SchemaProbe {
-    let whole: Vec<String> = whole.iter().map(|name| (*name).to_owned()).collect();
+fn probe(schema: &str) -> SchemaProbe {
     let functions = [StandInFunction { name: "fold".into(), arguments: 1, deterministic: true }];
-    SchemaProbe::open(&[schema.to_owned()], &functions, &[], &whole).unwrap()
+    SchemaProbe::open(&[schema.to_owned()], &functions, &[]).unwrap()
 }
 
 fn compiled(probe: &SchemaProbe, sql: &str) -> CompiledPlan {
@@ -33,12 +31,11 @@ fn database(schema: &str, deterministic: bool) -> Connection {
     connection
 }
 
-/// What `plan`, read back from its text, finds different in `connection`,
-/// where a live query reads `whole` whole.
-fn differences(plan: &CompiledPlan, connection: &Connection, whole: &[&str]) -> Vec<String> {
+/// What `plan`, read back from its text, finds different in `connection`.
+fn differences(plan: &CompiledPlan, connection: &Connection) -> Vec<String> {
     let decoded = CompiledPlan::decode(&plan.encode()).unwrap();
     let schema = MainSchema::read(connection).unwrap();
-    match decoded.check(connection, &schema, &WholeViews::new(whole.iter().copied())).unwrap() {
+    match decoded.check(connection, &schema).unwrap() {
         Ok(_) => Vec::new(),
         Err(super::SchemaDiffers { differ }) => differ,
     }
@@ -48,7 +45,7 @@ fn differences(plan: &CompiledPlan, connection: &Connection, whole: &[&str]) -> 
 /// an infinity among them, its join and its parameter.
 #[test]
 fn a_plan_read_back_from_its_text_narrows_as_it_did() {
-    let probe = probe(SCHEMA, &[]);
+    let probe = probe(SCHEMA);
     let plan = compiled(&probe, TRACKS_OF);
     let decoded = CompiledPlan::decode(&plan.encode()).unwrap();
     assert_eq!(decoded.report(), plan.report());
@@ -59,38 +56,37 @@ fn a_plan_read_back_from_its_text_narrows_as_it_did() {
     );
     let connection = database(SCHEMA, true);
     let schema = MainSchema::read(&connection).unwrap();
-    let checked = decoded.check(&connection, &schema, &WholeViews::new([])).unwrap();
+    let checked = decoded.check(&connection, &schema).unwrap();
     assert!(checked.is_ok());
 }
 
-/// A table or view defined otherwise, a unique index added, or a view the
-/// host reads whole now differs, each by its name; an index that keeps no
-/// value unique doesn't, since no plan reads it.
+/// A table or view defined otherwise, or a unique index added, differs by
+/// its name; an index that keeps no value unique doesn't, since no plan
+/// reads it.
 #[test]
 fn a_schema_that_defines_an_object_otherwise_differs_by_its_name() {
-    let probe = probe(SCHEMA, &[]);
+    let probe = probe(SCHEMA);
     let plan = compiled(&probe, TRACKS_OF);
     let changed = SCHEMA.replace("title TEXT)", "title TEXT, position INTEGER)");
-    assert_eq!(differences(&plan, &database(&changed, true), &[]), ["table tracks"]);
+    assert_eq!(differences(&plan, &database(&changed, true)), ["table tracks"]);
     let unique = format!("{SCHEMA} CREATE UNIQUE INDEX titles ON releases (title);");
-    assert_eq!(differences(&plan, &database(&unique, true), &[]), ["table releases"]);
+    assert_eq!(differences(&plan, &database(&unique, true)), ["table releases"]);
     let index = format!("{SCHEMA} CREATE INDEX titles ON releases (title);");
-    assert!(differences(&plan, &database(&index, true), &[]).is_empty());
+    assert!(differences(&plan, &database(&index, true)).is_empty());
 
     let titled = compiled(&probe, "SELECT title FROM titled WHERE id = :id");
     let view = SCHEMA.replace("title <> ''", "title <> 'untitled'");
-    assert_eq!(differences(&titled, &database(&view, true), &[]), ["view titled"]);
-    assert_eq!(differences(&titled, &database(SCHEMA, true), &["titled"]), ["view titled"]);
+    assert_eq!(differences(&titled, &database(&view, true)), ["view titled"]);
 }
 
 /// A function the plan asked about, defined otherwise, differs: whether it
 /// repeats decides whether a condition on its value narrows.
 #[test]
 fn a_function_defined_otherwise_differs() {
-    let probe = probe(SCHEMA, &[]);
+    let probe = probe(SCHEMA);
     let plan = compiled(&probe, "SELECT id FROM releases WHERE fold(title) = :title");
-    assert!(differences(&plan, &database(SCHEMA, true), &[]).is_empty());
-    assert_eq!(differences(&plan, &database(SCHEMA, false), &[]), ["function fold"]);
+    assert!(differences(&plan, &database(SCHEMA, true)).is_empty());
+    assert_eq!(differences(&plan, &database(SCHEMA, false)), ["function fold"]);
 }
 
 /// A statement sqlive can't analyze has no compiled plan: neither one
@@ -99,11 +95,11 @@ fn a_function_defined_otherwise_differs() {
 /// makes it.
 #[test]
 fn a_statement_sqlive_cant_analyze_has_no_plan() {
-    let probe = probe(SCHEMA, &[]);
+    let probe = probe(SCHEMA);
     let why = probe.compiled_plan("SELECT title FROM tracks NATURAL JOIN releases").unwrap();
     assert_eq!(why.err().unwrap().why, "a NATURAL or RIGHT join");
     let unparsed = format!("{SCHEMA} CREATE VIEW unparsed AS SELECT id FROM releases /* open");
-    let probe = SchemaProbe::open(&[unparsed], &[], &[], &["unparsed".to_owned()]).unwrap();
+    let probe = SchemaProbe::open(&[unparsed], &[], &[]).unwrap();
     let why = probe.compiled_plan("SELECT id FROM unparsed").unwrap().err().unwrap().why;
     assert!(why.contains("unparsed"), "{why}");
 }

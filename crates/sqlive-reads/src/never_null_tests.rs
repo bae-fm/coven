@@ -8,7 +8,7 @@ CREATE TABLE verdicts (verdict_id INTEGER PRIMARY KEY, kind TEXT NOT NULL) STRIC
 
 /// What the one SELECT of `sql` can give its first column.
 fn first_column(sql: &str) -> Vec<SelectNull> {
-    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[], &[]).unwrap();
+    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
     let statement = probe.prepare(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
     let nulls = statement.columns[0].nulls.as_ref();
     nulls.expect("the probe reads the statement").selects.clone()

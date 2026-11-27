@@ -1,5 +1,4 @@
 use super::{read_report, ReadReport};
-use crate::read_capture::WholeViews;
 use rusqlite::Connection;
 
 const SCHEMA: &str =
@@ -9,24 +8,23 @@ CREATE TABLE picked(id TEXT);
 CREATE VIRTUAL TABLE notes USING fts5(body);
 CREATE VIEW later AS WITH RECURSIVE c(id) AS (
     SELECT min(id) FROM releases UNION SELECT r.id FROM releases r JOIN c ON r.id > c.id
-) SELECT id FROM c;
-CREATE VIEW shown AS WITH c AS (SELECT * FROM releases) SELECT id FROM c;";
+) SELECT id FROM c;";
 
 /// A view whose SQL SQLite reads and the parser doesn't: its comment never
 /// ends.
 const UNPARSED: &str = "CREATE VIEW unparsed AS SELECT id FROM releases /* never ends";
 
-/// The report of `sql` for a live query that reads `whole` whole.
-fn report_with(sql: &str, whole: &[&str]) -> ReadReport {
+/// The report of `sql` over the schema.
+fn report_of(sql: &str) -> ReadReport {
     let connection = Connection::open_in_memory().unwrap();
     connection.execute_batch(SCHEMA).unwrap();
     connection.execute_batch(UNPARSED).unwrap();
-    read_report(&connection, sql, &WholeViews::new(whole.iter().copied())).unwrap()
+    read_report(&connection, sql).unwrap()
 }
 
 /// The report of `sql` as `unplaced` writes it.
 fn report(sql: &str) -> String {
-    unplaced(report_with(sql, &[]))
+    unplaced(report_of(sql))
 }
 
 /// `report`'s text without its places, for what each place's rows are; the
@@ -40,7 +38,7 @@ fn unplaced(mut report: ReadReport) -> String {
 
 #[track_caller]
 fn assert_whole(sql: &str, why: &str) {
-    assert_eq!(report_with(sql, &[]), ReadReport::Whole { why: why.to_owned() });
+    assert_eq!(report_of(sql), ReadReport::Whole { why: why.to_owned() });
 }
 
 #[test]
@@ -106,7 +104,7 @@ fn a_recursive_cte_keeps_the_statement_whole() {
 #[test]
 fn a_star_of_an_fts5_table_leaves_out_its_hidden_columns() {
     assert!(matches!(
-        report_with("WITH c(body) AS (SELECT * FROM notes) SELECT body FROM c", &[]),
+        report_of("WITH c(body) AS (SELECT * FROM notes) SELECT body FROM c"),
         ReadReport::Entries(_)
     ));
 }
@@ -132,14 +130,6 @@ fn a_view_sqlive_cannot_read_is_whole_beside_a_narrowed_table() {
     assert_eq!(
         report("SELECT t.title FROM tracks t JOIN later l ON l.id = t.release_id WHERE t.id = ?1"),
         "later: whole: a recursive CTE\ntracks: keyed by id"
-    );
-}
-
-#[test]
-fn a_view_the_live_query_reads_whole_is_whole() {
-    assert_eq!(
-        unplaced(report_with("SELECT id FROM shown", &["shown"])),
-        "shown: whole: a view the live query reads whole"
     );
 }
 
@@ -216,12 +206,11 @@ fn a_subquerys_window_is_looked_up() {
 #[test]
 fn a_table_read_through_a_name_of_a_view_read_whole_is_whole() {
     assert_eq!(
-        unplaced(report_with(
+        report(
             "WITH c AS (SELECT id, title FROM tracks WHERE id = ?1)
-             SELECT c.title FROM c JOIN shown s",
-            &["shown"]
-        )),
-        "shown: whole: a view the live query reads whole\n\
+             SELECT c.title FROM c JOIN later l"
+        ),
+        "later: whole: a recursive CTE\n\
          tracks: whole: read through `c`, which a view read whole also names"
     );
 }

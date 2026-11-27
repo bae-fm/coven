@@ -1,4 +1,3 @@
-use crate::read_capture::WholeViews;
 use crate::{MainSchema, ScopePlan};
 use rusqlite::Connection;
 
@@ -13,8 +12,7 @@ fn order(sql: &str) -> Vec<String> {
     connection.execute_batch(SCHEMA).unwrap();
     let statement = connection.prepare(sql).unwrap();
     let schema = MainSchema::read(&connection).unwrap();
-    let plan =
-        ScopePlan::build(&connection, &schema, sql, &statement, &WholeViews::new([])).unwrap();
+    let plan = ScopePlan::build(&connection, &schema, sql, &statement).unwrap();
     let sources = plan.sources.unwrap();
     sources.order.iter().map(|&source| sources.sources[source].qualifier.clone()).collect()
 }

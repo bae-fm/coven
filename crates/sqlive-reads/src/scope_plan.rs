@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use crate::derived::Ctes;
 use crate::from_item::{Columns, FromItem};
-use crate::read_capture::WholeViews;
 use crate::read_report::ReadPlace;
 use crate::row_scope::Scopes;
 use crate::schema_objects::{MainSchema, SchemaLookups};
@@ -100,9 +99,8 @@ impl ScopePlan {
         schema: &MainSchema,
         sql: &str,
         statement: &Statement<'_>,
-        whole: &WholeViews,
     ) -> rusqlite::Result<Self> {
-        Ok(Self::read(connection, schema, sql, statement, whole, Places::Skip)?.0)
+        Ok(Self::read(connection, schema, sql, statement, Places::Skip)?.0)
     }
 
     /// The plan `build` builds, with the names it looked up.
@@ -111,7 +109,6 @@ impl ScopePlan {
         schema: &MainSchema,
         sql: &str,
         statement: &Statement<'_>,
-        whole: &WholeViews,
         places: Places,
     ) -> rusqlite::Result<(Self, Found)> {
         let schema = &SchemaLookups::new(schema);
@@ -143,7 +140,7 @@ impl ScopePlan {
             unreported_columns(connection, schema, &functions, &views, select)?;
         let written = (places == Places::Find).then_some(written);
         let (sources, size) =
-            Sources::read(connection, schema, select, whole, &functions, &views, &picked, written)?;
+            Sources::read(connection, schema, select, &functions, &views, &picked, written)?;
         let plan = Self {
             sources: sources.map_err(|Unread(why)| why.to_owned()),
             unreported: Arc::new(unreported),
@@ -377,7 +374,6 @@ impl Sources {
         connection: &Connection,
         schema: &SchemaLookups<'_>,
         select: &Select<'_>,
-        whole: &WholeViews,
         functions: &Functions,
         views: &ViewTrees<'_>,
         picked: &BTreeSet<Node>,
@@ -391,7 +387,6 @@ impl Sources {
             functions,
             inlined: Vec::new(),
             fts5_shadows: Vec::new(),
-            whole,
             within: None,
             declared_ctes: 0,
             selects: Vec::new(),
@@ -454,8 +449,6 @@ pub(crate) struct Planner<'a, 'v> {
     /// The shadow tables of the contentful FTS5 tables it reads, lowercase
     /// (`Sources::fts5_shadows`).
     pub(crate) fts5_shadows: Vec<String>,
-    /// The views and tables the live query reads whole.
-    pub(crate) whole: &'a WholeViews,
     /// The innermost CTE or app view whose SQL is being read, lowercase.
     pub(crate) within: Option<String>,
     /// How many CTEs the WITHs read so far declare, which numbers each.

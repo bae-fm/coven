@@ -11,7 +11,6 @@ use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
 
 use crate::compiled_plan::{CompiledPlan, Unanalyzable};
-use crate::read_capture::WholeViews;
 use crate::read_report::ReadReport;
 use crate::result_nulls::{statement_nulls, ColumnNulls, SelectNull, StatementNulls};
 use crate::schema_objects::MainSchema;
@@ -92,8 +91,6 @@ pub struct SchemaProbe {
     /// The schema `open` ran, which no later call changes: the probe prepares
     /// statements and runs none.
     schema: MainSchema,
-    /// The views and tables the host's live queries read whole.
-    whole: WholeViews,
 }
 
 impl SchemaProbe {
@@ -106,7 +103,6 @@ impl SchemaProbe {
         schema: &[String],
         functions: &[StandInFunction],
         collations: &[String],
-        whole: &[String],
     ) -> rusqlite::Result<Self> {
         let connection = Connection::open_in_memory()?;
         for function in functions {
@@ -128,7 +124,7 @@ impl SchemaProbe {
             connection.execute_batch(sql)?;
         }
         let schema = MainSchema::read(&connection)?;
-        Ok(Self { connection, schema, whole: WholeViews::new(whole.iter().map(String::as_str)) })
+        Ok(Self { connection, schema })
     }
 
     /// Prepare `sql` and describe it. SQLite's own error says what it can't
@@ -214,14 +210,8 @@ impl SchemaProbe {
     pub fn read_report(&self, sql: &str) -> rusqlite::Result<ReadReport> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;
-        let (plan, _) = ScopePlan::read(
-            &self.connection,
-            &self.schema,
-            sql,
-            &statement,
-            &self.whole,
-            Places::Find,
-        )?;
+        let (plan, _) =
+            ScopePlan::read(&self.connection, &self.schema, sql, &statement, Places::Find)?;
         Ok(ReadReport::of(&plan))
     }
 
@@ -230,7 +220,7 @@ impl SchemaProbe {
     pub fn compiled_plan(&self, sql: &str) -> rusqlite::Result<Result<CompiledPlan, Unanalyzable>> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;
-        CompiledPlan::build(&self.connection, &self.schema, sql, &statement, &self.whole)
+        CompiledPlan::build(&self.connection, &self.schema, sql, &statement)
     }
 }
 

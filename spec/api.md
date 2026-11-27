@@ -3950,10 +3950,8 @@ let moved = handle
 - *What a statement depends on, in tests.* sqlive's `read_report`, with sqlive's
   test-utils feature, says which rows of each table and view a statement depends
   on when a live query runs it ([sqlive's spec, section
-  12](../crates/sqlive/SPEC.md#12-testing-what-a-statement-depends-on)). The
-  views it reads whole are the ones its caller names, and a coven store's live
-  queries name none ([§4](coven.md#4-writing-locally)). A test that depends on sqlive
-  asserts the report of Ben's album page, and fails when the page's statement
+  12](../crates/sqlive/SPEC.md#12-testing-what-a-statement-depends-on)). A test
+  that depends on sqlive asserts the report of Ben's album page, and fails when the page's statement
   starts to read `tracks` whole.
 
 | View | Column | Holds |

@@ -2,8 +2,7 @@
 //! every row, the scope plan a read ships, and the shapes sqlive can't
 //! analyze.
 
-use crate::compiler::crate_compile::tests::{code_of, compile_lib, messages, setup};
-use crate::compiler::{compile_crate, Input, Setup};
+use crate::compiler::crate_compile::tests::{code_of, compile_lib, messages};
 
 #[test]
 fn warnings_name_the_table_and_sqlives_reason() {
@@ -41,39 +40,19 @@ fn shipped_plan(code: &str) -> sqlive_reads::ReadReport {
     sqlive_reads::CompiledPlan::decode(&plan).unwrap().report()
 }
 
-/// A read's code holds the scope plan sqlive builds of it against the schema,
-/// with the views and tables the host's live queries read whole, so a read
-/// of one of those reads it whole.
+/// A read's code holds the scope plan sqlive builds of it against the schema.
 #[test]
-fn a_read_ships_its_scope_plan_built_with_the_hosts_whole_views() {
+fn a_read_ships_its_scope_plan() {
     let lib = r##"
 sqlive_compose::read!(Assignee(issue: String), r#"
     SELECT a.name FROM assignees AS a WHERE a.issue_id = :issue
 "#);
 "##;
-    let compile = |whole_views: Vec<String>| {
-        compile_crate(Input {
-            crate_name: "tracker".to_owned(),
-            source_reader: &|path: &str| {
-                (path == "src/lib.rs")
-                    .then(|| lib.to_owned())
-                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
-            },
-            manifests: Vec::new(),
-            setup: Setup { whole_views, ..setup() },
-        })
-        .unwrap()
-    };
-    let output = compile(Vec::new());
+    let output = compile_lib(lib).unwrap();
     assert!(output.warnings.is_empty());
     assert_eq!(
         shipped_plan(&code_of(&output, "Assignee.rs")).to_string(),
         "issues in `assignees`: keyed by id\npeople in `assignees`: looked up"
-    );
-    let output = compile(vec!["assignees".to_owned()]);
-    assert_eq!(
-        shipped_plan(&code_of(&output, "Assignee.rs")).to_string(),
-        "assignees at line 2, column 24: whole: a view the live query reads whole"
     );
 }
 

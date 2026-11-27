@@ -8,7 +8,7 @@ use rusqlite::hooks::AuthAction;
 use rusqlite::Connection;
 
 use super::{Owner, Policy, PolicyAction, Refresh, SqlAuthorization};
-use crate::{EngineFailure, HostSql, WholeViews};
+use crate::{EngineFailure, HostSql};
 
 /// The table `Recording` refused an insert into.
 #[derive(Debug, thiserror::Error)]
@@ -82,8 +82,7 @@ impl Policy for Recording {
 /// table `local(x)`.
 fn plain(policy: &Arc<Recording>) -> (Connection, SqlAuthorization<Recording>) {
     let mut connection = Connection::open_in_memory().unwrap();
-    let authorization =
-        SqlAuthorization::new(Arc::new(WholeViews::new([])), Arc::<Recording>::clone(policy));
+    let authorization = SqlAuthorization::new(Arc::<Recording>::clone(policy));
     connection.authorizer(Some(authorization.callback())).unwrap();
     {
         let _host = authorization.internal();

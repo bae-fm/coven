@@ -276,7 +276,6 @@ impl DatabaseBuilder {
             sync_functions: self.sync_functions.clone(),
         };
         let path = self.directory.database_path();
-        let whole = Arc::new(sqlive::WholeViews::new([]));
         // Commits are reported here once the writer observes them, after
         // migrating; the transfers in flight report their starts and ends.
         let observer = store_observer(self.directory.bugs());
@@ -309,7 +308,6 @@ impl DatabaseBuilder {
                 settings: self.sqlite.clone(),
                 readers: READERS,
                 prepare_on_reader: false,
-                whole_views: whole.clone(),
                 policy: &|| CovenPolicy::new(&tables),
                 setup: &setup,
                 capture: Some(recorded),
@@ -345,7 +343,6 @@ impl DatabaseBuilder {
                                 &observer,
                                 settings.device_id,
                                 &tables,
-                                &whole,
                                 live,
                                 call,
                             )
@@ -396,7 +393,6 @@ impl DatabaseBuilder {
                 settings: coven_only_settings(),
                 readers: NonZeroUsize::MIN,
                 prepare_on_reader: false,
-                whole_views: Arc::new(sqlive::WholeViews::new([])),
                 policy: &|| CovenPolicy::new(&[]),
                 setup: &input_setup,
                 capture: None,
@@ -487,7 +483,6 @@ impl DatabaseBuilder {
         let lock = self.directory.lock_read_only()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
-        let whole = Arc::new(sqlive::WholeViews::new([]));
         // Only the cache connection commits, and nothing subscribes to it.
         let observer = store_observer(self.directory.bugs());
         // A read-only handle transfers nothing: every file reads as waiting.
@@ -516,7 +511,6 @@ impl DatabaseBuilder {
                 settings: self.sqlite.clone(),
                 readers: READERS,
                 prepare_on_reader: true,
-                whole_views: whole,
                 policy: &|| CovenPolicy::read_only(&tables),
                 setup: &setup,
                 capture: None,
@@ -702,14 +696,8 @@ pub(crate) fn coven_only(
 ) -> Result<StoreSql, DbError> {
     let functions = crate::SqlFunctions::default();
     let setup = crate::app_policy::setup(&functions, views);
-    let connection = StoreSql::open(
-        path,
-        read_only,
-        CovenPolicy::new(&[]),
-        Arc::new(sqlive::WholeViews::new([])),
-        &coven_only_settings(),
-        &setup,
-    )?;
+    let connection =
+        StoreSql::open(path, read_only, CovenPolicy::new(&[]), &coven_only_settings(), &setup)?;
     Ok(connection)
 }
 

@@ -47,7 +47,7 @@ mod whole_view_names;
 pub use compiled_plan::{
     CompiledPlan, CompiledStatement, SchemaDiffers, Unanalyzable, UndecodablePlan,
 };
-pub use read_capture::{ReadCapture, ReadFrame, WholeViews};
+pub use read_capture::{ReadCapture, ReadFrame};
 #[cfg(any(test, feature = "test-utils"))]
 pub use read_report::read_report;
 pub use read_report::{ReadEntry, ReadPlace, ReadReport, ReadRows};

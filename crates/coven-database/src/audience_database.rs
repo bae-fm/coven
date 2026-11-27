@@ -23,7 +23,6 @@ use sqlive::rusqlite::types::Value as SqlValue;
 use sqlive::sql::identifier;
 use sqlive::Setup;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 /// Stages the database for a run from the live connection, whose schema and
 /// rows it copies.
@@ -64,7 +63,6 @@ impl AudienceDatabase {
         observer: &crate::store_failure::StoreHandle,
         device: coven_foundation::id_source::DeviceId,
         tables: &[SyncedTable],
-        whole: &Arc<sqlive::WholeViews>,
         live: &StoreSql,
         call: &StoreCall<'_>,
     ) -> Result<Self, DbError> {
@@ -78,7 +76,6 @@ impl AudienceDatabase {
             &directory.audience_database_path(),
             false,
             CovenPolicy::new(tables),
-            Arc::clone(whole),
             sqlite,
             &crate::app_policy::setup(functions, Some(&views)),
         )?;

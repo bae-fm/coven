@@ -257,38 +257,33 @@ pub(crate) fn read_item<'a>(
             let written = name.name.0;
             let name = stored.to_ascii_lowercase();
             let object = if kind == "view" {
-                let why = if planner.whole.contains(&stored) {
-                    Unread("a view the live query reads whole")
-                } else {
-                    let read = (
-                        planner.items.len(),
-                        planner.cores.len(),
-                        planner.edges.len(),
-                        planner.inlined.len(),
-                    );
-                    match read_derived_item(
-                        connection,
-                        planner,
-                        crate::derived::Named::View(&stored),
-                        qualifier.clone(),
-                        parent,
-                        ctes,
-                    )? {
-                        Ok((source, columns, derived)) => {
-                            planner.inlined.push(name);
-                            return Ok(Ok(item(source, columns, Some(derived))));
-                        }
-                        // A view sqlive can't read as cores of its own, as
-                        // one with a recursive CTE, is read for its values
-                        // alone, and its tables whole, as a view read whole
-                        // is.
-                        Err(unread) => {
-                            planner.items.truncate(read.0);
-                            planner.cores.truncate(read.1);
-                            planner.edges.truncate(read.2);
-                            planner.inlined.truncate(read.3);
-                            unread
-                        }
+                let read = (
+                    planner.items.len(),
+                    planner.cores.len(),
+                    planner.edges.len(),
+                    planner.inlined.len(),
+                );
+                let why = match read_derived_item(
+                    connection,
+                    planner,
+                    crate::derived::Named::View(&stored),
+                    qualifier.clone(),
+                    parent,
+                    ctes,
+                )? {
+                    Ok((source, columns, derived)) => {
+                        planner.inlined.push(name);
+                        return Ok(Ok(item(source, columns, Some(derived))));
+                    }
+                    // A view sqlive can't read as cores of its own, as one
+                    // with a recursive CTE, is read whole: for its values
+                    // alone, and its tables whole.
+                    Err(unread) => {
+                        planner.items.truncate(read.0);
+                        planner.cores.truncate(read.1);
+                        planner.edges.truncate(read.2);
+                        planner.inlined.truncate(read.3);
+                        unread
                     }
                 };
                 // A read SQLite reports inside a view read whole names the
@@ -303,8 +298,7 @@ pub(crate) fn read_item<'a>(
             };
             // An ordinary table, a contentful FTS5 table, whose rows sqlive
             // sees change as its content table's do, or a view read only for
-            // its values: a view read whole can show what the host's memory
-            // holds as well as its tables.
+            // its values.
             let stored_from = format!("main.{} AS {qualifier}", crate::sql::identifier(&stored));
             let (columns, from) = if contentful {
                 let name = stored.to_ascii_lowercase();

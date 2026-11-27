@@ -222,14 +222,7 @@ fn a_database_keeps_the_page_size_and_auto_vacuum_it_was_created_with() {
 /// `settings`.
 fn lone(settings: &SqliteSettings) -> Result<HostSql<NoPolicy>, TestError> {
     let directory = tempfile::tempdir().unwrap();
-    HostSql::open(
-        &directory.path().join("lone.sqlite"),
-        false,
-        NoPolicy,
-        Arc::new(crate::WholeViews::new([])),
-        settings,
-        &|_, _| Ok(()),
-    )
+    HostSql::open(&directory.path().join("lone.sqlite"), false, NoPolicy, settings, &|_, _| Ok(()))
 }
 
 #[test]
@@ -392,7 +385,6 @@ fn wal_refusal_names_the_selected_journal_mode() {
         Path::new(":memory:"),
         false,
         NoPolicy,
-        Arc::new(crate::WholeViews::new([])),
         &SqliteSettings::default(),
         &|_, _| Ok(()),
     )

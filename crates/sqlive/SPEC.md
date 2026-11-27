@@ -36,9 +36,8 @@ database between devices. The host opens the database, decides what its
 connections run, and runs SQL of two kinds on them: its own, and the *app's*,
 the SQL of the program the host serves. The host's *policy* judges each
 statement as SQLite prepares it, on top of sqlive's own rules. The host's setup
-registers its SQL functions, collations and the values it keeps in memory on
-every connection. And the host names the views a live query reads whole, such
-as coven's views of its own state, which change with what coven holds in memory.
+registers its SQL functions, collations and the tables it keeps in memory on
+every connection.
 
 ## 1. A database and its connections
 
@@ -65,7 +64,6 @@ or the schema, that the checks look for.
 - `readers`, how many read-only connections the database opens beside the
   writer;
 - `prepare_on_reader`, as above;
-- `whole_views`, the views and tables a live query reads whole (section 3);
 - `policy`, which makes each connection's policy as the connection opens;
 - `setup`, which registers what each connection needs before any SQL runs on it;
 - `capture`, which makes the writer's commits wake the handle's live queries,
@@ -108,8 +106,8 @@ so the app can't take the database out of WAL mode, which readers' snapshots
 rest on. A host that needs a different setting asks for it in `Options`
 (section 10).
 
-`Setup` registers the host's SQL functions, its collations, and the values it
-keeps in memory that its functions read (section 3), on every connection as it
+`Setup` registers the host's SQL functions, its collations, and the tables it
+keeps in memory (section 3), on every connection as it
 opens and before any statement runs there. A function registered with
 `scalar_function` that panics fails the statement that called it, and the app's
 call fails with `Error::Bug`; the function changed nothing, so the connection
@@ -308,88 +306,6 @@ request and revision that produced it, and its cause: a new request, a write, or
 both arrived before the run (`LiveQueryCause`). `set` fails with
 `LiveQueryClosed` once the query is dropped.
 
-### Values the host keeps in memory
-
-Some facts a host shows last only as long as its process, so it keeps them in
-memory instead of a table: coven keeps the files it is uploading this way, and
-shows them through views (coven's spec,
-[§4](../../spec/coven.md#4-writing-locally)). The host registers each such value
-with `Setup::snapshot_value`, and its SQL functions read it.
-
-A read sees such a value as it stood at its snapshot, as it sees the tables. A
-statement reads the tables from its transaction's snapshot, which fixes the
-commits it sees. A function that read the host's memory as each call ran could
-join those commits to memory that a later commit's consequences had already
-changed, a moment that never existed. So each transaction takes every value
-once, as its snapshot is fixed, and every call in the transaction reads what it
-took. A read fixes its snapshot and takes the values while no commit of the
-database is underway, so the values are those of a moment between its
-snapshot's last commit and the next. A write takes them as it begins: it holds
-the database's write lock, so no other commit can come between its snapshot and
-its values. A read that fixes its snapshot while a write commits waits for that
-commit to finish.
-
-When a value changes, the host calls `Handle::changed_without_write` with the
-view columns that show it, and each live query that read one of those columns
-runs again, as if a write had changed what it read.
-
-### Tables the host keeps in memory
-
-Some facts last only as long as the host's process and have a key, such as the
-files it is sending, each by its id. The host keeps such facts in a host table
-instead of a table of the database. It declares each one with a `CREATE TABLE`
-that has a primary key, in `HostTables::new`, and registers the `HostTables` on
-each connection of one database with `Setup::host_tables`. Every connection of
-that database then reads each table by its name, in statements, views and
-triggers, as a virtual table sqlive serves. SQL can't write it, `sqlite_schema`
-doesn't list it, and its rows come out in the key's order. Its key's columns
-hold no NULL and compare as BINARY.
-
-The host changes rows by their keys with `HostTables::change`: `put` adds a row
-in place of any row with its key, and `delete` removes the row with a key. One
-call's changes reach readers all at once. Changing rows writes nothing to the
-database, and a process starts with every host table empty. A read sees the
-rows as they stood when its snapshot was fixed, as it sees the database's
-tables (above, for values).
-
-A live query narrows a host table as it narrows a table of the database
-(sections 4 to 8), by its keys and other columns. A transfer screen reads one
-album's uploads with `SELECT s.sent FROM tracks AS t JOIN sending AS s ON
-s.track = t.id WHERE t.album = ?1`, where `sending` is a host table keyed by
-track: sending another album's track doesn't rerun it. A host table of one row,
-such as the device's network, which a query joins with no condition, reruns
-every query that reads a column that changes, and no others.
-
-sqlive judges a change to host rows as it judges a write that changes only
-those rows (section 7), in one order with the database's writes. A change waits
-while a write judges its own changes, commits and reports them. It doesn't wait
-while the write runs its statements. sqlive runs the change's lookups on a
-connection of its own, which reads the database's latest commit beside the rows
-as the change left them. A write's statements read the host rows as they were
-when it began, but its lookups read them as they are when it judges. The write
-commits after every change made until then. A screen lists each upload with its
-note. Say a write adds a track's first note while that track's upload starts,
-and the screen runs again before the write commits. The note joins the screen
-only through the upload's row. If the write's lookups read the rows as it
-began, they would find no upload, and the screen would never show the note. A
-lookup that fails, or a transaction for the lookups that fails to begin, leaves
-the change unjudged: each live query judges it counting every join's value as
-matched, so the change fails nothing.
-
-A build tool that reads a schema which declares a host table as an ordinary
-table, as sqlive-compose does, gets the scope plan the running database gets,
-since sqlive plans the two alike.
-
-### Views read whole
-
-The host names, in `Options::whole_views`, the views and tables a live query
-reads whole: those whose rows change with what the host holds in memory too,
-such as coven's views of its uploads. A read through such a view reads the view
-too, so a query that only counts the view's rows, or asks whether it has any,
-and reads none of its columns, still runs again as the view changes. A view's
-own tables are read whole as well, and a view that only a column nothing reads
-reads adds no dependency (section 8).
-
 **Edge cases.**
 
 - **A statement inside a row mapping.** A query can run a statement from inside
@@ -452,8 +368,8 @@ pub struct ReconfigurableLiveQueryEvent<Q, T, E> {
 pub enum LiveQueryCause {
     /// A new request, including the initial one.
     Request,
-    /// A commit changed a column the query read, in a row its conditions
-    /// allow, or a view it read changed with no change to its tables.
+    /// A commit, or the host's change to a host table, changed a column the
+    /// query read, in a row its conditions allow.
     Write,
     /// A new request and a relevant commit arrived before this run.
     RequestAndWrite,
@@ -533,6 +449,64 @@ impl<Q: Clone + PartialEq> LiveQueryRequests<Q> {
 }
 ```
 
+### Tables the host keeps in memory
+
+Some facts last only as long as the host's process and have a key, such as the
+files it is sending, each by its id. The host keeps such facts in a host table
+instead of a table of the database. It declares each one with a `CREATE TABLE`
+that has a primary key, in `HostTables::new`, and registers the `HostTables` on
+each connection of one database with `Setup::host_tables`. Every connection of
+that database then reads each table by its name, in statements, views and
+triggers, as a virtual table sqlive serves. SQL can't write it, `sqlite_schema`
+doesn't list it, and its rows come out in the key's order. Its key's columns
+hold no NULL and compare as BINARY.
+
+The host changes rows by their keys with `HostTables::change`: `put` adds a row
+in place of any row with its key, and `delete` removes the row with a key. One
+call's changes reach readers all at once. Changing rows writes nothing to the
+database, and a process starts with every host table empty.
+
+A read sees the rows as they stood at its snapshot, as it sees the database's
+tables. A statement reads those tables from its transaction's snapshot, which
+fixes the commits it sees. A statement that read the host's rows as they were
+when it ran could join those commits to rows that a later commit's consequences
+had already changed, a moment that never existed. So each transaction takes the
+rows once, as its snapshot is fixed, and every statement in the transaction
+reads what it took. A read fixes its snapshot and takes the rows while no commit
+of the database is underway, so they are the rows of a moment between its
+snapshot's last commit and the next. A write takes them as it begins: it holds
+the database's write lock, so no other commit can come between its snapshot and
+its rows. A read that fixes its snapshot while a write commits waits for that
+commit to finish.
+
+A live query narrows a host table as it narrows a table of the database
+(sections 4 to 8), by its keys and other columns. A transfer screen reads one
+album's uploads with `SELECT s.sent FROM tracks AS t JOIN sending AS s ON
+s.track = t.id WHERE t.album = ?1`, where `sending` is a host table keyed by
+track: sending another album's track doesn't rerun it. A host table of one row,
+such as the device's network, which a query joins with no condition, reruns
+every query that reads a column that changes, and no others.
+
+sqlive judges a change to host rows as it judges a write that changes only
+those rows (section 7), in one order with the database's writes. A change waits
+while a write judges its own changes, commits and reports them. It doesn't wait
+while the write runs its statements. sqlive runs the change's lookups on a
+connection of its own, which reads the database's latest commit beside the rows
+as the change left them. A write's statements read the host rows as they were
+when it began, but its lookups read them as they are when it judges. The write
+commits after every change made until then. A screen lists each upload with its
+note. Say a write adds a track's first note while that track's upload starts,
+and the screen runs again before the write commits. The note joins the screen
+only through the upload's row. If the write's lookups read the rows as it
+began, they would find no upload, and the screen would never show the note. A
+lookup that fails, or a transaction for the lookups that fails to begin, leaves
+the change unjudged: each live query judges it counting every join's value as
+matched, so the change fails nothing.
+
+A build tool that reads a schema which declares a host table as an ordinary
+table, as sqlive-compose does, gets the scope plan the running database gets,
+since sqlive plans the two alike.
+
 ## 4. What a statement reads
 
 A live query depends on what its statements read. As SQLite prepares each
@@ -598,10 +572,9 @@ unread column of a subquery names (section 8), to every place of its table. A
 name that sqlive can't tell the place of, as a bare name beside a table
 function, counts for every place of a table with a column of that name.
 
-The views and tables a live query reads whole (section 3), and a table SQLite
-reports reading through a view or CTE that sqlive didn't read as places of its
-own, keep one read of every row, with every column the statement reads of the
-table.
+A view sqlive reads whole (section 8), and a table SQLite reports reading
+through a view or CTE that sqlive didn't read as places of its own, keep one
+read of every row, with every column the statement reads of the table.
 
 ### The host's statements
 
@@ -659,7 +632,7 @@ can't read, so that every column of the schema counts as read.
   5 to 8, the first time a live query runs it, unless the statement is compiled:
   the statement's *scope plan*.
   The plan depends on the statement's text, the schema, and the SQL functions
-  and the views read whole that the connection was set up with. sqlive sets up
+  the connection was set up with. sqlive sets up
   every connection of a database alike, so they share the plans each one reads,
   and a schema change reads them again. Kept by each connection alone, a plan
   would cost a screen again on each reader the screen first runs on. A music
@@ -1087,9 +1060,9 @@ deterministic: a write's lookup evaluates it again and could get another answer
 than the query did, so such a join narrows nothing. That holds for a column of a
 subquery or VALUES whose expression holds one, as `page.at` of `(SELECT
 CURRENT_TIMESTAMP AS at) AS page`, on either side of the `=` and in a USING
-join. So does a column of a subquery that reads a view read whole, which can
-show what the host holds in memory; a join on the view's own column still
-narrows. An aggregate or window function gives its rows' answer and doesn't
+join. So does a column of a subquery that reads a view sqlive reads whole,
+whose SQL it can't tell calls no such function; a join on the view's own column
+still narrows. An aggregate or window function gives its rows' answer and doesn't
 count. A row value equality, as `(t.a, t.b) = (u.a, u.b)`, narrows as the
 equalities of its columns: SQLite gives it the truth of their AND, NULL
 included. An equality with COALESCE or IFNULL of such values narrows by each of
@@ -1304,8 +1277,8 @@ compares a column of a table before it, other than by `IS`. A statement with
 any other join in parentheses narrows nothing, and so does one whose join in
 parentheses has an alias, starts with another, or joins a table by USING.
 
-A view the host names whole (section 3), or a table function, in a join narrows
-the tables beside it, as `json_each(?1)` lists the ids an app passes in: a
+A view sqlive reads whole, or a table function, in a join narrows the tables
+beside it, as `json_each(?1)` lists the ids an app passes in: a
 lookup asks the view or the function. The view's own tables are read whole. A
 table function of another table's columns, as `json_each(l.items)` or
 `json_each(l.rowid)`, narrows nothing: it lists rows only beside that table's
@@ -1487,9 +1460,8 @@ any other equality does, so a statement spliced into another as a subquery in
 FROM narrows as its tables written out would: the album grid can read each
 cover through `(SELECT c.id, c.file FROM covers AS c) AS shown WHERE shown.id =
 (SELECT r.id ... LIMIT 1)`, and `covers` narrows to the covers of the albums'
-releases. A view the host names whole (section 3) is read whole, since what it
-shows changes with what the host holds in memory too. A view sqlive can't read
-this way, as one with a recursive CTE, is read whole; a lookup
+releases. A view sqlive can't read this way, as one with a recursive CTE, is
+read whole; a lookup
 still asks it, so it narrows the tables beside it. SQLite names each read inside
 a view that sqlive reads whole by the innermost view or CTE the read goes
 through. When the statement's own CTE or view has the name of one inside such a
@@ -1550,11 +1522,11 @@ those an unread column names too, so a change to one of them in a row those
 reads allow still runs the query again.
 
 A view read whole in such a column adds no dependency either: the live query
-doesn't run again when the view changes, or a table that only the view reads,
-and the view widens no other table's scope. A music app's storage row counts
-the files being uploaded through a view of the host's uploads, so a statement
-that joins the row and selects none of its counts doesn't rerun when a file
-starts to upload. SQLite names each read inside such a view as the paragraph
+doesn't run again when a table that only the view reads changes, and the view
+widens no other table's scope. A music app's storage row counts the folders
+under its library through a view with a recursive CTE, so a statement that
+joins the row and selects none of its counts doesn't rerun when a folder is
+added. SQLite names each read inside such a view as the paragraph
 above says. When a view the statement reads whole elsewhere can name a read
 the same way, sqlive can't tell the two apart, so that name's reads count.
 When sqlive's parser can't read a view the statement reads whole elsewhere,
@@ -2052,9 +2024,8 @@ conditions and joins.
 playback position between saves, what the person has scrolled to or folded shut.
 Each goes on its own stream, keyed by what it belongs to, to the part of the
 screen that draws it. Such a value never decides which rows a list shows, their
-order, or a count. If it would, it belongs in a table, or in a value the host
-keeps in memory and shows through a view (section 3), as coven does for its own
-state.
+order, or a count. If it would, it belongs in a table: one of the database, or a
+table the host keeps in memory (section 3), as coven does for its own state.
 
 **Orders and filters SQLite lacks** are the host's own collations and functions,
 which its setup registers on every connection (section 1). A list sorted so
@@ -2074,8 +2045,7 @@ A test can check what a live query depends on without running a write.
 `read_report`, with sqlive's test-utils feature, says which rows of each table
 and view a statement depends on when a live query runs it, before any value is
 bound. `SchemaProbe::read_report` gives the same report for a statement over a
-schema in memory, with no rows, where the host's live queries read the views and
-tables `SchemaProbe::open` names whole (the crate's [README](README.md)). A test that
+schema in memory, with no rows (the crate's [README](README.md)). A test that
 asserts the report of an album page fails when the page's statement starts to
 read `tracks` whole. `SchemaProbe::prepare` also says whether the statement
 writes (`ProbedStatement::writes`): it is true for an INSERT, UPDATE, DELETE or
@@ -2165,13 +2135,11 @@ writes rerun a query asks `is_marked_for_rerun`, which answers at once whether a
 commit since the query's last result marked it to run again.
 
 ```rust
-/// What the live query that reads `whole` whole depends on when it runs
-/// `sql` on `connection`.
+/// What a live query depends on when it runs `sql` on `connection`.
 #[cfg(feature = "test-utils")]
 pub fn read_report(
     connection: &rusqlite::Connection,
     sql: &str,
-    whole: &WholeViews,
 ) -> rusqlite::Result<ReadReport>;
 
 /// What a live query's statement depends on. Its text holds one line for each

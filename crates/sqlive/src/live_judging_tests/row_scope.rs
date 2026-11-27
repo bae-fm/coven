@@ -213,7 +213,7 @@ async fn run_seed(seed: u64, precision: &mut BTreeMap<Kind, Precision>) -> (usiz
     }
     db.write(&rows.join("; ")).unwrap();
     let queries: Vec<Generated> = (0..16).map(|_| query(&mut rng)).collect();
-    let probe = crate::SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[], &[]).unwrap();
+    let probe = crate::SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
     let mut live = Vec::new();
     let mut compiled_queries = 0;
     for (position, query) in queries.iter().enumerate() {

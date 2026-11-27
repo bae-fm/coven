@@ -531,9 +531,8 @@ async fn a_store_finds_what_a_build_found_in_every_readable_table_and_view() {
             deterministic: function.deterministic,
         })
         .collect();
-    let probe =
-        sqlive::SchemaProbe::open(&[coven_schema::readable_objects_sql()], &functions, &[], &[])
-            .unwrap();
+    let probe = sqlive::SchemaProbe::open(&[coven_schema::readable_objects_sql()], &functions, &[])
+        .unwrap();
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     for name in coven_schema::READABLE {

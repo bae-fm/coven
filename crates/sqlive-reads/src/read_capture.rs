@@ -3,28 +3,10 @@
 //! (SPEC.md section 4).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use crate::read_set::{ColumnSet, ReadSet, TableRead};
 use crate::row_scope::{Reference, RowScope, Scopes};
 use crate::unreported_columns::UnreportedColumns;
-
-/// The views and tables a live query reads whole: a read through one of them
-/// depends on the object itself, which can change with no change to the
-/// tables it reads.
-pub struct WholeViews(BTreeSet<String>);
-
-impl WholeViews {
-    /// The views and tables named `views`, in any letter case.
-    pub fn new<'a>(views: impl IntoIterator<Item = &'a str>) -> Self {
-        Self(views.into_iter().map(str::to_ascii_lowercase).collect())
-    }
-
-    /// Whether `name` names one, in any letter case.
-    pub fn contains(&self, name: &str) -> bool {
-        self.0.contains(&name.to_ascii_lowercase())
-    }
-}
 
 /// What a read context's statements read. Each statement running has its own
 /// frame, innermost last, so a statement a row mapper starts records its own
@@ -33,7 +15,6 @@ impl WholeViews {
 pub struct ReadCapture {
     frames: Vec<ReadFrame>,
     completed: ReadSet,
-    whole: Arc<WholeViews>,
 }
 
 /// What one statement read, as SQLite reported it while preparing it.
@@ -55,10 +36,8 @@ impl ReadFrame {
     }
 
     /// The statement read `column` of `table`, through the view or CTE
-    /// `accessor` when it names one; `whole` names the views and tables a
-    /// live query reads whole.
-    pub fn read(&mut self, table: &str, column: &str, accessor: Option<&str>, whole: &WholeViews) {
-        let through_whole = accessor.filter(|name| whole.contains(name));
+    /// `accessor` when it names one.
+    pub fn read(&mut self, table: &str, column: &str, accessor: Option<&str>) {
         self.columns.insert((table.to_ascii_lowercase(), column.to_ascii_lowercase()));
         if accessor.is_none() {
             self.direct.insert(table.to_ascii_lowercase());
@@ -68,14 +47,6 @@ impl ReadFrame {
                 .entry(table.to_ascii_lowercase())
                 .or_default()
                 .insert(view.to_ascii_lowercase());
-        }
-        // A read through one of the views read whole reads the view itself
-        // too, even when the statement reads none of the view's columns, as
-        // a count of its rows or an EXISTS doesn't: a view can change with
-        // no change to its tables, as one that calls a function of the
-        // host's state can (SPEC.md section 3).
-        if let Some(view) = through_whole {
-            self.columns.insert((view.to_ascii_lowercase(), String::new()));
         }
     }
 
@@ -90,15 +61,15 @@ impl ReadFrame {
 
 impl ReadCapture {
     /// A capture with one frame, for reads made outside any statement.
-    pub fn new(whole: Arc<WholeViews>) -> Self {
-        Self { frames: vec![ReadFrame::default()], completed: ReadSet::new(), whole }
+    pub fn new() -> Self {
+        Self { frames: vec![ReadFrame::default()], completed: ReadSet::new() }
     }
 
     /// The statement being prepared read `column` of `table`
     /// ([`ReadFrame::read`]).
     pub fn read(&mut self, table: &str, column: &str, accessor: Option<&str>) {
         let frame = self.frames.last_mut().expect("a read capture keeps its first frame");
-        frame.read(table, column, accessor, &self.whole);
+        frame.read(table, column, accessor);
     }
 
     /// The statement being run read what `recorded` holds when it was

@@ -797,20 +797,6 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
         Ok(Judged { changes: Arc::new(changes), verdicts })
     }
 
-    /// Tell live queries that each of `columns`, a (table, column) pair of a
-    /// view, changed with no write: each query that read one runs again.
-    pub fn changed_without_write(&self, columns: &[(&str, &str)]) {
-        let changes = columns
-            .iter()
-            .map(|(table, column)| RowChange {
-                table: (*table).into(),
-                column: (*column).into(),
-                rows: None,
-            })
-            .collect();
-        self.commit(Judged::unjudged(changes), None);
-    }
-
     /// Report a commit made within `scope`, if any. A query still waiting on
     /// the reads it was judged against takes its verdict. One running keeps
     /// the changes, to judge against its run's snapshot as it finishes. One

@@ -61,10 +61,7 @@ impl<'a, P: Policy> Setup<'a, P> {
         policy: P,
         register: impl FnOnce(&Setup<'_, P>) -> rusqlite::Result<()>,
     ) -> rusqlite::Result<()> {
-        let authorization = SqlAuthorization::new(
-            std::sync::Arc::new(crate::WholeViews::new([])),
-            std::sync::Arc::new(policy),
-        );
+        let authorization = SqlAuthorization::new(std::sync::Arc::new(policy));
         register(&Setup::new(connection, &authorization, &RefCell::new(None)))
     }
 
@@ -104,7 +101,7 @@ impl<'a, P: Policy> Setup<'a, P> {
     /// A value the host keeps in memory, which `now` reads, for this
     /// connection's functions to read as each transaction's snapshot saw it
     /// (`snapshot_values.rs`).
-    pub fn snapshot_value<T: Clone + Send + 'static>(
+    pub(crate) fn snapshot_value<T: Clone + Send + 'static>(
         &self,
         now: impl Fn() -> T + Send + Sync + 'static,
     ) -> SnapshotValue<T> {

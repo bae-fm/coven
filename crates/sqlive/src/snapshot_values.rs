@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 /// One value the host keeps in memory, as one connection's transactions
 /// read it: the host's SQL functions hold it and read it with [`Self::get`].
 #[derive(Clone)]
-pub struct SnapshotValue<T> {
+pub(crate) struct SnapshotValue<T> {
     slot: Arc<SnapshotSlot<T>>,
 }
 
@@ -33,7 +33,7 @@ struct SnapshotSlot<T> {
 impl<T: Clone> SnapshotValue<T> {
     /// The value as the open transaction's snapshot saw it. A statement
     /// outside a transaction reads it as it is now.
-    pub fn get(&self) -> T {
+    pub(crate) fn get(&self) -> T {
         let taken = lock_unpoisoned(&self.slot.taken).clone();
         taken.unwrap_or_else(|| (self.slot.now)())
     }

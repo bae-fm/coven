@@ -339,8 +339,7 @@ fn some_plan() -> Arc<ScopePlan> {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     let statement = connection.prepare("SELECT 1").unwrap();
     let schema = MainSchema::read(&connection).unwrap();
-    let whole = crate::WholeViews::new([]);
-    Arc::new(ScopePlan::build(&connection, &schema, "SELECT 1", &statement, &whole).unwrap())
+    Arc::new(ScopePlan::build(&connection, &schema, "SELECT 1", &statement).unwrap())
 }
 
 /// The plans built against one schema share one read of it, and a later
@@ -580,7 +579,7 @@ fn a_write_leaves_the_apps_statements_prepared() {
 /// `sql` with the scope plan sqlive-compose's compiler ships with it, built
 /// against `schema`.
 fn compiled(schema: &str, sql: &str) -> crate::CompiledStatement {
-    let probe = crate::SchemaProbe::open(&[schema.to_owned()], &[], &[], &[]).unwrap();
+    let probe = crate::SchemaProbe::open(&[schema.to_owned()], &[], &[]).unwrap();
     crate::tests::compiled(&probe, sql).expect("sqlive analyzes the statement")
 }
 

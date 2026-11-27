@@ -138,7 +138,6 @@ fn a_host_statements_join_questions_run_as_the_hosts_own_sql() {
         &directory.path().canonicalize().unwrap().join("host.sqlite"),
         false,
         HostTables,
-        std::sync::Arc::new(crate::WholeViews::new([])),
         &crate::SqliteSettings::default(),
         &|_, _| Ok(()),
     )

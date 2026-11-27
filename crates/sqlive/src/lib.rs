@@ -82,7 +82,6 @@ pub use no_policy::{HandleFailure, NoPolicy};
 pub use panic_as_error;
 pub use rusqlite;
 pub use rusqlite::{Error as SqliteError, Result as SqliteResult, Row, ToSql};
-pub use snapshot_values::SnapshotValue;
 pub use sqlite_settings::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
@@ -98,8 +97,8 @@ pub use sqlive_reads::{
     LastRow, Lookup, Lookups, NoAnswer, ProbedColumn, ProbedStatement, ReadCapture, ReadEntry,
     ReadFrame, ReadPlace, ReadReport, ReadRows, ReadSet, RowChange, RowCondition, RowImage,
     RowScope, SchemaProbe, ScopePlanSize, Scopes, SelectNull, SqlPosition, SqlValue,
-    StandInFunction, TableColumn, TableRead, Unanalyzable, UndecodablePlan, WholeViews,
-    LOOKUP_STEPS, ROWS_PER_TABLE,
+    StandInFunction, TableColumn, TableRead, Unanalyzable, UndecodablePlan, LOOKUP_STEPS,
+    ROWS_PER_TABLE,
 };
 pub(crate) use sqlive_reads::{
     affected_by, compare, parameters, past_row_limit, CompiledPlan, MainSchema, ScopePlan,

@@ -298,8 +298,8 @@ async fn an_inner_cte_of_an_outer_cte_s_name_narrows_by_the_inner_one() {
     db.close();
 }
 
-/// A view read whole, by the app's choice or as one sqlive can't read as
-/// cores, keeps every table it reads whole, even when its SQL reads them
+/// A view read whole, as one sqlive can't read as cores of its own, such as
+/// one with a recursive CTE, keeps every table it reads whole, even when its SQL reads them
 /// through a CTE or a view whose name the statement's own CTE or view
 /// shares, which narrows the same table: a write to a row only the view
 /// reads reruns the query.
@@ -307,17 +307,11 @@ async fn an_inner_cte_of_an_outer_cte_s_name_narrows_by_the_inner_one() {
 async fn a_view_read_whole_keeps_its_tables_whole_beside_a_name_it_uses_inside() {
     let schema = format!(
         "{MUSIC};
-CREATE VIEW albums AS WITH c AS (SELECT id, album FROM releases) SELECT id, album FROM c;
+CREATE VIEW albums AS WITH RECURSIVE c(id, album) AS (SELECT id, album FROM releases UNION SELECT id, album FROM c WHERE 0) SELECT id, album FROM c;
 CREATE VIEW first_release AS WITH RECURSIVE c(id) AS (SELECT min(id) FROM releases UNION SELECT r.id FROM releases r JOIN c ON r.id < c.id) SELECT id FROM c;
-CREATE VIEW all_tracks AS SELECT title FROM release_tracks"
+CREATE VIEW all_tracks AS WITH RECURSIVE w(title) AS (SELECT title FROM release_tracks UNION SELECT title FROM w WHERE 0) SELECT title FROM w"
     );
-    let db = TestDatabase::open_with(
-        &schema,
-        crate::tests::TestOptions {
-            whole_views: vec!["albums", "all_tracks"],
-            ..Default::default()
-        },
-    );
+    let db = TestDatabase::open(&schema);
     let releases: &[(&str, bool)] = &[
         ("UPDATE releases SET album = 'z' WHERE id = 'r3'", true),
         ("INSERT INTO releases VALUES ('r0','q',1999)", true),
@@ -334,7 +328,7 @@ CREATE VIEW all_tracks AS SELECT title FROM release_tracks"
     db.close();
 }
 
-/// A CTE may have the name of a view the app marks as read whole: the
+/// A CTE may have the name of a view sqlive reads whole: the
 /// statement reads the CTE under that name, not the view, so the CTE
 /// narrows its tables, and another view the statement reads whole, whose
 /// SQL uses no name the statement's CTEs have, keeps its own tables whole.
@@ -342,16 +336,10 @@ CREATE VIEW all_tracks AS SELECT title FROM release_tracks"
 async fn a_cte_of_a_whole_views_name_narrows_its_tables_beside_a_view_read_whole() {
     let schema = format!(
         "{MUSIC};
-CREATE VIEW albums AS SELECT id, album FROM releases;
-CREATE VIEW release_years AS SELECT id, year FROM releases"
+CREATE VIEW albums AS WITH RECURSIVE w(id, album) AS (SELECT id, album FROM releases UNION SELECT id, album FROM w WHERE 0) SELECT id, album FROM w;
+CREATE VIEW release_years AS WITH RECURSIVE w(id, year) AS (SELECT id, year FROM releases UNION SELECT id, year FROM w WHERE 0) SELECT id, year FROM w"
     );
-    let db = TestDatabase::open_with(
-        &schema,
-        crate::tests::TestOptions {
-            whole_views: vec!["albums", "release_years"],
-            ..Default::default()
-        },
-    );
+    let db = TestDatabase::open(&schema);
     follows(
         &db,
         "WITH albums AS (SELECT id, title FROM tracks WHERE id = 1) SELECT a.title || ':' || (SELECT group_concat(year, ',') FROM release_years) FROM albums a",
@@ -670,15 +658,14 @@ CREATE VIEW covered AS SELECT a.id, (SELECT c.id FROM covers AS c WHERE c.album 
 /// statement's other reads of it otherwise.
 #[tokio::test]
 async fn a_view_read_whole_in_an_unread_column_adds_no_table() {
-    let db = TestDatabase::open_with(
+    let db = TestDatabase::open(
         "CREATE TABLE a(id INTEGER PRIMARY KEY, v INTEGER);
 CREATE TABLE covers(id INTEGER PRIMARY KEY, album INTEGER);
 INSERT INTO a VALUES (1,0),(2,0);
 INSERT INTO covers VALUES (5,2);
-CREATE VIEW sending AS SELECT id, album FROM covers;
+CREATE VIEW sending AS WITH RECURSIVE w(id, album) AS (SELECT id, album FROM covers UNION SELECT id, album FROM w WHERE 0) SELECT id, album FROM w;
 CREATE VIEW phases AS SELECT album FROM sending;
 CREATE VIEW first_cover AS WITH RECURSIVE c(id) AS (SELECT min(id) FROM covers UNION SELECT r.id FROM covers r JOIN c ON r.id < c.id) SELECT id FROM c",
-        crate::tests::TestOptions { whole_views: vec!["sending", "phases"], ..Default::default() },
     );
     let wrapped =
         |view: &str| format!("(SELECT a.id, (SELECT count(*) FROM {view}) AS n FROM a) AS s");

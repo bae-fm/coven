@@ -207,8 +207,7 @@ fn a_connection_keeps_the_rows_it_reads() {
 /// built one does.
 #[tokio::test]
 async fn a_compiled_read_of_a_host_table_runs_with_its_shipped_plan() {
-    let probe =
-        crate::SchemaProbe::open(&[DECLARED.join(";") + ";" + SCHEMA], &[], &[], &[]).unwrap();
+    let probe = crate::SchemaProbe::open(&[DECLARED.join(";") + ";" + SCHEMA], &[], &[]).unwrap();
     let statement = crate::tests::compiled(
         &probe,
         "SELECT track || ' ' || sent FROM album_sending WHERE album = 'a'",

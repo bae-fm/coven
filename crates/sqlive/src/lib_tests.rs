@@ -3,7 +3,7 @@
 
 use crate::{
     Database, Handle, HandleFailure, HostSql, LiveQuery, NoPolicy, Options, PolicyError,
-    ReconfigurableLiveQuery, WholeViews,
+    ReconfigurableLiveQuery,
 };
 use panic_as_error::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
 use panic_as_error::{Bug, BugSink, BugSinkRef, CarriesBug};
@@ -113,8 +113,6 @@ pub(crate) struct TestOptions {
     pub(crate) settings: crate::SqliteSettings,
     /// The read-only connections beside the writer.
     pub(crate) readers: NonZeroUsize,
-    /// The views and tables a live query reads whole.
-    pub(crate) whole_views: Vec<&'static str>,
     /// The tables whose rows the test keeps in memory.
     pub(crate) host_tables: Option<crate::HostTables>,
     /// Checkpoint the WAL on a thread of its own at this many frames.
@@ -139,7 +137,6 @@ impl Default for TestOptions {
         Self {
             settings: crate::SqliteSettings::default(),
             readers: NonZeroUsize::new(2).expect("two readers"),
-            whole_views: Vec::new(),
             host_tables: None,
             checkpoint_pages: None,
             statistics: false,
@@ -190,7 +187,6 @@ impl TestDatabase {
                 settings: options.settings,
                 readers: options.readers,
                 prepare_on_reader: options.prepare_on_reader,
-                whole_views: Arc::new(WholeViews::new(options.whole_views)),
                 policy: &|| NoPolicy,
                 setup: &|setup, _| {
                     if let Some(tables) = &options.host_tables {

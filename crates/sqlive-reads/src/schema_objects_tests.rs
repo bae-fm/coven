@@ -5,7 +5,6 @@ use rusqlite::Connection;
 use sqlite3_parser::ast::Name;
 
 use super::{MainSchema, SchemaLookups};
-use crate::read_capture::WholeViews;
 use crate::scope_plan::{ScopePlan, ScopePlanSize};
 
 /// The statements the traced connection ran.
@@ -81,8 +80,7 @@ fn building_a_plan_asks_sqlite_nothing_about_the_schema_it_read() {
     read.dedup();
     assert_eq!(read.len(), ran, "a schema statement ran twice: {read:#?}");
 
-    let plan =
-        ScopePlan::build(&connection, &schema, &sql, &statement, &WholeViews::new([])).unwrap();
+    let plan = ScopePlan::build(&connection, &schema, &sql, &statement).unwrap();
     assert_eq!(plan.size, ScopePlanSize { sources: 101, cores: 22, edges: 138 });
     assert_eq!(schema_reads(), Vec::<String>::new());
 }
