@@ -187,9 +187,7 @@ impl fmt::Display for ReadEntry {
 impl fmt::Display for ReadPlace {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Statement(SqlPosition { line, column, .. }) => {
-                write!(formatter, "at line {line}, column {column}")
-            }
+            Self::Statement(position) => write!(formatter, "{position}"),
             Self::Within(name) => write!(formatter, "in `{name}`"),
         }
     }

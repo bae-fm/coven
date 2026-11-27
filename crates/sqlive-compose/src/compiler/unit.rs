@@ -52,22 +52,17 @@ fn whole_place(
         Origin::Kept(offset) => offset,
         Origin::Edit(range) => range.start,
     };
-    let position = |offset| {
-        let SqlPosition { line, column, .. } = SqlPosition::at(written, offset);
-        (line, column)
-    };
+    let position = |offset| SqlPosition::at(written, offset);
     match place {
-        ReadPlace::Within(name) => WholePlace::Within(name),
+        ReadPlace::Within(name) => WholePlace::Named(ReadPlace::Within(name)),
         ReadPlace::Statement(run) => match lex::origin(&expansion.edits, run.offset) {
             Origin::Kept(offset) => {
-                let (line, column) = position(unrenamed(offset));
-                WholePlace::Sql { line, column }
+                WholePlace::Named(ReadPlace::Statement(position(unrenamed(offset))))
             }
             Origin::Edit(spread) => {
                 let at = unrenamed(spread.start);
                 let marker = lex::tokens(&written[at..])[0].text(&written[at..]).to_owned();
-                let (line, column) = position(at);
-                WholePlace::Spread { marker, line, column }
+                WholePlace::Spread { marker, at: position(at) }
             }
         },
     }

@@ -3,6 +3,8 @@
 
 use std::fmt;
 
+use sqlive_reads::{ReadPlace, SqlPosition};
+
 use super::header::HeaderError;
 
 /// Where a macro call is: the file's path in its crate, and the call's line
@@ -450,41 +452,30 @@ impl std::error::Error for CompileError {
     }
 }
 
-/// Where a read reads a table or view whole. A line and a column count from
-/// 1 in the SQL the read's call writes.
+/// Where a read reads a table or view whole. A position is in the SQL the
+/// read's call writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WholePlace {
-    /// Where the call's SQL names it.
-    Sql {
-        /// The line of the name.
-        line: usize,
-        /// The column of the name.
-        column: usize,
-    },
+    /// Where the call's SQL names it, or in a view's SQL.
+    Named(ReadPlace),
     /// In the SQL that a spread brings, a fragment's or one the spread's
     /// arguments write.
     Spread {
         /// The spread's marker.
         marker: String,
-        /// The line of the marker.
-        line: usize,
-        /// The column of the marker.
-        column: usize,
+        /// Where the call's SQL writes the marker.
+        at: SqlPosition,
     },
-    /// In the SQL of this view, or of this CTE that a view declares.
-    Within(String),
 }
 
 impl fmt::Display for WholePlace {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Sql { line, column } => {
-                write!(formatter, "at line {line}, column {column} of its SQL")
+            Self::Named(place @ ReadPlace::Statement(_)) => write!(formatter, "{place} of its SQL"),
+            Self::Named(place @ ReadPlace::Within(_)) => write!(formatter, "{place}"),
+            Self::Spread { marker, at } => {
+                write!(formatter, "in {marker}, spread {at} of its SQL")
             }
-            Self::Spread { marker, line, column } => {
-                write!(formatter, "in {marker}, spread at line {line}, column {column} of its SQL")
-            }
-            Self::Within(name) => write!(formatter, "in `{name}`"),
         }
     }
 }

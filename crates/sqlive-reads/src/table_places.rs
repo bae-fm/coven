@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
+use std::fmt;
 
 use sqlite3_parser::ast::fmt::{ToTokens, TokenStream};
 use sqlite3_parser::ast::{Cmd, Select, Stmt};
@@ -64,6 +65,13 @@ impl SqlPosition {
             line: before.matches('\n').count() + 1,
             column: before[line_start..].chars().count() + 1,
         }
+    }
+}
+
+impl fmt::Display for SqlPosition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { line, column, .. } = self;
+        write!(formatter, "at line {line}, column {column}")
     }
 }
 
