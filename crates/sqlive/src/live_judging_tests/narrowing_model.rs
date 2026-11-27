@@ -88,6 +88,11 @@ pub(super) fn pick(rng: &mut Rng, names: &[&'static str]) -> &'static str {
 /// value is an integer or NULL, which SQLite compares as the model does.
 pub(super) const TABLES: [&str; 4] = ["t", "u", "w", SEARCH];
 pub(super) const COLUMNS: [&str; 5] = ["id", "a", "b", "c", "n"];
+/// The plain tables' columns: `COLUMNS`, then `s`.
+const PLAIN_COLUMNS: [&str; 6] = {
+    let [id, a, b, c, n] = COLUMNS;
+    [id, a, b, c, n, "s"]
+};
 const TABLE_SQL: &str =
     "(id INTEGER PRIMARY KEY, a INTEGER, b, c INTEGER, n INTEGER COLLATE NOCASE, \
      s TEXT COLLATE fold)";
@@ -99,7 +104,7 @@ pub(super) fn columns(table: &str) -> &'static [&'static str] {
     if table == SEARCH {
         &COLUMNS
     } else {
-        &["id", "a", "b", "c", "n", "s"]
+        &PLAIN_COLUMNS
     }
 }
 
