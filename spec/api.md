@@ -4425,7 +4425,7 @@ pub const WRITER_ONLY: [&str; 4];
 /// SQL prepares with no connection to a store, and `compiler_setup` gives the
 /// compiler those stand-ins. `coven-schema` defines the list, and `coven`
 /// re-exports it with `SqlFunction`.
-pub const SQL_FUNCTIONS: [SqlFunction; 28];
+pub const SQL_FUNCTIONS: [SqlFunction; 21];
 
 /// One entry of `SQL_FUNCTIONS`.
 pub struct SqlFunction {
