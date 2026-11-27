@@ -99,12 +99,7 @@ impl OAuthFolders {
         loop {
             let body = Body::Json(json!({"async_job_id":job}));
             match self.request_response(Method::POST, url, body).await {
-                Err(error)
-                    if matches!(
-                        error.failure(),
-                        StorageFailure::Network | StorageFailure::RateLimited
-                    ) =>
-                {
+                Err(error) if error.retryable() => {
                     let wait = crate::cooldown::throttled_wait(&error, resends);
                     tracing::warn!(
                         ?error,
