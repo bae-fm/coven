@@ -523,33 +523,24 @@ let count: LiveQuery<_, CovenError> =
     handle.subscribe(|sql| Ok(sql.fetch_row(&NoteCountParams {})?.n));
 ```
 
-A write that adds a row reruns `count`, and reruns the window only when the row
-sorts at or before the window's last row: when a run returns all 100 rows, a
-note that sorts after the last of them can't appear in the window. Each run sets
-that bound again from its own last row, so a note inserted or deleted inside the
-window moves the bound to the window's new last row. A note equal to the last
-row on every ORDER BY column counts as inside, since SQLite could sort it before
-the last row. A run that returns fewer than 100 rows already holds every note
-after its start, and reruns for a change to any of them.
+A write that adds a row reruns `count`, and reruns the window only when the
+row's title is in the window's range. The range starts at `from`, where the
+`WHERE` starts the window, so a note whose title sorts before it reruns nothing.
+When a run returns all 100 rows, the range ends at the last of them, so neither
+does a note that sorts after it. Each run sets that bound again from its own last
+row, so a note inserted or deleted inside the window moves the bound to the
+window's new last row. A note that ties with the last row counts as inside, since
+SQLite could sort it before the last row. A run that returns fewer than 100 rows
+already holds every note after its start, and has no end.
 
-Coven ignores changes to rows that sort after a window's last row when:
-
-- the statement is one SELECT, with an `ORDER BY` and a `LIMIT` and no
-  `OFFSET`;
-- each `ORDER BY` term names a column of the same table, with no `COLLATE` and
-  no `NULLS FIRST` or `NULLS LAST`, and the column is stored and uses BINARY
-  collation;
-- that table isn't the right side of a `LEFT JOIN`;
-- the statement returns each `ORDER BY` column as a result column listed before
-  any `*`, since coven reads the last row's values from the result;
-- the SELECT has no `GROUP BY` and calls no aggregate or window function in its
-  result columns.
-
-`ORDER BY` terms may be ascending or descending, in any mix. Any other window,
-such as one ordered by an expression or with an `OFFSET`, reruns for a change to
-any row its `WHERE` takes in: `LIMIT 100 OFFSET 200` reruns for any change at
-all. A jump to a far position, such as a scrollbar drag, reads the key at that
-position once and makes it the window's request.
+Which windows get an end from their last row is in [sqlive's spec, section
+6](https://github.com/bae-fm/coven/blob/main/crates/sqlive/SPEC.md#6-limit-and-the-order-sqlite-reads-rows-in):
+among its conditions, the statement is one SELECT with an `ORDER BY` and a
+`LIMIT` and no `OFFSET`, and returns the `ORDER BY` terms it is bounded by as
+result columns. Any other window reruns for a change to any row its `WHERE`
+takes in: `LIMIT 100 OFFSET 200` reruns for any change its `WHERE` allows. A jump
+to a far position, such as a scrollbar drag, reads the key at that position once
+and makes it the window's request.
 
 Coven's own state has ready-made live queries with the same results as their
 one-shot reads: `subscribe_members`, `subscribe_lost_values`,
