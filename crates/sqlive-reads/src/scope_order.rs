@@ -300,7 +300,7 @@ impl SortedLimit {
         let at = self.runs.iter().position(|run| run.source == source)?;
         let join = |partner| {
             let own = &sources[source].memberships;
-            own.iter().find(|found| found.partner == partner).map(Membership::copy)
+            own.iter().find(|found| found.partner == partner).cloned()
         };
         self.run_bound(at, &self.runs[at].terms, last, parameters, join, looked_up)
     }
@@ -327,7 +327,7 @@ impl SortedLimit {
             let found = own.iter().find(|found| found.partner == partner)?;
             // The derived item's join, read down through each source around
             // `source`.
-            inner.iter().try_fold(found.copy(), |membership, inner| {
+            inner.iter().try_fold(found.clone(), |membership, inner| {
                 let column = |column: &str| inner.columns.get(column).cloned();
                 let member = membership.member.over(&inner.qualifier, &column)?;
                 Some(Membership { member, ..membership })
