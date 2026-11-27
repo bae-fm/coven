@@ -118,12 +118,13 @@ mod store_call;
 mod sync_facts;
 mod sync_functions;
 mod transaction_constants;
-pub use sqlive::{set_temporary_directory, TemporaryDirectoryError};
+pub use sqlive::{set_temporary_directory, CompiledStatement, TemporaryDirectoryError};
 pub use sqlive::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
     WalAutocheckpoint, WalCheckpoint,
 };
+pub use sqlive::{SchemaDiffers, UndecodablePlan};
 pub use sync_facts::{
     QueueFacts, SyncFacts, TransferHolds, UploadFacts, UploadPhaseFacts, UploadRecords,
 };

@@ -52,6 +52,23 @@ impl CommitSql<'_> {
         self.statement(|| self.database.app_query(sqlive::Recorded::No, sql, params, map))
     }
 
+    /// Map all rows of a compiled read, including the transaction's
+    /// changes (`SqlRead::query_compiled`).
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: sqlive::CompiledStatement,
+        params: P,
+        map: F,
+    ) -> sqlive::rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+    {
+        self.statement(|| {
+            self.database.app_query_compiled(sqlive::Recorded::No, statement, params, map)
+        })
+    }
+
     /// Run one statement. One SQLite fails may have kept part of its change,
     /// so it fails the transaction even if the function goes on. An answer
     /// with no row, or the function's own mapping of a row, is no failure of
@@ -83,6 +100,19 @@ impl crate::SqlRead for CommitSql<'_> {
         F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
         CommitSql::query(self, sql, params, map)
+    }
+
+    fn query_compiled<T, P, F>(
+        &self,
+        statement: sqlive::CompiledStatement,
+        params: P,
+        map: F,
+    ) -> sqlive::rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+    {
+        CommitSql::query_compiled(self, statement, params, map)
     }
 }
 

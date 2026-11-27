@@ -39,6 +39,21 @@ impl<'connection> SqlReadContext<'connection> {
     {
         self.database.app_query(sqlive::Recorded::Yes, sql, params, map)
     }
+
+    /// Map all result rows of a compiled read, with the scope plan it
+    /// brings (`SqlRead::query_compiled`).
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: sqlive::CompiledStatement,
+        params: P,
+        map: F,
+    ) -> sqlive::rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+    {
+        self.database.app_query_compiled(sqlive::Recorded::Yes, statement, params, map)
+    }
 }
 
 /// A read that starts when polled and retains its store borrow until it

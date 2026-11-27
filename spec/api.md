@@ -3305,9 +3305,10 @@ pub struct CovenWrite<'write> { /* private fields */ }
 
 /// The app's SQL as a member begins: the creator's first write, run by
 /// `create_store` after slot 1 applies and before the store is visible
-/// (§10.3, E1). It has `execute`, `execute_batch`, `query_row` and `query`
-/// as `CovenWrite` does, and `SqlRead`; it has no operation, file or
-/// administrative step, so it changes nothing in the store's membership.
+/// (§10.3, E1). It has `execute`, `execute_batch`, `query_row`, `query` and
+/// `query_compiled` as `CovenWrite` does, and `SqlRead`; it has no operation,
+/// file or administrative step, so it changes nothing in the store's
+/// membership.
 pub struct MemberWrite<'write> { /* private fields */ }
 
 /// A bulk write's SQL access, borrowing its connection (§4, E3).
@@ -3535,6 +3536,15 @@ impl CovenWrite<'_> {
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: CompiledStatement,
+        params: P,
+        map: F,
+    ) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 
 impl BulkSqlContext<'_> {
@@ -3547,6 +3557,15 @@ impl BulkSqlContext<'_> {
         P: Params,
         F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
     pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: CompiledStatement,
+        params: P,
+        map: F,
+    ) -> rusqlite::Result<Vec<T>>
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
@@ -3598,6 +3617,15 @@ impl CommitSql<'_> {
         P: Params,
         F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
     pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: CompiledStatement,
+        params: P,
+        map: F,
+    ) -> rusqlite::Result<Vec<T>>
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
@@ -4247,6 +4275,15 @@ impl SqlReadContext<'_> {
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: CompiledStatement,
+        params: P,
+        map: F,
+    ) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 
 /// The reads `SqlReadContext`, `CovenWrite`, `BulkSqlContext` and
@@ -4259,6 +4296,21 @@ pub trait SqlRead {
         P: Params,
         F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
     fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+    /// Every row of a compiled read, a `CompiledStatement`: a read's SQL
+    /// with the scope plan its compiler built, as `sqlive_compose::Read`'s
+    /// `compiled` gives it. sqlive builds no plan for it (sqlive's spec,
+    /// section 4). It fails with `CompiledSchemaDiffers` when the store's
+    /// schema shows a table, view or function the plan read otherwise than
+    /// the schema the read was compiled against.
+    fn query_compiled<T, P, F>(
+        &self,
+        statement: CompiledStatement,
+        params: P,
+        map: F,
+    ) -> rusqlite::Result<Vec<T>>
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;

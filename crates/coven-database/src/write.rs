@@ -219,6 +219,21 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
     {
         self.files.query(sql, params, map)
     }
+
+    /// Map all rows of a compiled read within this write
+    /// (`SqlRead::query_compiled`).
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: sqlive::CompiledStatement,
+        params: P,
+        map: F,
+    ) -> sqlive::rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+    {
+        self.files.query_compiled(statement, params, map)
+    }
 }
 
 /// App SQL inside one bulk write (§4): it changes device-local tables
@@ -260,6 +275,21 @@ impl<'connection> BulkSqlContext<'connection> {
         F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
         self.database.app_query(sqlive::Recorded::No, sql, params, map)
+    }
+
+    /// Map all rows of a compiled read within this write
+    /// (`SqlRead::query_compiled`).
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: sqlive::CompiledStatement,
+        params: P,
+        map: F,
+    ) -> sqlive::rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+    {
+        self.database.app_query_compiled(sqlive::Recorded::No, statement, params, map)
     }
 }
 

@@ -379,6 +379,17 @@ impl<'a> FileWrite<'a> {
         self.statement(|| self.database.app_query(sqlive::Recorded::No, sql, params, map))
     }
 
+    pub(crate) fn query_compiled<T, P: sqlive::rusqlite::Params>(
+        &self,
+        statement: sqlive::CompiledStatement,
+        params: P,
+        map: impl FnMut(&sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<T>,
+    ) -> sqlive::rusqlite::Result<Vec<T>> {
+        self.statement(|| {
+            self.database.app_query_compiled(sqlive::Recorded::No, statement, params, map)
+        })
+    }
+
     /// The new files the write's moves made for rows removal rules took out,
     /// which their inserts name (§17.2).
     pub(crate) fn taken_out_copies(&self) -> Copied {

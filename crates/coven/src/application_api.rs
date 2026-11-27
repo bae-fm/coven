@@ -47,18 +47,19 @@ pub use coven_database::test_utils::{
 pub use coven_database::LiveQueryRuns;
 pub use coven_database::{
     named_params, params, prepare_user_file, sqlite_error_is_disk, types, unix_seconds_and_nanos,
-    Binding, BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CommitSql, CovenSchemaError,
-    DbError, Determinism, FileColumn, FileLocation, FilePlace, FileRef, FileSource,
-    FunctionArguments, Joining, JoiningWrite, LiveQuery, LiveQueryCause, LiveQueryClosed,
-    LiveQueryRequests, LiveQueryRevision, LoadStep, Lost, LostCell, LostValue, Migration,
-    MigrationContext, MigrationError, Mode, MoveFile, MoveId, Namespace, OldWrites, OpenStep,
-    Params, Place, PreparedDeviceOnly, PreparedPin, PreparedUserFile, Provenance, Read, ReadOnly,
-    ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row,
+    Binding, BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CommitSql, CompiledStatement,
+    CovenSchemaError, DbError, Determinism, FileColumn, FileLocation, FilePlace, FileRef,
+    FileSource, FunctionArguments, Joining, JoiningWrite, LiveQuery, LiveQueryCause,
+    LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, LoadStep, Lost, LostCell, LostValue,
+    Migration, MigrationContext, MigrationError, Mode, MoveFile, MoveId, Namespace, OldWrites,
+    OpenStep, Params, Place, PreparedDeviceOnly, PreparedPin, PreparedUserFile, Provenance, Read,
+    ReadOnly, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row,
     RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlRead,
     SqlReadContext, SqliteError, SqliteResult, StagedFiles, SyncedTable, TemporaryDirectoryError,
     ToSql, TransferChange, TransferEnd, TransferProgress, TransferWatch, UnsentWork, UserFile,
     WriteBatch, WriteFailure, WriteId, WritePermission, WriteWait, Writer, BOUND_FILE_LIMIT,
 };
+pub use coven_database::{SchemaDiffers, UndecodablePlan};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_format::admin::StoreChange;
 pub use coven_schema::{readable_objects_sql, SqlFunction, SQL_FUNCTIONS};
