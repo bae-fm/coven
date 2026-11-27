@@ -3,6 +3,7 @@
 use crate::{BulkSqlContext, Mode, SqlContext, SqlReadContext, Writer};
 use sqlive::rusqlite::{Params, Row};
 use sqlive::CompiledStatement;
+use sqlive_compose::Read;
 
 /// Ordinary SQL reads through a read context or a write's, so code that
 /// reads the same way inside a write and outside one is written once. Inside
@@ -23,6 +24,25 @@ pub trait SqlRead {
     where
         P: Params,
         F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>;
+
+    /// Every row of a read the app's build compiled (`read!`), run with the
+    /// scope plan it brings, as `query_compiled` runs it.
+    fn fetch<Q>(&self, statement: &Q) -> sqlive::rusqlite::Result<Vec<Q::Row>>
+    where
+        Q: Read<Handle = Self::Handle>,
+    {
+        self.query_compiled(Q::compiled(), statement.params().as_slice(), Q::read)
+    }
+
+    /// The first row of a read the app's build compiled, as `fetch` reads
+    /// it. It fails with `QueryReturnedNoRows` when there is none.
+    fn fetch_row<Q>(&self, statement: &Q) -> sqlive::rusqlite::Result<Q::Row>
+    where
+        Q: Read<Handle = Self::Handle>,
+    {
+        let first = self.fetch(statement)?.into_iter().next();
+        first.ok_or(sqlive::rusqlite::Error::QueryReturnedNoRows)
+    }
 
     /// Map all result rows of a compiled read, which brings the scope plan
     /// its compiler built (sqlive's spec, section 4). It fails with

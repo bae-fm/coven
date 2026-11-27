@@ -67,6 +67,54 @@ impl<'write> JoiningWrite<'write> {
     {
         self.files.query(sql, params, map)
     }
+
+    /// Map all rows of a compiled read within this write
+    /// (`SqlRead::query_compiled`).
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: sqlive::CompiledStatement<crate::Writer>,
+        params: P,
+        map: F,
+    ) -> sqlive::rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+    {
+        self.files.query_compiled(statement, params, map)
+    }
+}
+
+impl crate::SqlRead for JoiningWrite<'_> {
+    type Handle = crate::Writer;
+
+    fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+    {
+        JoiningWrite::query_row(self, sql, params, map)
+    }
+
+    fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+    {
+        JoiningWrite::query(self, sql, params, map)
+    }
+
+    fn query_compiled<T, P, F>(
+        &self,
+        statement: sqlive::CompiledStatement<crate::Writer>,
+        params: P,
+        map: F,
+    ) -> sqlive::rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+    {
+        JoiningWrite::query_compiled(self, statement, params, map)
+    }
 }
 
 /// The app's joining write, as the database keeps it.

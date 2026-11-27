@@ -15,9 +15,9 @@ rules = [
     "conventions",
 ]
 
-# The checker, and the policy model it shares with the typed lints, answer
-# only to the conventions.
-tools = ["owner-construction-policy", "owner-construction-check"]
+# The checker, the policy model it shares with the typed lints, and the
+# example app, which is no crate of coven's, answer only to the conventions.
+tools = ["owner-construction-policy", "owner-construction-check", "coven-example-notes"]
 
 # These are the features only tests turn on.
 test_support_features = ["test-utils", "in-memory-keychain", "profiles"]

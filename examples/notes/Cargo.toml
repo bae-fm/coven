@@ -1,0 +1,25 @@
+[package]
+name = "coven-example-notes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "A notes app's queries, written as an app that uses coven writes them."
+
+[dependencies]
+coven.workspace = true
+
+[build-dependencies]
+# The compiler that checks and compiles the app's statements, and coven's
+# objects that app SQL may read. Neither compiles an async runtime.
+sqlive-compose = { workspace = true, features = ["compiler"] }
+coven-schema = { workspace = true, features = ["compiler"] }
+
+[dev-dependencies]
+coven = { workspace = true, features = ["test-utils"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+uuid = { workspace = true, features = ["v7"] }
+
+[lints]
+workspace = true

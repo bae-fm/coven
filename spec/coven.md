@@ -1114,6 +1114,93 @@ Coven keeps to that memory rule for its own state: what lasts only as long as th
 process, such as the files being sent, it keeps in memory and shows through its
 views (§4).
 
+#### 4.2 Compiled statements
+
+An app writes its queries as *compiled statements*: `coven::read!`,
+`coven::write!` and `coven::fragment!` calls, which the app's build script
+checks against its schema and coven's objects as the app compiles. A column the
+schema doesn't have fails the build, not the screen that reads it, and each read
+brings the scope plan that narrows its live query (§4), so sqlive builds none as
+the app runs. The macros and the compiler are sqlive-compose's, whose spec states
+what a call may say, what it compiles to and what fails the build
+([sqlive-compose's spec](../crates/sqlive-compose/SPEC.md)). coven re-exports the
+macros and the traits that compiled statements implement, so the app's code names
+`coven` alone for them.
+
+Ben's music app reads an album's tracks and retitles one:
+
+```rust
+coven::read!(writer AlbumTracks(album: String), r#"
+    SELECT t.id, t.title FROM tracks AS t
+    WHERE t.release_id = :album ORDER BY t.position
+"#);
+
+coven::write!(Retitle(track: String, title: String), r#"
+    UPDATE tracks SET title = :title WHERE id = :track
+"#);
+
+handle.write(move |sql| {
+    Ok::<_, CovenError>(sql.run(&RetitleParams { track, title })?)
+}).await?;
+
+let tracks = AlbumTracksParams { album };
+let screen: LiveQuery<_, CovenError> =
+    handle.subscribe(move |sql| Ok(sql.fetch(&tracks)?));
+```
+
+A context takes a compiled statement by its type. Every context that reads runs
+a read with `fetch`, which returns its rows, or `fetch_row`, which returns the
+first of them. Every context that writes runs a write with `run`, which returns
+how many rows it changed, or, for a write with a RETURNING clause,
+`run_returning`, which returns the rows the clause gives
+([api.md E4](api.md#e4-reading)). A read marked `writer` runs on `CovenHandle`'s
+reads, live queries and writes, and a read without the mark on
+`CovenReadHandle`'s, which don't type-check the other's. The compiler fails the
+build of an unmarked read that reads a view only the writer reads, such as
+`coven_sync_state`.
+
+SQL strings stay the layer under compiled statements: `query`, `query_row`,
+`execute` and `execute_batch` take any SQL, and nothing checks it before it runs.
+An app writes one for a statement it builds as it runs, such as a table whose
+columns the person picks. A migration runs strings too, since it runs on the
+schema of its own version, which the build doesn't check. Whether the rest of an
+app may write a string is the app's own rule, which coven doesn't enforce.
+
+**The build step.** A crate that makes these calls depends on `coven`, and its
+build script depends on two crates that compile no async runtime:
+`sqlive-compose` and `coven-schema`, each with its `compiler` feature. The
+script gives the compiler the schema as data, its *setup*. It takes coven's part
+from `coven_schema::compiler_setup()` (§4, [api.md E4](api.md#e4-reading)) and
+appends the app's:
+
+- the SQL of each of the app's migrations, in the order the app declares them;
+- each SQL function the app registers that this SQL or a statement names, with
+  its argument count and whether it is deterministic;
+- the name of each collation the app registers that they name.
+
+It calls `compile_crate` with that setup, the crate's name and `coven` as the
+macros' crate, which says that the crate writes its calls as `coven::read!`:
+
+```rust
+let compiled = compile_crate(Input {
+    crate_name: env::var("CARGO_PKG_NAME")?,
+    macros_crate: "coven".to_owned(),
+    source_reader: &|path| fs::read_to_string(root.join(path)),
+    manifests: Vec::new(),
+    setup,
+});
+```
+
+The script writes each file the compiler returns into
+`OUT_DIR/sqlive_compose/`, which the macros include, and prints its errors, which
+fail the build ([sqlive-compose's spec, section
+10](../crates/sqlive-compose/SPEC.md#10-how-an-apps-build-runs-the-compiler),
+which also covers fragments that one crate hands to another).
+[`examples/notes`](../examples/notes/build.rs) is a whole app crate that does
+this. A store checks each read's plan against its own schema before the read
+first runs, so a read compiled against another schema fails with
+`CompiledSchemaDiffers`.
+
 ### 5. The sequence
 
 All of a store's history is one numbered sequence of objects in storage:
@@ -13684,14 +13771,17 @@ document:
   `coven-database` and `coven-storage` never depend on each other. So the
   database never reaches storage, and storage never reads the database;
   `coven-sync` is where the two meet.
-- `sqlive-compose` depends on `sqlive-reads` and on no coven crate, and `coven`
-  depends on sqlive and not on `sqlive-compose`, so the two are siblings. Only
-  `coven-schema`'s `compiler` feature, which an app's build script takes,
-  depends on `sqlive-compose`, for the compiler's setup type. An app names
-  `sqlive-compose` itself, for its read macros and for the compiler in its
-  build scripts; `coven` re-exports neither. The compiler opens SQLite only
-  through the schema probe of `sqlive-reads`, so F.2 needs no exception for it,
-  and a build script that takes `sqlive-compose` compiles no async runtime.
+- `sqlive-compose` depends on `sqlive-reads` and on no coven crate.
+  `coven-database`'s SQL contexts run the statements its traits describe, and
+  `coven` re-exports its macros and those traits, so an app's code names `coven`
+  alone for its queries (§4.2). `coven-schema`'s `compiler` feature, which an
+  app's build script takes, depends on it for the compiler's setup type. An
+  app's build script takes the compiler from `sqlive-compose` itself, since
+  `coven` re-exports no compiler: the compiler opens SQLite only through the
+  schema probe of `sqlive-reads`, so F.2 needs no exception for it, and a build
+  script that takes it compiles no async runtime.
+- `examples/notes` is an app that uses coven, in the workspace so that CI builds
+  and tests it. It is none of coven's crates, so only F.5's conventions hold it.
 - `coven-merge` and `coven-format` read no clock, file, database or network. So
   the merge is tested, and checked against the Lean model
   ([proofs/merge.md](proofs/merge.md)), without SQLite or storage.
@@ -14027,8 +14117,10 @@ the rules above.
 - **Visibility.** Nothing is `pub` that can't be reached from outside its crate.
   `pub(in path)` and `super::super::` aren't used: an item needed elsewhere moves
   to where both callers can see it. `coven` re-exports the API at its root and
-  keeps every module private. It re-exports nothing of `sqlive-compose`: an app
-  names that crate for its read macros and its build scripts' compiler (F.1).
+  keeps every module private. The API includes `sqlive-compose`'s macros and
+  statement traits (F.1). The one module `coven` re-exports is that crate's
+  `generated`, hidden from its documentation, which only compiled statements
+  name.
 - **Errors** are typed enums per crate. An error is never turned into text to be
   passed on, and nothing returns `Result<_, String>`.
 - **Failures keep their causes.** Failed app calls and whole-pass sync failures

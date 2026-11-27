@@ -942,6 +942,7 @@ dependencies = [
  "coven-storage",
  "coven-sync",
  "serde_json",
+ "sqlive-compose",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -999,11 +1000,24 @@ dependencies = [
  "serde_json",
  "sqlite3-parser",
  "sqlive",
+ "sqlive-compose",
  "syn 3.0.6",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "coven-example-notes"
+version = "0.1.0"
+dependencies = [
+ "coven",
+ "coven-schema",
+ "sqlive-compose",
+ "tempfile",
+ "tokio",
  "uuid",
 ]
 

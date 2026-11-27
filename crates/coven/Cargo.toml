@@ -21,6 +21,7 @@ coven-database.workspace = true
 coven-schema.workspace = true
 coven-storage.workspace = true
 coven-sync.workspace = true
+sqlive-compose.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 tracing.workspace = true

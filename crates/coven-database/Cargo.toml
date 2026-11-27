@@ -16,6 +16,7 @@ coven-merge.workspace = true
 coven-format.workspace = true
 coven-schema.workspace = true
 sqlive.workspace = true
+sqlive-compose.workspace = true
 sqlite3-parser.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

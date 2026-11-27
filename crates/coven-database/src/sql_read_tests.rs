@@ -77,3 +77,64 @@ async fn a_compiled_read_runs_in_either_context_and_fails_on_another_schema() {
     }
     database.close().await.unwrap();
 }
+
+/// The title of the note `id`, as a generated read: its statement, its row
+/// and its plan, which `compiled` builds as an app's build does.
+struct TitleOf {
+    id: &'static str,
+}
+
+impl sqlive_compose::Statement for TitleOf {
+    const SQL: &'static str = PANTRY;
+
+    fn params(&self) -> Vec<(&'static str, &dyn sqlive::rusqlite::ToSql)> {
+        vec![(":id", &self.id)]
+    }
+}
+
+impl sqlive_compose::Returning for TitleOf {
+    type Row = String;
+
+    fn read(row: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<String> {
+        row.get(0)
+    }
+}
+
+impl sqlive_compose::Read for TitleOf {
+    type Handle = crate::Writer;
+
+    const PLAN: &'static str = "";
+
+    fn compiled() -> sqlive::CompiledStatement<crate::Writer> {
+        compiled(NOTES)
+    }
+}
+
+/// `fetch` gives every row of a generated read, bound by the statement's own
+/// parameters, and `fetch_row` its first, or `QueryReturnedNoRows`.
+#[tokio::test]
+async fn a_generated_read_is_fetched_by_its_type() {
+    let store = TestStore::new();
+    let database = store.schema(notes(), NOTES).await.unwrap();
+    database
+        .write(|context| {
+            context.execute("INSERT INTO notes(id,title) VALUES('pantry','Pantry')", [])?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .unwrap();
+    database
+        .read(|context| {
+            assert_eq!(context.fetch(&TitleOf { id: "pantry" })?, ["Pantry"]);
+            assert_eq!(context.fetch_row(&TitleOf { id: "pantry" })?, "Pantry");
+            assert!(context.fetch(&TitleOf { id: "cellar" })?.is_empty());
+            assert!(matches!(
+                context.fetch_row(&TitleOf { id: "cellar" }),
+                Err(sqlive::rusqlite::Error::QueryReturnedNoRows)
+            ));
+            Ok::<_, DbError>(())
+        })
+        .await
+        .unwrap();
+    database.close().await.unwrap();
+}

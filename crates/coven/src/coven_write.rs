@@ -496,6 +496,12 @@ impl SqlRead for CovenWrite<'_> {
     }
 }
 
+impl SqlWrite for CovenWrite<'_> {
+    fn execute<P: Params>(&self, sql: &str, params: P) -> SqliteResult<usize> {
+        CovenWrite::execute(self, sql, params)
+    }
+}
+
 #[cfg(test)]
 #[path = "coven_write_tests.rs"]
 mod tests;

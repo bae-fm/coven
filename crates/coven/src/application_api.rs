@@ -55,10 +55,10 @@ pub use coven_database::{
     OpenStep, Params, PendingRead, Place, PreparedDeviceOnly, PreparedPin, PreparedUserFile,
     Provenance, ReadOnly, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule,
     Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError,
-    SnapshotError, SqlRead, SqlReadContext, SqliteError, SqliteResult, StagedFiles, SyncedTable,
-    TemporaryDirectoryError, ToSql, TransferChange, TransferEnd, TransferProgress, TransferWatch,
-    UnsentWork, UserFile, WriteBatch, WriteFailure, WriteId, WritePermission, WriteWait, Writer,
-    BOUND_FILE_LIMIT,
+    SnapshotError, SqlRead, SqlReadContext, SqlWrite, SqliteError, SqliteResult, StagedFiles,
+    SyncedTable, TemporaryDirectoryError, ToSql, TransferChange, TransferEnd, TransferProgress,
+    TransferWatch, UnsentWork, UserFile, WriteBatch, WriteFailure, WriteId, WritePermission,
+    WriteWait, Writer, BOUND_FILE_LIMIT,
 };
 pub use coven_database::{SchemaDiffers, UndecodablePlan};
 #[cfg(any(test, feature = "test-utils"))]
@@ -66,6 +66,14 @@ pub use coven_format::admin::StoreChange;
 pub use coven_schema::{readable_objects_sql, SqlFunction, SQL_FUNCTIONS, WRITER_ONLY};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_sync::{RecordedInvite, RecordedInviteStage, RecordedJoiner};
+/// Compiled statements, coven's way to query (§4, E4): the macros an app
+/// writes its reads and writes with, the traits of what its build compiles of
+/// them, and the module that compiled code names.
+#[doc(hidden)]
+pub use sqlive_compose::generated;
+pub use sqlive_compose::{
+    fragment, read, write, Read, Returning, Statement, Write, WriteReturning,
+};
 
 pub use coven_database::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,

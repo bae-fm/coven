@@ -113,6 +113,7 @@ mod snapshot_state;
 mod snapshot_write;
 mod snapshot_writes;
 mod sql_read;
+mod sql_write;
 mod sqlite;
 mod store_call;
 mod sync_facts;
@@ -210,6 +211,7 @@ pub use snapshot_error::SnapshotError;
 pub use snapshot_reload::{LoadedSnapshot, SnapshotReload, SnapshotSource};
 pub use snapshot_write::SnapshotWriteError;
 pub use sql_read::SqlRead;
+pub use sql_write::SqlWrite;
 #[cfg(any(test, feature = "test-utils"))]
 pub use sqlive::LiveQueryRuns;
 pub use sqlive::{

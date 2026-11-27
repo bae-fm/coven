@@ -95,3 +95,9 @@ impl SqlRead for MemberWrite<'_> {
         MemberWrite::query_compiled(self, statement, params, map)
     }
 }
+
+impl SqlWrite for MemberWrite<'_> {
+    fn execute<P: Params>(&self, sql: &str, params: P) -> SqliteResult<usize> {
+        MemberWrite::execute(self, sql, params)
+    }
+}

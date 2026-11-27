@@ -3312,9 +3312,9 @@ pub struct CovenWrite<'write> { /* private fields */ }
 /// The app's SQL as a member begins: the creator's first write, run by
 /// `create_store` after slot 1 applies and before the store is visible
 /// (§10.3, E1). It has `execute`, `execute_batch`, `query_row`, `query` and
-/// `query_compiled` as `CovenWrite` does, and `SqlRead`; it has no operation,
-/// file or administrative step, so it changes nothing in the store's
-/// membership.
+/// `query_compiled` as `CovenWrite` does, and `SqlRead` and `SqlWrite`; it
+/// has no operation, file or administrative step, so it changes nothing in the
+/// store's membership.
 pub struct MemberWrite<'write> { /* private fields */ }
 
 /// A bulk write's SQL access, borrowing its connection (§4, E3).
@@ -3603,6 +3603,16 @@ impl JoiningWrite<'_> {
         P: Params,
         F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
     pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+    /// Runs a compiled read within this write (`SqlRead::query_compiled`).
+    pub fn query_compiled<T, P, F>(
+        &self,
+        statement: CompiledStatement<Writer>,
+        params: P,
+        map: F,
+    ) -> rusqlite::Result<Vec<T>>
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
@@ -4306,8 +4316,18 @@ pub trait SqlRead {
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
-    /// Every row of a compiled read, a `CompiledStatement`: a read's SQL
-    /// with the scope plan its compiler built, as `sqlive_compose::Read`'s
+    /// Every row of a compiled read (`read!`), taken by its type and bound
+    /// by its own parameters (coven.md §4.2).
+    fn fetch<Q>(&self, statement: &Q) -> rusqlite::Result<Vec<Q::Row>>
+    where
+        Q: coven::Read<Handle = Self::Handle>;
+    /// The first row `fetch` returns, or `QueryReturnedNoRows` when it
+    /// returns none.
+    fn fetch_row<Q>(&self, statement: &Q) -> rusqlite::Result<Q::Row>
+    where
+        Q: coven::Read<Handle = Self::Handle>;
+    /// Every row of a `CompiledStatement`, mapped by the caller: a read's SQL
+    /// with the scope plan its compiler built, as `coven::Read`'s
     /// `compiled` gives it, whose type names the kind of handle that runs it
     /// (sqlive-compose's spec, section 9). sqlive builds no plan for it (sqlive's spec,
     /// section 4). It fails with `CompiledSchemaDiffers` when the store's
@@ -4327,6 +4347,34 @@ impl<M: Mode> SqlRead for SqlReadContext<'_, M> {}
 impl SqlRead for CovenWrite<'_> {}
 impl SqlRead for BulkSqlContext<'_> {}
 impl SqlRead for CommitSql<'_> {}
+impl SqlRead for JoiningWrite<'_> {}
+impl SqlRead for MemberWrite<'_> {}
+
+/// The writes every app SQL context that writes offers, so code that writes
+/// is written once for each of them. Each reads as the writer does.
+pub trait SqlWrite: SqlRead<Handle = Writer> {
+    /// Execute one app statement with parameters.
+    fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
+    /// Runs a compiled write (`write!`) that returns no rows, and returns
+    /// how many rows it changed (coven.md §4.2).
+    fn run<Q: coven::Write>(&self, statement: &Q) -> rusqlite::Result<usize>;
+    /// Runs a compiled write with a RETURNING clause, and returns every row
+    /// the clause gives.
+    fn run_returning<Q: coven::WriteReturning>(
+        &self,
+        statement: &Q,
+    ) -> rusqlite::Result<Vec<Q::Row>>;
+}
+impl SqlWrite for CovenWrite<'_> {}
+impl SqlWrite for BulkSqlContext<'_> {}
+impl SqlWrite for CommitSql<'_> {}
+impl SqlWrite for JoiningWrite<'_> {}
+impl SqlWrite for MemberWrite<'_> {}
+
+/// Compiled statements, coven's way to query (E4, coven.md §4.2):
+/// `sqlive-compose`'s macros and the traits of what an app's build compiles of
+/// them (sqlive-compose's spec, sections 9 and 11).
+pub use sqlive_compose::{fragment, read, write, Read, Returning, Statement, Write, WriteReturning};
 
 impl<'a, F, R, E, M: Mode> PendingRead<'a, F, M>
 where
