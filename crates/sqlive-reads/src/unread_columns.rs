@@ -25,11 +25,10 @@ use crate::from_item::Columns;
 use crate::row_scope::RowScope;
 use crate::scope_plan::{Object, Planner, Source, Subqueries};
 use crate::select_syntax::{parts, Part};
-use crate::sql::unparenthesized;
 use sqlite3_parser::ast::Expr;
 
 /// What a statement reads only in columns nothing reads.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Default)]
 pub(crate) struct UnreadReads {
     /// The tables and views read whole whose every source sits in such a
     /// column, lowercase.
@@ -107,7 +106,6 @@ pub(crate) fn unread_reads(sources: &[Source], live: &BTreeMap<String, RowScope>
 }
 
 /// A column a clause or a result column names.
-#[derive(Clone)]
 pub(crate) enum ColumnRef {
     /// The column, lowercase, of the item at this position.
     Of(usize, String),
@@ -142,11 +140,7 @@ impl Planner<'_> {
         match self.resolve(core, name) {
             Some((item, column)) => ColumnRef::Of(item, column),
             None => {
-                let name = match unparenthesized(name) {
-                    Expr::Id(name) => name.0,
-                    Expr::Qualified(_, name) | Expr::DoublyQualified(_, _, name) => name.0,
-                    _ => unreachable!("a name part is a name"),
-                };
+                let name = crate::sql::column_name(name).expect("a name part is a name");
                 ColumnRef::Named(crate::sql::name(name).to_ascii_lowercase())
             }
         }

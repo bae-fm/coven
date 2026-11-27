@@ -101,6 +101,15 @@ pub fn unparenthesized<'a, 'b>(mut expr: &'a Expr<'b>) -> &'a Expr<'b> {
     expr
 }
 
+/// The column's name, as written, of `expr` when it names a column.
+pub(crate) fn column_name<'b>(expr: &Expr<'b>) -> Option<&'b str> {
+    match unparenthesized(expr) {
+        Expr::Id(name) => Some(name.0),
+        Expr::Qualified(_, name) | Expr::DoublyQualified(_, _, name) => Some(name.0),
+        _ => None,
+    }
+}
+
 /// The name, lowercase, SQLite gives a result column that `alias` names.
 pub fn alias_name(alias: &As<'_>) -> String {
     let (As::As(alias) | As::Elided(alias)) = alias;

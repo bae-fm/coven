@@ -559,11 +559,7 @@ fn result_names(select: &Select<'_>) -> Option<Vec<String>> {
         .map(|column| {
             let name = match column {
                 ResultColumn::Expr(_, Some(alias)) => return Some(crate::sql::alias_name(alias)),
-                ResultColumn::Expr(expr, None) => match crate::sql::unparenthesized(expr) {
-                    Expr::Id(name) => name.0,
-                    Expr::Qualified(_, name) | Expr::DoublyQualified(_, _, name) => name.0,
-                    _ => return None,
-                },
+                ResultColumn::Expr(expr, None) => crate::sql::column_name(expr)?,
                 ResultColumn::Star | ResultColumn::TableStar(_) => return None,
             };
             Some(crate::sql::name(name).to_ascii_lowercase())

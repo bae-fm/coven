@@ -504,10 +504,8 @@ impl Planner<'_> {
                     Some(ColumnValue::Hidden)
                 );
             }
-            let column = match unparenthesized(name) {
-                Expr::Id(name) => Name(name.0),
-                Expr::Qualified(_, name) | Expr::DoublyQualified(_, _, name) => name.clone(),
-                _ => return false,
+            let Some(column) = crate::sql::column_name(name).map(Name) else {
+                return false;
             };
             self.scope_of(core).flat_map(|current| &self.cores[current].items).any(|item| {
                 let columns = &self.items[*item].columns;
