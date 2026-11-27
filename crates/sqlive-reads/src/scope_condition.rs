@@ -24,28 +24,28 @@ pub(crate) fn read_condition<'a>(
 ) -> rusqlite::Result<Narrowing> {
     let mut found = read_whole(connection, planner, core, condition, subqueries)?;
     if let Some(leading) = crate::row_order::leading_comparison(condition) {
-        found.terms.extend(item_term(connection, planner, core, &leading)?);
+        let mut read = Vec::new();
+        parts(&leading, &mut read);
+        if let Some(&[item]) = referenced_items(planner, core, &read).as_deref() {
+            if planner.items[item].core == core {
+                let term = item_term(connection, planner, core, item, &leading, &read)?;
+                found.terms.extend(term.map(|term| (item, term)));
+            }
+        }
     }
     Ok(found)
 }
 
-/// The term `condition` gives the one item of core `core` whose columns it
-/// names, when it names no subquery.
+/// The term `condition`, made of the parts `read`, gives `item`, the one
+/// item of core `core` whose columns it names, when it names no subquery.
 fn item_term(
     connection: &Connection,
     planner: &Planner,
     core: usize,
+    item: usize,
     condition: &Expr<'_>,
-) -> rusqlite::Result<Option<(usize, ScopeTerm)>> {
-    let mut read = Vec::new();
-    parts(condition, &mut read);
-    let Some(referenced) = referenced_items(planner, core, &read) else {
-        return Ok(None);
-    };
-    let [item] = referenced[..] else { return Ok(None) };
-    if planner.items[item].core != core {
-        return Ok(None);
-    }
+    read: &[Part<'_>],
+) -> rusqlite::Result<Option<ScopeTerm>> {
     let column = |expr: &Expr<'_>| {
         let (found, column) = planner.resolve(core, expr)?;
         let affinity =
@@ -55,12 +55,12 @@ fn item_term(
     // What `term` can't read, SQLite judges row by row (`scope_row.rs`).
     let narrowed = match term(connection, &column, condition)? {
         Some(term) => Some(term),
-        None => match item_row_term(planner, core, item, condition, &read) {
+        None => match item_row_term(planner, core, item, condition, read) {
             Some(judged) => Some(ScopeTerm::Row(judged)),
             None => column_order(connection, planner, core, item, condition)?,
         },
     };
-    Ok(narrowed.map(|term| (item, term)))
+    Ok(narrowed)
 }
 
 /// The items whose columns a condition of core `core` made of `read` names,
@@ -131,8 +131,12 @@ fn read_whole<'a>(
         return Ok(Narrowing::default());
     };
     let mut found = Narrowing::default();
-    if let [_] = referenced[..] {
-        found.terms.extend(item_term(connection, planner, core, condition)?);
+    if let [item] = referenced[..] {
+        if planner.items[item].core != core {
+            return Ok(Narrowing::default());
+        }
+        let term = item_term(connection, planner, core, item, condition, &read)?;
+        found.terms.extend(term.map(|term| (item, term)));
     } else if or {
         return crate::scope_or::read_or(connection, planner, core, condition, subqueries);
     } else if let Expr::Binary(left, Operator::Is, right) = condition {

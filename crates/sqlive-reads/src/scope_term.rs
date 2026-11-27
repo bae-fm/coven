@@ -579,25 +579,11 @@ pub(crate) fn term(
             }
         }
         Expr::Binary(left, op, right) => {
-            let (named, operand_expr, reverse) = if let Some(named) = column(left) {
-                (named, right, false)
-            } else if let Some(named) = column(right) {
-                (named, left, true)
-            } else {
+            let Some(((named, affinity), operand_expr, ordering, inclusive)) =
+                column_comparison(*op, left, right, column)
+            else {
                 return Ok(None);
             };
-            let (mut ordering, inclusive) = match op {
-                Operator::Equals | Operator::Is => (Ordering::Equal, false),
-                Operator::Less => (Ordering::Less, false),
-                Operator::LessEquals => (Ordering::Less, true),
-                Operator::Greater => (Ordering::Greater, false),
-                Operator::GreaterEquals => (Ordering::Greater, true),
-                _ => return Ok(None),
-            };
-            if reverse {
-                ordering = ordering.reverse();
-            }
-            let (named, affinity) = named;
             operand(connection, operand_expr, affinity)?.map(|operand| {
                 // `IS` a constant is an equality; `IS` a parameter is one or
                 // a NULL test, by the run's value.
@@ -626,6 +612,35 @@ pub(crate) fn term(
     Ok(result)
 }
 
+/// How the comparison `op` orders its left side against its right, and
+/// whether a tie passes beside that order; `IS` orders as `=`.
+fn comparison(op: Operator) -> Option<(Ordering, bool)> {
+    Some(match op {
+        Operator::Equals | Operator::Is => (Ordering::Equal, false),
+        Operator::Less => (Ordering::Less, false),
+        Operator::LessEquals => (Ordering::Less, true),
+        Operator::Greater => (Ordering::Greater, false),
+        Operator::GreaterEquals => (Ordering::Greater, true),
+        _ => return None,
+    })
+}
+
+/// The comparison `left op right` read with the column first, when `named`
+/// knows either side as one: what it gives of that side, the other side, and
+/// `comparison`'s ordering and tie as the column compares with it.
+pub(crate) fn column_comparison<'a, T>(
+    op: Operator,
+    left: &'a Expr<'a>,
+    right: &'a Expr<'a>,
+    named: impl Fn(&Expr<'_>) -> Option<T>,
+) -> Option<(T, &'a Expr<'a>, Ordering, bool)> {
+    let (ordering, inclusive) = comparison(op)?;
+    if let Some(found) = named(left) {
+        return Some((found, right, ordering, inclusive));
+    }
+    named(right).map(|found| (found, left, ordering.reverse(), inclusive))
+}
+
 /// The term `(condition) op value` gives, or `value op (condition)`, when
 /// the condition is a NULL test or a column compared with a value, and the
 /// other side is a constant or a parameter.
@@ -642,12 +657,8 @@ fn truth(
             (None, Some(condition)) => (condition, left, true),
             _ => return Ok(None),
         };
-    let (ordering, inclusive) = match op {
-        Operator::Equals | Operator::Is => (Ordering::Equal, false),
-        Operator::Less => (Ordering::Less, false),
-        Operator::LessEquals => (Ordering::Less, true),
-        Operator::Greater => (Ordering::Greater, false),
-        _ => (Ordering::Greater, true),
+    let Some((ordering, inclusive)) = comparison(op) else {
+        return Ok(None);
     };
     let ordering = if reversed { ordering.reverse() } else { ordering };
     // The truth has no affinity, nor has the value: nothing converts.
@@ -681,20 +692,12 @@ fn condition(
     let Expr::Binary(left, op, right) = expr else {
         return Ok(None);
     };
-    let (mut ordering, inclusive) = match op {
-        Operator::Equals => (Ordering::Equal, false),
-        Operator::Less => (Ordering::Less, false),
-        Operator::LessEquals => (Ordering::Less, true),
-        Operator::Greater => (Ordering::Greater, false),
-        Operator::GreaterEquals => (Ordering::Greater, true),
-        _ => return Ok(None),
-    };
-    let ((named, affinity), operand_expr) = if let Some(named) = column(left) {
-        (named, *right)
-    } else if let Some(named) = column(right) {
-        ordering = ordering.reverse();
-        (named, *left)
-    } else {
+    if *op == Operator::Is {
+        return Ok(None);
+    }
+    let Some(((named, affinity), operand_expr, ordering, inclusive)) =
+        column_comparison(*op, left, right, column)
+    else {
         return Ok(None);
     };
     Ok(operand(connection, operand_expr, affinity)?.map(|operand| Truth::Compare {
