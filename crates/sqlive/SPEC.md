@@ -1328,6 +1328,22 @@ CTE narrows the tables of the CTE it reads. A statement with a recursive CTE of
 its own, or with `x IN table`, narrows nothing: it depends on every row of each
 table it read.
 
+A column of a subquery, CTE or view that nothing reads changes no row the
+statement returns, so the live query depends on no row of a table that only the
+SELECTs inside such columns read. A music app writes one `SELECT` of releases
+whose `files` column counts each release's files, and splices it into other
+statements as a FROM subquery: a statement that selects only each release's name
+from it doesn't rerun when a file is added. A `SELECT w.*` around the subquery
+reads a column only when something reads that column of its own. Something reads
+a column when a clause names it, or a result column that is itself read does, or
+a name sqlive can't place matches its name. Every column counts as read in a
+SELECT that is DISTINCT, groups its rows or has an ORDER BY, and in each arm of
+a compound other than one of UNION ALLs alone, and so does a column that calls
+an aggregate or a window function. A table the statement also reads elsewhere
+narrows as those reads say. SQLite reports each column the statement names,
+those an unread column names too, so a change to one of them in a row those
+reads allow still runs the query again.
+
 ### What is read whole
 
 sqlive logs at debug level each statement that reads a table or a view whole,
@@ -2055,6 +2071,7 @@ the model and states its assumptions.
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `proofs/SqliveNarrowing/Rules/View.lean` | 8 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `proofs/SqliveNarrowing/Rules/View.lean` | 8 |
 | An expression over one item's own columns, compared with another item's value, has in a binding the value it gives that item's row, so an equality with it narrows the item as one with its column does | `row_member_sound` | `proofs/SqliveNarrowing/Rules/RowMember.lean` | 7 |
+| Writing NULL for each column of a subquery, CTE or view that nothing names, in a SELECT whose rows are the same without it, and emptying the cores the statement then reads no longer, leaves the statement's rows the same from every database, so a write the judge of the pruned statement lets pass leaves them unchanged | `result_pruned`, `pruned_narrowing_sound` | `proofs/SqliveNarrowing/Rules/Unread.lean` | 8 |
 | A condition SQLite judges, or a value an equality computes, over a derived item's columns, rewritten to the columns of an item its arm passes them on from, holds of that item's row, or has its value there, wherever it did of the derived item's row; a strict value is NULL where that item has no row | `judgedOn_sound`, `value_passed_sound`, `value_passed_none` | `proofs/SqliveNarrowing/Rules/PushDown.lean` | 8 |
 | A parenthesized join gives the rows its tables give joined one after another: an inner join of one always, its ON read with the WHERE, and a LEFT JOIN of one when its ON names no table of the join but the first and each later table is a LEFT JOIN's whose ON can't hold where a table before it has no row | `left_group_flat`, `inner_group_flat` | `proofs/SqliveNarrowing/Rules/Parenthesized.lean` | 7 |
 | A FROM item that names a CTE reads the innermost CTE of that name visible where it is, and a WITH that doesn't declare the name changes nothing of what it names inside, so an outer CTE's query reads the outer CTEs | `resolve_inner`, `resolve_outer` | `proofs/SqliveNarrowing/Rules/CteNames.lean` | 8 |

@@ -625,3 +625,40 @@ INSERT INTO storage VALUES ('b',1),('c',1),('d',1)",
     .await;
     db.close();
 }
+
+/// A column of a subquery that nothing reads changes nothing the statement
+/// returns, so a table that only its subquery reads is no table the statement
+/// depends on, through each wrapper that passes the column on unread. A
+/// statement that reads the column depends on it.
+#[tokio::test]
+async fn a_subquerys_unread_column_adds_no_table_the_statement_depends_on() {
+    let db = TestDatabase::open(
+        "CREATE TABLE a(id INTEGER PRIMARY KEY, v INTEGER);
+CREATE TABLE covers(id INTEGER PRIMARY KEY, album INTEGER);
+INSERT INTO a VALUES (1,0),(2,0);
+CREATE VIEW covered AS SELECT a.id, (SELECT c.id FROM covers AS c WHERE c.album = a.id) AS cover FROM a",
+    );
+    let covered =
+        "SELECT a.id, a.v, (SELECT c.id FROM covers AS c WHERE c.album = a.id) AS cover FROM a";
+    for (sql, reads_cover) in [
+        ("SELECT id FROM covered WHERE id = 1".to_owned(), false),
+        ("SELECT cover FROM covered WHERE id = 1".to_owned(), true),
+        (format!("SELECT s.id FROM ({covered}) AS s WHERE s.id = 1"), false),
+        (format!("SELECT s.id FROM (SELECT w.* FROM ({covered}) AS w) AS s WHERE s.id = 1"), false),
+        (format!("WITH s AS ({covered}) SELECT s.v FROM s ORDER BY s.id LIMIT 1"), false),
+        (format!("SELECT s.id FROM ({covered} UNION ALL {covered}) AS s WHERE s.id = 1"), false),
+        (format!("SELECT s.id, s.cover FROM (SELECT w.* FROM ({covered}) AS w) AS s WHERE s.id = 1"), true),
+        (format!("SELECT s.id FROM (SELECT * FROM ({covered}) AS w WHERE w.cover IS NULL) AS s WHERE s.id = 1"), true),
+        (format!("SELECT s.id FROM ({covered} ORDER BY cover) AS s WHERE s.id = 1"), true),
+        (format!("SELECT count(*) FROM (SELECT DISTINCT * FROM ({covered})) AS s"), true),
+    ] {
+        follows(
+            &db,
+            sql.leak(),
+            vec![],
+            &[("INSERT INTO covers VALUES (9,1)", reads_cover), ("DELETE FROM covers WHERE id = 9", reads_cover)],
+        )
+        .await;
+    }
+    db.close();
+}

@@ -104,7 +104,7 @@ theorem Statement.reads_find? {s : Statement} {t : Nat} {read : Nat × List Nat}
   simp only at hp
   subst hp
   simp only [List.mem_eraseDups, List.mem_append, List.mem_filterMap]
-  exact Or.inl ⟨(i, c), hic, by simp [ht]⟩
+  exact Or.inl (Or.inl ⟨(i, c), hic, by simp [ht]⟩)
 
 /-- Masking keeps every cell a clause names. -/
 theorem Statement.cellOf_maskBind (s : Statement) (b : Bind) {i c : Nat}

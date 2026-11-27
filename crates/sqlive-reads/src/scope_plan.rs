@@ -28,6 +28,7 @@ use crate::from_item::{Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
 use crate::scope_edge::{Edge, MemberValue};
+use crate::scope_narrowing::Narrowing;
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
 use crate::scope_row::item_row_term;
 use crate::scope_subquery::compared_subquery;
@@ -36,6 +37,7 @@ use crate::scope_window::{read_window, Window};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Functions, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
+use crate::unread_columns::{ColumnRef, OutputRead};
 use crate::unreported_columns::{unreported_columns, UnreportedColumns};
 use rusqlite::{Connection, Statement};
 use sqlite3_parser::{
@@ -185,6 +187,9 @@ pub(crate) struct Source {
     /// the source's scope, and decides nothing of the order the sources take
     /// values in.
     pub(crate) carried: Option<ScopeTerm>,
+    /// Whether only a column nothing reads reads it, so the statement
+    /// depends on none of its rows (`unread_columns.rs`).
+    pub(crate) unread: bool,
     /// Columns that must equal a value an earlier source holds.
     pub(crate) memberships: Vec<Membership>,
     /// The ORs that narrow it, each a list of sides whose memberships take
@@ -280,6 +285,10 @@ pub(crate) struct Core {
     /// The item each name in its clauses resolves to, `None` for a name
     /// sqlive can't place.
     names: Vec<Option<usize>>,
+    /// The columns its clauses but its result columns name, and what each
+    /// result column reads (`unread_columns.rs`).
+    pub(crate) clause_refs: Vec<ColumnRef>,
+    pub(crate) outputs: Vec<OutputRead>,
     /// The window of the subquery whose one core this is
     /// (`scope_window.rs`).
     pub(crate) window: Option<Window>,
@@ -288,6 +297,13 @@ pub(crate) struct Core {
     /// (`Planner::volatile`), a subquery in them counting by its SELECT's, or
     /// it reads a view read whole.
     pub(crate) volatile: bool,
+}
+
+impl Core {
+    /// The core it sits in.
+    pub(crate) fn parent(&self) -> Option<usize> {
+        self.parent
+    }
 }
 
 /// Where a condition was written: the WHERE or an inner join's ON, or the
@@ -333,6 +349,9 @@ impl Sources {
             [core] => sorted_limit(connection, &planner, select, core)?,
             _ => None,
         };
+        for item in planner.unread_items() {
+            planner.items[item].source.unread = true;
+        }
         Ok((Ok(planner.ordered(sorted)), size))
     }
 }
@@ -513,76 +532,6 @@ impl Planner<'_> {
     pub(crate) fn ctes_read(&self, items: usize) -> Vec<usize> {
         self.items[items..].iter().filter_map(|item| item.cte).collect()
     }
-
-    /// Narrow the sources by `found`, which conditions on the joined rows
-    /// give. A LEFT JOIN's right side it narrows is an inner join's then: a
-    /// left row with NULLs in its place fails the condition, so no row the
-    /// LEFT JOIN alone adds reaches the result. A term a row of NULLs can
-    /// pass, as a NULL test, narrows nothing on a right side that is still a
-    /// LEFT JOIN's and doesn't make it inner: the NULLs of a left row no
-    /// right row joins pass it, and a right row added for that left row takes
-    /// it out. An `IS` edge is the same: a NULL in its member's place matches
-    /// a NULL.
-    pub(crate) fn narrow(&mut self, mut found: Narrowing) {
-        found.terms.retain(|(item, term)| {
-            !(term.may_hold_on_nulls() && self.items[*item].left_on.is_some())
-        });
-        found.edges.retain(|edge| !(edge.nulls && self.items[edge.member.item].left_on.is_some()));
-        found.ors.retain(|or| !(or.may_hold_on_nulls() && self.items[or.item].left_on.is_some()));
-        for item in self.add(found) {
-            self.join_inner(item);
-        }
-    }
-
-    /// `found`, which the ON of the LEFT JOIN adding `item` gives: what it
-    /// says of `item` narrows it, and the rest narrows the other sources
-    /// only once the join is an inner join's. Until then a left row appears
-    /// whatever its ON says of the left side.
-    fn narrow_on(&mut self, item: usize, found: Narrowing) {
-        let (own, others) = found.split(item);
-        self.add(own);
-        match &mut self.items[item].left_on {
-            Some(held) => held.extend(others),
-            None => self.narrow(others),
-        }
-    }
-
-    /// Make `item` an inner join's right side, if it was a LEFT JOIN's: its
-    /// ON narrows the other sources as an inner join's does.
-    pub(crate) fn join_inner(&mut self, item: usize) {
-        if let Some(held) = self.items[item].left_on.take() {
-            self.narrow(held);
-        }
-    }
-
-    /// Add `edge` to the edges, each once. An equality can reach a column
-    /// through several columns of a derived item, which passes an edge into
-    /// the column for each: a copy of an edge passes no row the edge doesn't,
-    /// and a lookup that read it would write the partner's scope once more.
-    pub(crate) fn add_edge(&mut self, edge: Edge) {
-        if !self.edges.contains(&edge) {
-            self.edges.push(edge);
-        }
-    }
-
-    /// Add `found` to the sources' terms, the edges and the sources' ORs,
-    /// and say which sources it narrows.
-    fn add(&mut self, found: Narrowing) -> Vec<usize> {
-        let mut narrowed = Vec::new();
-        for (item, term) in found.terms {
-            ScopeTerm::add_to(&mut self.items[item].source.term, term);
-            narrowed.push(item);
-        }
-        for edge in found.edges {
-            narrowed.push(edge.member.item);
-            self.add_edge(edge);
-        }
-        for or in found.ors {
-            narrowed.push(or.item);
-            self.items[or.item].ors.push(or.sides);
-        }
-        narrowed
-    }
 }
 
 /// Why a statement that names a contentful FTS5 table's hidden column stops
@@ -629,6 +578,8 @@ pub(crate) fn read_select<'a>(
                 return Ok(Err(HIDDEN_COLUMN));
             }
             planner.note_names(core, &found);
+            let refs = planner.column_refs(core, &found);
+            planner.cores[core].clause_refs.extend(refs);
             Some(core)
         }
         _ => None,
@@ -703,6 +654,8 @@ fn read_core<'a>(
         items: Vec::new(),
         aliases: Vec::new(),
         names: Vec::new(),
+        clause_refs: Vec::new(),
+        outputs: Vec::new(),
         window: None,
         volatile: false,
     });
@@ -716,6 +669,8 @@ fn read_core<'a>(
                 return Ok(Err(HIDDEN_COLUMN));
             }
             planner.note_names(core, &found);
+            // VALUES reads every column it writes.
+            planner.cores[core].clause_refs = planner.column_refs(core, &found);
             let read = read_nested(connection, planner, &found, Some(core), ctes)?;
             return Ok(read.map(|_| {
                 planner.cores[core].volatile = planner.volatile(core, &found);
@@ -734,6 +689,7 @@ fn read_core<'a>(
             }
         }
     }
+    let result_parts = found.len();
     let mut conditions: Vec<(Written<'_>, Place)> = Vec::new();
     if let Some(from) = from {
         if let Err(unread) = crate::from_item::read_from(
@@ -772,13 +728,28 @@ fn read_core<'a>(
         Err(unread) => return Ok(Err(unread)),
     };
     planner.cores[core].volatile = planner.volatile(core, &found) || planner.reads_view_whole(core);
+    // A `*` over columns sqlive doesn't know reads whatever it spans, and
+    // every result column reads what it names then.
+    let (clause_parts, outputs) = match crate::derived::arm_columns(planner, core, select) {
+        Some(outputs) => (result_parts, planner.output_reads(core, &outputs, &subqueries)),
+        None => (0, Vec::new()),
+    };
+    let refs = planner.column_refs(core, &found[clause_parts..]);
+    planner.cores[core].clause_refs.extend(refs);
+    planner.cores[core].outputs = outputs;
     let mut read = Vec::new();
     for (condition, place) in conditions {
         let found = match condition {
             Written::Expr(condition) => {
                 read_condition(connection, planner, core, condition, &subqueries)?
             }
-            Written::Using { left, right } => planner.using_narrowing(left, right),
+            Written::Using { left, right } => {
+                for (item, column) in [&left, &right] {
+                    let column = ColumnRef::Of(*item, column.clone());
+                    planner.cores[core].clause_refs.push(column);
+                }
+                planner.using_narrowing(left, right)
+            }
         };
         read.push((found, place));
     }
@@ -922,55 +893,6 @@ pub(crate) fn read_condition<'a>(
         }
     }
     Ok(found)
-}
-
-/// What conditions narrow: terms on one source's rows each, and edges.
-/// Each is false where the column it tests is NULL, so it rejects a row
-/// with NULLs in its source's place, except a term a NULL test can make
-/// true (`ScopeTerm::may_hold_on_nulls`) and an `IS` edge.
-#[derive(Default)]
-pub(crate) struct Narrowing {
-    pub(crate) terms: Vec<(usize, ScopeTerm)>,
-    pub(crate) edges: Vec<Edge>,
-    /// ORs whose sides each narrow one source (`scope_or.rs`).
-    pub(crate) ors: Vec<crate::scope_or::Disjunction>,
-}
-
-impl Narrowing {
-    /// Whether a term, an edge or an OR of it can pass a row of NULLs.
-    fn may_hold_on_nulls(&self) -> bool {
-        self.terms.iter().any(|(_, term)| term.may_hold_on_nulls())
-            || self.edges.iter().any(|edge| edge.nulls)
-            || self.ors.iter().any(crate::scope_or::Disjunction::may_hold_on_nulls)
-    }
-
-    /// What of this, the ON of the LEFT JOIN adding `item`, narrows `item`
-    /// while the join is a LEFT JOIN's, and the rest, which waits for the
-    /// join to be an inner join's. An edge from `item` through a derived
-    /// item, and an OR of `item` with a side that holds one, wait with the
-    /// rest: the model proves such an edge only of a binding its core keeps
-    /// (`Narrowing.split` in `crates/sqlive/proofs`).
-    fn split(self, item: usize) -> (Self, Self) {
-        let (own, terms) = self.terms.into_iter().partition(|(narrowed, _)| *narrowed == item);
-        let (own_edges, edges) = self
-            .edges
-            .into_iter()
-            .partition(|edge| edge.member.item == item && edge.nesting.through().is_none());
-        let (own_ors, ors) = self.ors.into_iter().partition(|or| {
-            or.item == item
-                && or
-                    .sides
-                    .iter()
-                    .all(|side| side.edges.iter().all(|edge| edge.nesting.through().is_none()))
-        });
-        (Self { terms: own, edges: own_edges, ors: own_ors }, Self { terms, edges, ors })
-    }
-
-    pub(crate) fn extend(&mut self, other: Self) {
-        self.terms.extend(other.terms);
-        self.edges.extend(other.edges);
-        self.ors.extend(other.ors);
-    }
 }
 
 pub(crate) fn is_name(expr: &Expr<'_>) -> bool {

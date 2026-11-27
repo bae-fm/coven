@@ -67,6 +67,8 @@ mod syntax;
 mod term;
 #[path = "narrowing_model/unique_order.rs"]
 mod unique_order;
+#[path = "narrowing_model/unread_column.rs"]
+mod unread_column;
 #[path = "narrowing_model/using.rs"]
 mod using;
 #[path = "narrowing_model/view.rs"]
@@ -774,6 +776,12 @@ async fn push_down_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn group_key_matches_lean() {
     differential("group key", group_key::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn unread_column_matches_lean() {
+    differential("unread column", unread_column::statement).await;
 }
 
 #[tokio::test]

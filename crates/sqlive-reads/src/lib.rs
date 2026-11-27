@@ -19,6 +19,7 @@ mod schema_objects;
 mod schema_probe;
 mod scope_edge;
 mod scope_lookup;
+mod scope_narrowing;
 mod scope_one_of;
 mod scope_or;
 mod scope_order;
@@ -35,6 +36,7 @@ mod sql_walk;
 mod table_keys;
 mod token_scan;
 mod told_apart;
+mod unread_columns;
 mod unreported_columns;
 mod whole_view_names;
 

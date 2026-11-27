@@ -32,5 +32,6 @@ import SqliveNarrowing.Partners
 import SqliveNarrowing.Kept
 import SqliveNarrowing.Held
 import SqliveNarrowing.Sound
+import SqliveNarrowing.Rules.Unread
 import SqliveNarrowing.Index
 import SqliveNarrowing.Net

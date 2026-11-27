@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::row_scope::{RowScope, Scopes};
 use crate::scope_edge::MemberValue;
-use crate::scope_plan::{Membership, PartnerValue, Sources};
+use crate::scope_plan::{Membership, PartnerValue, Source, Sources};
 use crate::scope_row::{RowCondition, RowTest};
 use crate::scope_term::{Affinity, RunValues, ScopeTerm};
 use crate::sql_value::SqlValue as Value;
@@ -58,8 +58,19 @@ pub const LOOKUP_STEPS: i32 = 1_000;
 /// when it returned as many rows as its LIMIT.
 pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
     let found = source_scopes(sources, RunValues::Run(parameters), last);
+    let tables = table_scopes(sources, found);
+    // The tables only sources nothing reads read.
+    let unread = sources
+        .sources
+        .iter()
+        .filter(|source| source.unread)
+        .filter_map(Source::table)
+        .filter(|table| !tables.contains_key(*table))
+        .map(str::to_owned)
+        .collect();
     Scopes {
-        tables: table_scopes(sources, found),
+        tables,
+        unread,
         inlined: sources.inlined.clone().unwrap_or_default(),
         fts5_shadows: sources.fts5_shadows.clone(),
         ..Scopes::default()
@@ -70,7 +81,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
 pub(crate) fn table_scopes(sources: &Sources, found: Vec<RowScope>) -> BTreeMap<String, RowScope> {
     let mut scopes: BTreeMap<String, RowScope> = BTreeMap::new();
     for (source, scope) in sources.sources.iter().zip(found) {
-        let Some(table) = source.table() else {
+        let Some(table) = source.table().filter(|_| !source.unread) else {
             continue;
         };
         let scope = match scopes.remove(table) {

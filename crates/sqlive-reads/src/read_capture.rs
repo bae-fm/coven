@@ -45,6 +45,12 @@ pub struct ReadFrame {
 }
 
 impl ReadFrame {
+    /// Whether each read of `table` through a view or CTE was through one of
+    /// `inlined`.
+    fn read_inside(&self, table: &str, inlined: &BTreeSet<String>) -> bool {
+        self.indirect.get(table).is_none_or(|views| views.is_subset(inlined))
+    }
+
     fn extend(&mut self, other: &Self) {
         self.columns.extend(other.columns.iter().cloned());
         for (table, views) in &other.indirect {
@@ -119,7 +125,8 @@ impl ReadCapture {
         self.completed.clone()
     }
 
-    /// Record `frame`'s tables but the FTS5 shadow tables `scopes` names,
+    /// Record `frame`'s tables but those `scopes` says count for nothing, the
+    /// FTS5 shadow tables and the tables only an unread column reads,
     /// each read through the scope `scopes` gives it, or whole, with the
     /// columns its rows depend on that the authorizer
     /// didn't report (`unreported_columns.rs`): SQLite reports no read at all
@@ -130,32 +137,25 @@ impl ReadCapture {
     /// as read in every row.
     fn finish(&mut self, frame: ReadFrame, scopes: &Scopes) {
         let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (table, column) in frame
-            .columns
-            .into_iter()
+        let reported = frame.columns.iter().cloned();
+        for (table, column) in reported
             .chain(scopes.unreported.columns().iter().cloned())
             .filter(|(table, _)| !scopes.fts5_shadows.contains(table))
+            .filter(|(table, _)| {
+                !scopes.unread.contains(table) || !frame.read_inside(table, &scopes.inlined)
+            })
         {
             tables.entry(table).or_default().insert(column);
         }
-        self.completed.extend(tables.into_iter().map(|(table, columns)| {
-            TableRead {
-                scope: match scopes.tables.get(&table) {
-                    Some(scope)
-                        if frame
-                            .indirect
-                            .get(&table)
-                            .is_none_or(|views| views.is_subset(&scopes.inlined)) =>
-                    {
-                        scope.clone()
-                    }
-                    _ => RowScope::All,
-                },
-                table,
-                columns,
-                inserted_only: false,
-                host: scopes.host,
-            }
+        self.completed.extend(tables.into_iter().map(|(table, columns)| TableRead {
+            scope: match scopes.tables.get(&table) {
+                Some(scope) if frame.read_inside(&table, &scopes.inlined) => scope.clone(),
+                _ => RowScope::All,
+            },
+            table,
+            columns,
+            inserted_only: false,
+            host: scopes.host,
         }));
     }
 }

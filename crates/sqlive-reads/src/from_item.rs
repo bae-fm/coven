@@ -133,7 +133,7 @@ pub(crate) struct FromItem {
     /// For the right side of a LEFT JOIN that no condition outside its ON
     /// narrows yet, what its ON says of the other sources, which narrows
     /// them once one does and so makes it an inner join's.
-    pub(crate) left_on: Option<crate::scope_plan::Narrowing>,
+    pub(crate) left_on: Option<crate::scope_narrowing::Narrowing>,
     /// Whether a LEFT JOIN adds it, whatever makes the join inner later: a
     /// left row no right row joins gives NULLs in its place with no row of
     /// it, which no lookup finds.
@@ -192,7 +192,7 @@ pub(crate) fn read_item<'a>(
     let item = |source, columns, derived| FromItem {
         source,
         columns,
-        left_on: left.then(crate::scope_plan::Narrowing::default),
+        left_on: left.then(crate::scope_narrowing::Narrowing::default),
         left,
         core,
         derived,
@@ -303,6 +303,7 @@ pub(crate) fn read_item<'a>(
                     qualifier,
                     term: None,
                     carried: None,
+                    unread: false,
                     either: Vec::new(),
                     memberships: Vec::new(),
                 },
@@ -333,6 +334,7 @@ pub(crate) fn read_item<'a>(
                     qualifier,
                     term: None,
                     carried: None,
+                    unread: false,
                     either: Vec::new(),
                     memberships: Vec::new(),
                 },

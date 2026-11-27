@@ -20,7 +20,10 @@ use crate::scope_plan::{is_name, read_select, Object, Planner, Source, Unread};
 use crate::scope_term::{Affinity, ScopeTerm};
 use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
-use sqlite3_parser::ast::{CommonTableExpr, Name, OneSelect, ResultColumn, Select, With};
+use sqlite3_parser::ast::{
+    CommonTableExpr, CompoundOperator, Distinctness, Expr, Name, OneSelect, ResultColumn, Select,
+    With,
+};
 
 /// The CTEs a FROM item can name where it is read, and those whose SQL is
 /// being read now, which naming again would recurse.
@@ -118,10 +121,19 @@ pub(crate) struct Derived {
     pub(crate) cores: Vec<usize>,
     /// For each arm a condition on its rows passes into.
     pub(crate) arms: Vec<Passed>,
+    /// The arms whose rows are the same without a column nothing reads
+    /// (`unread_columns.rs`).
+    prunable: Vec<usize>,
     /// The same for every arm, whose rows each row of the query is one of,
     /// a LIMIT or not; `None` when an arm groups or aggregates, whose rows
     /// pass on no row's own value.
     rows: Option<Vec<Passed>>,
+}
+
+impl Derived {
+    pub(crate) fn prunable_arms(&self) -> &[usize] {
+        &self.prunable
+    }
 }
 
 /// For each output column of an arm, the source of the arm's own and its
@@ -226,6 +238,7 @@ pub(crate) fn read_derived_item<'a>(
                 qualifier,
                 term: None,
                 carried: None,
+                unread: false,
                 either: Vec::new(),
                 memberships: Vec::new(),
             },
@@ -257,7 +270,7 @@ fn read_derived<'a>(
             // A `*` over a table function's columns: no column is known.
             return Ok(Ok((
                 Columns::Unknown { volatile: planner.select_volatile(select) },
-                Derived { cores, arms: Vec::new(), rows: None },
+                Derived { cores, arms: Vec::new(), prunable: Vec::new(), rows: None },
             )));
         };
         arms.push((core, columns, arm_rows(planner, select, core, body)));
@@ -334,7 +347,38 @@ fn read_derived<'a>(
             })
             .collect()
     };
-    Ok(Ok((Columns::Listed(columns), Derived { cores, arms, rows })))
+    Ok(Ok((
+        Columns::Listed(columns),
+        Derived { prunable: prunable_arms(select, &cores), cores, arms, rows },
+    )))
+}
+
+/// The cores among `cores`, `select`'s arms, whose rows don't depend on each
+/// of their columns: those of a SELECT with no ORDER BY and no compound but
+/// UNION ALL that is neither DISTINCT nor grouped.
+fn prunable_arms(select: &Select<'_>, cores: &[usize]) -> Vec<usize> {
+    let all_kept = select.order_by.is_none()
+        && select
+            .body
+            .compounds
+            .iter()
+            .flatten()
+            .all(|compound| compound.operator == CompoundOperator::UnionAll);
+    if !all_kept {
+        return Vec::new();
+    }
+    let bodies = std::iter::once(&select.body.select)
+        .chain(select.body.compounds.iter().flatten().map(|compound| &compound.select));
+    cores
+        .iter()
+        .copied()
+        .zip(bodies)
+        .filter(|(_, body)| {
+            matches!(body, OneSelect::Select { distinctness, group_by: None, .. }
+                if *distinctness != Some(Distinctness::Distinct))
+        })
+        .map(|(core, _)| core)
+        .collect()
 }
 
 /// How an arm makes its rows from its sources' rows.
@@ -390,9 +434,11 @@ fn arm_rows(planner: &Planner, select: &Select<'_>, core: usize, body: &OneSelec
 /// A column a core outputs: its name as SQLite gives it, when sqlive knows
 /// it, and the source of the core's own and the column of it the output
 /// passes on unchanged, if it does.
-struct Output {
+pub(crate) struct Output<'a> {
     name: Option<String>,
     value: OutputValue,
+    /// The expression that writes it; `None` for one a `*` or VALUES gives.
+    written: Option<&'a Expr<'a>>,
 }
 
 /// What an output column holds.
@@ -409,8 +455,12 @@ enum OutputValue {
     Other,
 }
 
-impl Output {
-    fn passed(&self) -> Option<(usize, String)> {
+impl<'a> Output<'a> {
+    pub(crate) fn written(&self) -> Option<&'a Expr<'a>> {
+        self.written
+    }
+
+    pub(crate) fn passed(&self) -> Option<(usize, String)> {
         match &self.value {
             OutputValue::Passed(item, column) => Some((*item, column.clone())),
             OutputValue::Constant | OutputValue::Volatile | OutputValue::Other => None,
@@ -420,7 +470,11 @@ impl Output {
 
 /// Each output column of the arm `core`, read from `body`, or `None` when a
 /// `*` spans columns sqlive doesn't know.
-fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<Vec<Output>> {
+pub(crate) fn arm_columns<'a>(
+    planner: &Planner,
+    core: usize,
+    body: &'a OneSelect<'a>,
+) -> Option<Vec<Output<'a>>> {
     let OneSelect::Select { columns, .. } = body else {
         let OneSelect::Values(rows) = body else { unreachable!("a core is a SELECT or VALUES") };
         // VALUES names its columns column1, column2, …
@@ -434,7 +488,7 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                 volatile |= volatile_expr(planner, core, expr);
             }
             let value = if volatile { OutputValue::Volatile } else { OutputValue::Other };
-            found.push(Output { name: Some(name), value });
+            found.push(Output { name: Some(name), value, written: None });
         }
         return Some(found);
     };
@@ -456,7 +510,7 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                     None if constant(expr) => OutputValue::Constant,
                     None => OutputValue::Other,
                 };
-                found.push(Output { name, value });
+                found.push(Output { name, value, written: Some(expr) });
             }
             ResultColumn::Star => {
                 let items = &planner.cores[core].items;
@@ -482,8 +536,9 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
 }
 
 /// The output of a `*` that gives `column` of the item at `position`.
-fn passed_through(position: usize, column: &Column) -> Output {
+fn passed_through(position: usize, column: &Column) -> Output<'static> {
     Output {
+        written: None,
         name: column.name.clone(),
         value: match &column.name {
             Some(name) => OutputValue::Passed(position, name.clone()),
@@ -681,7 +736,7 @@ fn receive(planner: &Planner, item: usize, column: &str, found: &mut Vec<usize>)
 }
 
 /// Whether `expr`, written in `core`, is volatile (`Planner::volatile`).
-fn volatile_expr(planner: &Planner, core: usize, expr: &sqlite3_parser::ast::Expr<'_>) -> bool {
+fn volatile_expr(planner: &Planner, core: usize, expr: &Expr<'_>) -> bool {
     let mut found = Vec::new();
     parts(expr, &mut found);
     planner.volatile(core, &found)

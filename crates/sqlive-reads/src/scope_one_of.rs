@@ -15,8 +15,9 @@
 //! rule as `OneOf.readCondition` in `crates/sqlive/proofs`.
 
 use crate::scope_edge::MemberColumn;
+use crate::scope_narrowing::Narrowing;
 use crate::scope_or::{Disjunction, Side};
-use crate::scope_plan::{Narrowing, PartnerValue, Planner, Subqueries};
+use crate::scope_plan::{PartnerValue, Planner, Subqueries};
 use crate::scope_term::{operand, ScopeTerm};
 use crate::sql::unparenthesized;
 use rusqlite::Connection;

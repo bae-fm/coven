@@ -183,15 +183,17 @@ def Statement.groupedTables (s : Statement) : List Nat :=
 /-- Each table the statement reads, with the columns of it any of its
 clauses names, and every column of a table that a query whose rows SQLite
 picks, or a compound or core whose rows follow the order SQLite reads its
-rows in, reads, and of a table of a parenthesized join: what its rows can
-depend on, and what SQLite reports it reads. -/
+rows in, reads, and of a table of a parenthesized join, and those
+`Statement.reported` names: what its rows can depend on, and what SQLite
+reports it reads. -/
 def Statement.reads (s : Statement) : List (Nat × List Nat) :=
   let refs := s.cores.flatMap Core.refs
   (s.itemNumbers.filterMap s.table?).eraseDups.map fun t =>
     let named := refs.filterMap fun (i, c) => if s.table? i = some t then some c else none
     let picked := if s.pickedTables.contains t || s.groupedTables.contains t then
       List.range (s.width t) else []
-    (t, (named ++ picked).eraseDups)
+    let reported := s.reported.filterMap fun (u, c) => if u = t then some c else none
+    (t, (named ++ picked ++ reported).eraseDups)
 
 /-- Each element of `l` paired with its value under `f`: the pair of `t`
 is the first whose element is `t`. -/
@@ -217,8 +219,9 @@ theorem Statement.find?_reads (s : Statement) {t : Nat}
     s.reads.find? (·.1 == t) = some (t,
       ((s.cores.flatMap Core.refs).filterMap (fun (i, c) =>
           if s.table? i = some t then some c else none) ++
-        if s.pickedTables.contains t || s.groupedTables.contains t then List.range (s.width t)
-        else []).eraseDups) := by
+        (if s.pickedTables.contains t || s.groupedTables.contains t then List.range (s.width t)
+        else []) ++
+        s.reported.filterMap fun (u, c) => if u = t then some c else none).eraseDups) := by
   unfold Statement.reads
   exact find?_pairs (List.mem_eraseDups.mpr h)
 

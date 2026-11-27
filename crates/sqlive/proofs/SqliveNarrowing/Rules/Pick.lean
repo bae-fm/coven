@@ -702,8 +702,8 @@ theorem picked_column_reruns {s : Statement} {scopeOf : Nat → Option RScope}
   rw [hold, hnew]
   simp only [changedIn, List.any_eq_true, bne_iff_ne, ne_eq]
   refine ⟨c, ?_, hchanged⟩
-  rw [List.mem_eraseDups, List.mem_append]
-  right
+  rw [List.mem_eraseDups, List.mem_append, List.mem_append]
+  refine Or.inl (Or.inr ?_)
   simp [hpicked, hc]
 
 end SqliveNarrowing.Pick

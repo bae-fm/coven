@@ -72,7 +72,8 @@ impl ReadReport {
         let scopes = source_scopes(sources, RunValues::Any, last.as_deref());
         // Why each table is read whole, when it is, and each view is.
         let mut whole: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-        for (source, scope) in sources.sources.iter().zip(&scopes) {
+        let read = sources.sources.iter().zip(&scopes).filter(|(source, _)| !source.unread);
+        for (source, scope) in read {
             let (object, why) = match &source.object {
                 Object::Table { name, within } => {
                     (name, why_whole(sources, source, within.as_ref(), scope))

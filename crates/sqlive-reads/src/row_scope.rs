@@ -239,6 +239,11 @@ pub struct Scopes {
     /// The shadow tables of the contentful FTS5 tables the statement reads,
     /// whose reads count for nothing (`Sources::fts5_shadows`).
     pub(crate) fts5_shadows: BTreeSet<String>,
+    /// The tables only a column nothing reads of a subquery, CTE or view
+    /// reads, whose reads count for nothing where SQLite reports each through
+    /// the statement itself or a view or CTE of `inlined`
+    /// (`unread_columns.rs`).
+    pub(crate) unread: BTreeSet<String>,
     /// Columns the statement reads that SQLite's authorizer doesn't report:
     /// those its USING and NATURAL joins compare and every column of a table
     /// that a query whose rows SQLite picks reads, or every column when the
@@ -255,6 +260,7 @@ impl Default for Scopes {
             tables: BTreeMap::new(),
             inlined: BTreeSet::new(),
             fts5_shadows: BTreeSet::new(),
+            unread: BTreeSet::new(),
             unreported: std::sync::Arc::new(crate::unreported_columns::UnreportedColumns::Known(
                 crate::read_set::ColumnSet::new(),
             )),

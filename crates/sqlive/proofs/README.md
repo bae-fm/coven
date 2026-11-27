@@ -243,6 +243,21 @@ JOIN adds, so where such a part holds, its item has a row.
   So a term true of the row is true of the item's row in every binding the
   row is made from, and a row of the item that fails the term is in a group
   whose row fails it. An arm that calls a window function passes on nothing.
+- **A column nothing reads.** sqlive plans a statement without the columns
+  of a subquery, CTE or view that nothing reads (`unread_columns.rs`). The
+  model's `Statement.pruned` writes NULL for each, once for each column the
+  statement has, since leaving one out can leave another unnamed, and then
+  empties the cores the statement no longer reads. A column goes only where
+  the rows of its SELECT are the same without it: one written as an
+  expression, which calls no aggregate and no window function, in a core that
+  is neither DISTINCT nor grouped, of a query with no ORDER BY and no
+  compound but UNION ALL that is neither the statement's own nor a subquery.
+  `result_pruned` proves that the pruned statement returns the statement's
+  rows from every database, and `pruned_narrowing_sound` that a write its
+  judge lets pass leaves them unchanged. SQLite reports every column the
+  statement names, so the pruned statement reads, of each table it still
+  reads, what the statement does (`Statement.reported`). The runner judges
+  each case with the pruned statement.
 - **A condition carried across an equality.** `transfer_sound` proves that
   when `a.x = b.y` holds of a binding, a term true of `b`'s row on `y` is
   true of `a`'s row on `x`. The planner adds such a term to `a`'s scope,
@@ -855,7 +870,9 @@ that names its sources by alias, the database before and after the write, the
 write's row changes, and whether one of sqlive's questions about the write
 stopped at the step limit. The runner reads each change's slot from the rowid
 in the first column of its row, and judges the write's net change of each
-row. The runner reads a CTE where a query names it, so a
+row. The runner judges the statement the model plans, without the columns
+nothing reads (`Statement.pruned`), and checks that it and the statement as
+read are both well formed. The runner reads a CTE where a query names it, so a
 CTE that no query reads, which SQLite never runs, adds nothing to the model's
 statement, and it reads the CTE that SQLite resolves the name to. The runner writes whether the write reruns the statement,
 whether the statement is well formed, whether the model reads the statement whole, each table's scope, and the
