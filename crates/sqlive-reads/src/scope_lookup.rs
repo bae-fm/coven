@@ -49,6 +49,71 @@ impl From<rusqlite::Error> for NoAnswer {
 /// indexes.
 pub const LOOKUP_STEPS: i32 = 1_000;
 
+/// One question about a changed row as sqlive writes it: the values its
+/// parameters bind, in order, and each partner the question reads that is a
+/// subquery, written once at the head of the question as a materialized CTE
+/// however many of its conditions read it (SPEC.md section 7).
+#[derive(Clone, Debug)]
+pub(crate) struct QuestionSql {
+    values: Vec<Value>,
+    partners: Vec<String>,
+}
+
+impl QuestionSql {
+    /// A question whose first parameters bind `values`, the run's.
+    pub(crate) fn binding(values: &[Value]) -> Self {
+        Self { values: values.to_vec(), partners: Vec::new() }
+    }
+
+    /// The SQL of the parameter the next `bind` binds.
+    pub(crate) fn next(&self) -> String {
+        format!("?{}", self.values.len() + 1)
+    }
+
+    /// Bind `value` to the next parameter, and return that parameter's SQL.
+    pub(crate) fn bind(&mut self, value: Value) -> String {
+        self.values.push(value);
+        format!("?{}", self.values.len())
+    }
+
+    /// The FROM item `from`, which `qualifier` names, as the question reads
+    /// it: a subquery as the CTE that holds its rows.
+    fn from(&mut self, from: &str, qualifier: &str) -> String {
+        let Some(subquery) =
+            from.strip_suffix(&format!(" AS {qualifier}")).filter(|sql| sql.starts_with('('))
+        else {
+            return from.to_owned();
+        };
+        let index =
+            self.partners.iter().position(|partner| partner == subquery).unwrap_or_else(|| {
+                self.partners.push(subquery.to_owned());
+                self.partners.len() - 1
+            });
+        format!("sqlive_partner{index} AS {qualifier}")
+    }
+
+    /// `select`, with the partners it reads declared ahead of it.
+    pub(crate) fn sql(&self, select: &str) -> String {
+        if self.partners.is_empty() {
+            return select.to_owned();
+        }
+        let partners: Vec<String> = self
+            .partners
+            .iter()
+            .enumerate()
+            .map(|(index, subquery)| {
+                format!("sqlive_partner{index} AS MATERIALIZED (SELECT * FROM {subquery})")
+            })
+            .collect();
+        format!("WITH {} {select}", partners.join(", "))
+    }
+
+    /// The values the question's parameters bind.
+    pub(crate) fn values(&self) -> &[Value] {
+        &self.values
+    }
+}
+
 /// What each reference to a table among `sources` depends on, for a run
 /// bound to
 /// `parameters` that returned `last`, the ORDER BY's values of its last row,
@@ -321,15 +386,16 @@ fn render(
     scope: &RowScope,
     parameters: &[Value],
 ) -> LookupSql {
-    let mut parameters = parameters.to_vec();
-    let condition = condition(scope, qualifier, &mut parameters);
-    let value = format!("?{}", parameters.len() + 1);
+    let mut question = QuestionSql::binding(parameters);
+    let condition = condition(scope, qualifier, &mut question);
+    let from = question.from(from, qualifier);
+    let value = question.next();
     let operator = if nulls { "IS" } else { "=" };
     let found = |compared: &str| {
-        format!(
+        question.sql(&format!(
             "SELECT 1 FROM {from} WHERE {} {operator} {compared} COLLATE BINARY AND {condition} LIMIT 1",
             partner_value(qualifier, partner)
-        )
+        ))
     };
     // An expression has no affinity, so SQLite applies the joined
     // column's to its values. A value of that affinity's own type, cast
@@ -340,7 +406,7 @@ fn render(
         PartnerValue::Expression(_) => cast_to_affinity(&value, affinity).map(|cast| found(&cast)),
         PartnerValue::Column(_) => None,
     };
-    LookupSql { plain: found(&value), typed, parameters }
+    LookupSql { plain: found(&value), typed, parameters: question.values().to_vec() }
 }
 
 /// `value`, SQL, cast to `affinity`'s type, which carries the affinity into a
@@ -373,15 +439,12 @@ fn partner_value(qualifier: &str, value: &PartnerValue) -> String {
 }
 
 /// `scope` as an SQL condition on the rows `qualifier` names, its values
-/// appended to `bound` as parameters. A join inside it lists its partner's
+/// bound to the question's next parameters. A join inside it lists its partner's
 /// values in a subquery that names only the partner's rows, so no name in
 /// it can mean a row around it; a join on `IS` also passes a NULL when some
 /// partner row in its scope gives NULL.
-fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> String {
-    let parameter = |value: &Value, bound: &mut Vec<Value>| {
-        bound.push(value.clone());
-        format!("?{}", bound.len())
-    };
+fn condition(scope: &RowScope, qualifier: &str, bound: &mut QuestionSql) -> String {
+    let parameter = |value: &Value, bound: &mut QuestionSql| bound.bind(value.clone());
     match scope {
         RowScope::All => "1".into(),
         RowScope::Compare { column, value, ordering, inclusive } => {
@@ -433,22 +496,20 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
 }
 
 /// Whether `compared`, SQL over a changed row, equals a value some row of
-/// `lookup`'s partner in its scope gives, as SQL whose values go to
-/// `bound`. A join inside it lists its partner's values in a subquery that
+/// `lookup`'s partner in its scope gives, as SQL of the question `bound`. A join inside it lists its partner's values in a subquery that
 /// names only the partner's rows, so no name in it can mean a row around
 /// it; a join on `IS` also passes a NULL when some partner row in its scope
 /// gives NULL.
-pub(crate) fn joined(compared: &str, lookup: &Lookup, bound: &mut Vec<Value>) -> String {
+pub(crate) fn joined(compared: &str, lookup: &Lookup, bound: &mut QuestionSql) -> String {
     let value = partner_value(&lookup.qualifier, &lookup.value);
+    let from = bound.from(&lookup.from, &lookup.qualifier);
     let listed = format!(
-        "{compared} IN (SELECT {value} FROM {} WHERE {})",
-        lookup.from,
+        "{compared} IN (SELECT {value} FROM {from} WHERE {})",
         condition(&lookup.scope, &lookup.qualifier, bound)
     );
     if lookup.nulls {
         format!(
-            "({listed} OR {compared} IS NULL AND EXISTS (SELECT 1 FROM {} WHERE {value} IS NULL AND {}))",
-            lookup.from,
+            "({listed} OR {compared} IS NULL AND EXISTS (SELECT 1 FROM {from} WHERE {value} IS NULL AND {}))",
             condition(&lookup.scope, &lookup.qualifier, bound)
         )
     } else {
@@ -479,11 +540,12 @@ pub struct GroupLookup {
     items: Vec<GroupItem>,
     /// The partner's rows in this run.
     scope: RowScope,
-    /// The question's SQL up to the changed row's values: the partner's scope
-    /// as a condition, and the run's parameters it binds, which the values
-    /// follow.
+    /// The question up to the changed row's values: the partner as the
+    /// question reads it, its scope as a condition, and the parameters they
+    /// bind, which the values follow.
+    partner: String,
     condition: String,
-    parameters: Vec<Value>,
+    question: QuestionSql,
 }
 
 /// What a write asks of SQLite about a changed row of a joined group.
@@ -504,9 +566,10 @@ impl GroupLookup {
         scope: RowScope,
         parameters: &[Value],
     ) -> Self {
-        let mut parameters = parameters.to_vec();
-        let condition = condition(&scope, &qualifier, &mut parameters);
-        Self { from, qualifier, items, scope, condition, parameters }
+        let mut question = QuestionSql::binding(parameters);
+        let condition = condition(&scope, &qualifier, &mut question);
+        let partner = question.from(&from, &qualifier);
+        Self { from, qualifier, items, scope, partner, condition, question }
     }
 
     /// The columns of the joined source the group compares, lowercase.
@@ -527,11 +590,10 @@ impl GroupLookup {
         if values.iter().any(Option::is_none) {
             return GroupQuestion::Answered(true);
         }
-        let mut parameters = self.parameters.clone();
+        let mut question = self.question.clone();
         let mut compared = Vec::with_capacity(self.items.len());
         for (item, value) in self.items.iter().zip(values.into_iter().flatten()) {
-            parameters.push(value.clone());
-            let placeholder = format!("?{}", parameters.len());
+            let placeholder = question.bind(value.clone());
             let value = match &item.value {
                 PartnerValue::Expression(_) if carries_affinity(item.affinity, value) => {
                     cast_to_affinity(&placeholder, item.affinity).unwrap_or(placeholder)
@@ -543,22 +605,20 @@ impl GroupLookup {
                 partner_value(&self.qualifier, &item.value)
             ));
         }
-        GroupQuestion::Ask(
-            format!(
-                "SELECT 1 FROM {} WHERE {} AND {} LIMIT 1",
-                self.from,
-                compared.join(" AND "),
-                self.condition
-            ),
-            parameters,
-        )
+        let sql = question.sql(&format!(
+            "SELECT 1 FROM {} WHERE {} AND {} LIMIT 1",
+            self.partner,
+            compared.join(" AND "),
+            self.condition
+        ));
+        GroupQuestion::Ask(sql, question.values().to_vec())
     }
 
     /// Whether the columns of the row `qualifier` names equal the values of
-    /// one row of the partner in its scope, as SQL whose values go to
-    /// `bound`: a row value compared with a subquery that names only the
+    /// one row of the partner in its scope, as SQL of the question `bound`: a
+    /// row value compared with a subquery that names only the
     /// partner's rows, so no name in it can mean a row around it.
-    fn listed(&self, qualifier: &str, bound: &mut Vec<Value>) -> String {
+    fn listed(&self, qualifier: &str, bound: &mut QuestionSql) -> String {
         let members: Vec<String> = self
             .items
             .iter()
@@ -566,11 +626,11 @@ impl GroupLookup {
             .collect();
         let values: Vec<String> =
             self.items.iter().map(|item| partner_value(&self.qualifier, &item.value)).collect();
+        let from = bound.from(&self.from, &self.qualifier);
         format!(
-            "({}) IN (SELECT {} FROM {} WHERE {})",
+            "({}) IN (SELECT {} FROM {from} WHERE {})",
             members.join(", "),
             values.join(", "),
-            self.from,
             condition(&self.scope, &self.qualifier, bound)
         )
     }

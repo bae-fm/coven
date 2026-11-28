@@ -37,7 +37,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::row_scope::RowImage;
-use crate::scope_lookup::Lookup;
+use crate::scope_lookup::{Lookup, QuestionSql};
 use crate::scope_plan::Planner;
 use crate::scope_term::Affinity;
 use crate::select_syntax::{Functions, Part};
@@ -227,23 +227,23 @@ pub(crate) enum RowTest {
 
 impl RowCondition {
     /// The condition as SQL over the row the term's qualifier names, with
-    /// the value it compares with appended to `bound` as a parameter.
+    /// the value it compares with bound to the question's next parameter.
     /// `None` when no cast gives that value the term's affinity and keeps it
     /// as it is.
-    pub(crate) fn sql(&self, bound: &mut Vec<Value>) -> Option<String> {
+    pub(crate) fn sql(&self, bound: &mut QuestionSql) -> Option<String> {
         self.testing(&self.term.over_rows(), bound)
     }
 
     /// What the condition tests of `sql`, its term's expression.
-    fn testing(&self, sql: &str, bound: &mut Vec<Value>) -> Option<String> {
+    fn testing(&self, sql: &str, bound: &mut QuestionSql) -> Option<String> {
         Some(match &self.test {
             RowTest::Holds => format!("({sql})"),
             RowTest::Null { not } => {
                 format!("({sql}) IS {}NULL", if *not { "NOT " } else { "" })
             }
             RowTest::Compare { ordering, value, affinity, collation } => {
-                let typed = typed(&format!("?{}", bound.len() + 1), *affinity, value)?;
-                bound.push(value.clone());
+                let typed = typed(&bound.next(), *affinity, value)?;
+                bound.bind(value.clone());
                 let operator = match ordering {
                     Ordering::Less => "<",
                     Ordering::Equal => "=",
@@ -270,21 +270,21 @@ impl RowCondition {
     /// as it is in its column's type.
     pub(crate) fn question(&self, image: &RowImage) -> Option<(String, Vec<Value>)> {
         let term = &self.term;
-        let mut bound = self.parameters.clone();
+        let mut bound = QuestionSql::binding(&self.parameters);
         let condition = self.testing(&term.sql, &mut bound)?;
         let mut row = Vec::with_capacity(term.columns.len());
         for read in &term.columns {
             let value = image.get(&read.column)?;
-            let typed = typed(&format!("?{}", bound.len() + 1), read.affinity, value)?;
+            let typed = typed(&bound.next(), read.affinity, value)?;
             row.push(format!("{typed} AS {}", crate::sql::identifier(&read.name)));
-            bound.push(value.clone());
+            bound.bind(value.clone());
         }
-        let sql = format!(
+        let sql = bound.sql(&format!(
             "SELECT 1 FROM (SELECT {}) AS {} WHERE {condition} LIMIT 1",
             row.join(","),
             term.qualifier,
-        );
-        Some((sql, bound))
+        ));
+        Some((sql, bound.values().to_vec()))
     }
 }
 

@@ -1367,6 +1367,18 @@ list's. A lookup that held a copy of the condition for each would read the
 partner's scope once for each, and a few nested CTEs can make a dozen copies,
 which would take the lookup past its steps on rows another condition rules out.
 
+A lookup also reads each partner that is a subquery once. Its conditions can
+name one subquery many times: a comparison by `IS` names its partner twice, once
+for its values and once for a NULL among them, and each level of a chain of
+lookups names the levels below it again. A relation that sqlive-compose hands a
+fragment is such a subquery, and when the relation is itself a fragment that
+takes its keys through a relation, the subquery holds a `WITH` of its own.
+sqlive writes each such partner once, as a `MATERIALIZED` CTE at the
+head of the lookup, and every condition that names it reads that CTE. A
+lookup that wrote the subquery out at each name would read it once for each,
+and a chain that names one partner twenty times would take the lookup past its
+steps.
+
 A lookup's cost depends on the app's indexes. One no index serves reads its
 partner row by row, so it could cost a write as much as reading the whole table.
 A lookup stops after 1,000 of SQLite's steps instead, and the query runs again
