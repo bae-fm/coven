@@ -1569,7 +1569,9 @@ as any equality there does.
 
 Such a query whose SELECT reads no table and returns columns of the row around
 it unchanged, as a relation of keys `(SELECT k.key AS key)` inside a subquery
-of each key's row, holds that row's values in its one row. A table joined to it
+of each key's row, holds that row's values in its one row. A column with no
+alias, `(SELECT k.key)`, takes the name of the column it returns, as SQLite
+names it. A table joined to it
 by an equality with such a column takes its values from the row around it, as
 if joined to that row, and waits for that row's table (section 7). The table
 narrows so also when the query that joins the relation groups its rows or

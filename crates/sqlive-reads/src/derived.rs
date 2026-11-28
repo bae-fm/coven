@@ -570,14 +570,14 @@ pub(crate) fn arm_columns<'a>(
     for column in columns.iter() {
         match column {
             ResultColumn::Expr(expr, alias) => {
-                let passed = is_name(expr)
-                    .then(|| planner.resolve(core, expr))
-                    .flatten()
-                    .filter(|(item, _)| planner.items[*item].core == core);
+                let named = is_name(expr).then(|| planner.resolve(core, expr)).flatten();
+                // SQLite names a bare column for the column it names, whether
+                // its item is the core's own or one of the row around it.
                 let name = match alias {
                     Some(alias) => Some(crate::sql::alias_name(alias)),
-                    None => passed.as_ref().map(|(_, column)| column.clone()),
+                    None => named.as_ref().map(|(_, column)| column.clone()),
                 };
+                let passed = named.filter(|(item, _)| planner.items[*item].core == core);
                 let value = match passed {
                     Some((item, column)) => OutputValue::Passed(item, column),
                     None if volatile_expr(planner, core, expr) => OutputValue::Volatile,

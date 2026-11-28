@@ -63,13 +63,19 @@ async fn a_relation_naming_a_key_s_row_narrows_the_tables_a_grouping_fragment_jo
 
 /// The names of the artists each folder of the keys credits, as a fragment of
 /// keys reads them through a standing fragment that takes a relation of keys
-/// of its own: the subquery hands it the key of its row, and the standing
-/// fragment reads the key's credits and joins each to its artist.
-const NESTED_STANDINGS: &str = "SELECT field.* FROM (\
+/// of its own: the subquery hands it the key of its row as the CTE
+/// `m__Standing__keys` that `$keys` declares, and the standing fragment reads
+/// the key's credits and joins each to its artist.
+macro_rules! nested_standings {
+    ($keys:literal) => {
+        concat!(
+            "SELECT field.* FROM (\
      WITH m__Field__keys (candidate_key) AS (SELECT ?1 AS candidate_key) \
      SELECT keys.candidate_key AS field_key, (\
          SELECT standing.names FROM (\
-             WITH m__Standing__keys (candidate_key) AS (SELECT keys.candidate_key AS candidate_key), \
+             WITH ",
+            $keys,
+            ", \
              m__Standing__raw (artist_id) AS (\
                  SELECT credit.artist_id \
                  FROM m__Standing__keys AS keys \
@@ -80,27 +86,39 @@ const NESTED_STANDINGS: &str = "SELECT field.* FROM (\
              FROM m__Standing__raw AS assignment \
              JOIN artists AS picked ON picked.id = assignment.artist_id) AS standing\
      ) AS field \
-     FROM m__Field__keys AS keys) AS field";
+     FROM m__Field__keys AS keys) AS field"
+        )
+    };
+}
 
 /// A credit or an artist of another folder wakes nothing, and one of this
-/// folder does, through a relation that hands on the key of the row around it.
+/// folder does, through a relation that hands on the key of the row around
+/// it: one whose CTE names its column, and one that leaves the column
+/// unnamed, which SQLite names for the column it returns.
 #[tokio::test]
 async fn a_relation_of_the_key_of_the_row_around_it_narrows_as_the_key_does() {
-    let db = TestDatabase::open(CREDITED);
-    follows(
-        &db,
-        NESTED_STANDINGS,
-        vec![Text("/a".into())],
-        &[
-            ("INSERT INTO scan VALUES ('/c', 'hc')", false),
-            ("INSERT INTO credit VALUES ('hb', 1, 'z')", false),
-            ("UPDATE artists SET name = 'other' WHERE id = 'y'", false),
-            ("UPDATE artists SET name = 'ONE' WHERE id = 'x'", true),
-            ("INSERT INTO credit VALUES ('ha', 1, 'y')", true),
-        ],
-    )
-    .await;
-    db.close();
+    for statement in [
+        nested_standings!(
+            "m__Standing__keys (candidate_key) AS (SELECT keys.candidate_key AS candidate_key)"
+        ),
+        nested_standings!("m__Standing__keys AS (SELECT keys.candidate_key)"),
+    ] {
+        let db = TestDatabase::open(CREDITED);
+        follows(
+            &db,
+            statement,
+            vec![Text("/a".into())],
+            &[
+                ("INSERT INTO scan VALUES ('/c', 'hc')", false),
+                ("INSERT INTO credit VALUES ('hb', 1, 'z')", false),
+                ("UPDATE artists SET name = 'other' WHERE id = 'y'", false),
+                ("UPDATE artists SET name = 'ONE' WHERE id = 'x'", true),
+                ("INSERT INTO credit VALUES ('ha', 1, 'y')", true),
+            ],
+        )
+        .await;
+        db.close();
+    }
 }
 
 /// The answers stored for the names each folder of the keys credits, as a

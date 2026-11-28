@@ -181,7 +181,7 @@ partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
   let mut output := []
   let mut names := []
   for column in list j "select" do
-    let (o, name) ← readOut schema column k ctes items
+    let (o, name) ← readOut schema column k ctes
     output := output ++ [o]
     names := names ++ [name]
   let mut conds := []
@@ -358,16 +358,15 @@ partial def derivedColumns (q : Nat) :
     | _ => none
   pure (names, affinities, collations)
 
-partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : CteNames.Visible Json)
-    (items : List Nat) : M (OutCol × Option String) := do
+partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : CteNames.Visible Json) :
+    M (OutCol × Option String) := do
   let alias := (field j "as").bind (·.getStr?.toOption)
   if let some e := field j "expr" then
     let e ← readExpr schema e k ctes
+    -- SQLite names a bare column for the column it names, whether its item
+    -- is the core's own or one of the row around it.
     let passed : Option String ← match e with
-      | .col i c =>
-        if items.contains i then
-          pure (((← get).named.getD i default).columns[c]?).join
-        else pure none
+      | .col i c => pure (((← get).named.getD i default).columns[c]?).join
       | _ => pure none
     pure (.expr e, alias.orElse fun _ => passed)
   else if let some e := field j "max" then

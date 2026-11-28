@@ -32,16 +32,13 @@ fn inner(rng: &mut Rng, outer: &str) -> Query {
 }
 
 /// A relation of the row of the item `outer` around the subquery that reads
-/// it: one SELECT of no FROM item that returns that row's columns, each
-/// named for its column.
+/// it: one SELECT of no FROM item that returns that row's columns, which
+/// SQLite names for the columns they return.
 fn around(outer: &str) -> Query {
     select(Core {
         from: Vec::new(),
         conditions: Vec::new(),
-        select: DERIVED
-            .iter()
-            .map(|column| Out::Expr(col(outer, column), Some((*column).to_owned())))
-            .collect(),
+        select: DERIVED.iter().map(|column| out(col(outer, column))).collect(),
         group: Vec::new(),
         distinct: false,
     })
