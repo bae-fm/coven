@@ -63,12 +63,7 @@ impl SqlReadContext<'_, Writer> {
     /// What `reads` returns, read once in this snapshot: the reads a live
     /// query runs, run as a one-shot read, which records nothing.
     pub fn reads<S: crate::LiveReads>(&self, reads: &S) -> Result<S::Rows, DbError> {
-        reads.read(&mut |statements, each| {
-            for (index, statement) in statements.iter().enumerate() {
-                self.database.once_rows(statement, |row| each(index, row))?;
-            }
-            Ok(())
-        })
+        crate::live_reads::once(reads, self.database)
     }
 }
 

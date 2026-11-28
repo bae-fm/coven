@@ -135,22 +135,18 @@ impl<T: 'static, U: 'static> CovenRead<T, U> {
     }
 }
 
-/// The result of one `read` on `db`, inside its transaction.
-pub(crate) fn once<T, U>(
-    read: &CovenRead<T, U>,
+/// What `reads` returns, read once on `db` inside its transaction, as a live
+/// query reads it on each run.
+pub(crate) fn once<S: LiveReads>(
+    reads: &S,
     db: &crate::sqlite::StoreSql,
-) -> Result<U, DbError> {
-    let rows = match (read.values)()? {
-        Values::Positional(values) => {
-            db.query(&read.sql, sqlive::rusqlite::params_from_iter(&values), &*read.row)?
+) -> Result<S::Rows, DbError> {
+    reads.read(&mut |statements, each| {
+        for (index, statement) in statements.iter().enumerate() {
+            db.once_rows(statement, |row| each(index, row))?;
         }
-        Values::Named(values) => {
-            let named: Vec<(&str, &dyn sqlive::rusqlite::ToSql)> =
-                values.iter().map(|(name, value)| (*name, value as _)).collect();
-            db.query(&read.sql, named.as_slice(), &*read.row)?
-        }
-    };
-    (read.finish)(rows)
+        Ok(())
+    })
 }
 
 impl<T: Send + 'static, U: Send + 'static> LiveReads for CovenRead<T, U> {
