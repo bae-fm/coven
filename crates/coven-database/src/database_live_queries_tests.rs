@@ -929,7 +929,8 @@ async fn counts_runs_writes_and_equal_results() {
 }
 
 /// A request with nothing to read reads nothing: the query returns `None`
-/// and no write runs it again, until a request names something to read.
+/// and no write runs it again, until a request names something to read,
+/// whose rows the query returns with it.
 #[tokio::test]
 async fn a_request_with_nothing_to_read_reads_nothing() {
     let store = TestStore::new();
@@ -937,17 +938,17 @@ async fn a_request_with_nothing_to_read_reads_nothing() {
     db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
         db.subscribe_reconfigurable(None, |title: &Option<String>| {
-            Ok(crate::Maybe(title.as_ref().map(|title| {
+            Ok(crate::Maybe::new(title.clone(), |title| {
                 LiveSql::new("SELECT id FROM notes WHERE title=?1", &[title], |r| {
                     r.get::<_, String>(0)
                 })
-            })))
+            }))
         });
     assert_eq!(query.next_inline().await.unwrap().result.unwrap(), None);
     db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
     assert!(!query.is_marked_for_rerun());
     query.requests().set(Some("Plan".into())).unwrap();
     let named = query.next_inline().await.unwrap().result.unwrap();
-    assert_eq!(named, Some(vec!["a".to_owned(), "b".to_owned()]));
+    assert_eq!(named, Some(("Plan".to_owned(), vec!["a".to_owned(), "b".to_owned()])));
     db.close().await.unwrap();
 }

@@ -3793,7 +3793,8 @@ let moved = handle
 - A live query runs compiled reads alone (`read!`, [§4.2](coven.md#42-compiled-statements)):
   one, two on one snapshot (`Both`), or a read of coven's own tables that
   coven gives, such as `SyncStatus::live()`, and a request with nothing to
-  read reads none (`Maybe`). A list whose sort picks one of several
+  read reads none (`Maybe`), while a request with something to read returns
+  its rows together with the request. A list whose sort picks one of several
   statements reads each one's rows as one type (`ReadAs`). A one-shot read
   runs the same reads with `SqlReadContext::reads`. Each statement takes its values
   from its own parameters, and no Rust runs between two statements, so a
@@ -4207,8 +4208,8 @@ where
 /// writer (`read!`), whose rows it returns; two on one snapshot (`Both`),
 /// which return each one's rows; a read of coven's own tables that coven
 /// gives (`CovenRead`), such as `SyncStatus::live()`; one whose rows read
-/// as another type (`ReadAs`); or one of these only when there is one
-/// (`Maybe`).
+/// as another type (`ReadAs`); or one of these only when there is a
+/// request (`Maybe`), which returns the request with its rows.
 pub trait LiveReads: Send + Sync + 'static {
     type Rows: Send + 'static;
 }
@@ -4242,12 +4243,24 @@ impl<R> ReadAs<R> {
 impl<R> LiveReads for ReadAs<R> {
     type Rows = Vec<R>;
 }
-/// A read that runs only when there is one: a request with nothing to read,
-/// such as a detail pane with nothing selected, reads nothing and returns
-/// `None`, and the query runs again only for a new request.
-pub struct Maybe<S>(pub Option<S>);
-impl<S: LiveReads> LiveReads for Maybe<S> {
-    type Rows = Option<S::Rows>;
+/// A read that runs only when there is a request: a request with nothing to
+/// read, such as a detail pane with nothing selected, reads nothing and
+/// returns `None`, and the query runs again only for a new request. A
+/// request returns its rows together with the request, so the caller has
+/// neither without the other.
+pub struct Maybe<Q, S> { /* private fields */ }
+impl<Q, S> Maybe<Q, S> {
+    /// The read `read` makes of `request`, or none when there is no request.
+    pub fn new(request: Option<Q>, read: impl FnOnce(&Q) -> S) -> Self;
+    /// The read `read` makes of `request`, or none when there is no request,
+    /// or the error that `read` fails with.
+    pub fn try_new<E>(
+        request: Option<Q>,
+        read: impl FnOnce(&Q) -> Result<S, E>,
+    ) -> Result<Self, E>;
+}
+impl<Q: Clone + Send + Sync + 'static, S: LiveReads> LiveReads for Maybe<Q, S> {
+    type Rows = Option<(Q, S::Rows)>;
 }
 
 /// An open file with checked identity, header and range-reading state (§17.7).

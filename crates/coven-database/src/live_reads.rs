@@ -10,7 +10,8 @@ use sqlive_compose::Read;
 /// build compiled (`read!`), which returns its rows, two that read one
 /// snapshot (`Both`), which return each one's rows, one whose rows read as
 /// another type (`ReadAs`), a read of coven's own tables (`CovenRead`), or
-/// one of these only when there is one (`Maybe`).
+/// one of these only when there is a request, which returns the request with
+/// its rows (`Maybe`).
 /// coven implements it for those alone, and for its own tests' SQL
 /// (`LiveSql`).
 pub trait LiveReads: sealed::Sealed + Send + Sync + 'static {
@@ -204,17 +205,41 @@ impl<R: Send + 'static> LiveReads for ReadAs<R> {
     }
 }
 
-/// A read that runs only when there is one: a request with nothing to read,
-/// such as a detail pane with nothing selected, reads nothing and returns
-/// `None`, and the query runs again only for a new request.
+/// A read that runs only when there is a request: a request with nothing to
+/// read, such as a detail pane with nothing selected, reads nothing and
+/// returns `None`, and the query runs again only for a new request. A
+/// request returns its rows together with the request, so the caller has
+/// neither without the other.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Maybe<S>(pub Option<S>);
+pub struct Maybe<Q, S>(Option<(Q, S)>);
 
-impl<S: LiveReads> LiveReads for Maybe<S> {
-    type Rows = Option<S::Rows>;
+impl<Q, S> Maybe<Q, S> {
+    /// The read `read` makes of `request`, or none when there is no request.
+    pub fn new(request: Option<Q>, read: impl FnOnce(&Q) -> S) -> Self {
+        Self(request.map(|request| {
+            let reads = read(&request);
+            (request, reads)
+        }))
+    }
+
+    /// The read `read` makes of `request`, or none when there is no request,
+    /// or the error that `read` fails with.
+    pub fn try_new<E>(
+        request: Option<Q>,
+        read: impl FnOnce(&Q) -> Result<S, E>,
+    ) -> Result<Self, E> {
+        let Some(request) = request else { return Ok(Self(None)) };
+        let reads = read(&request)?;
+        Ok(Self(Some((request, reads))))
+    }
+}
+
+impl<Q: Clone + Send + Sync + 'static, S: LiveReads> LiveReads for Maybe<Q, S> {
+    type Rows = Option<(Q, S::Rows)>;
 
     fn read(&self, run: Run<'_>) -> Result<Self::Rows, DbError> {
-        self.0.as_ref().map(|reads| reads.read(run)).transpose()
+        let Some((request, reads)) = &self.0 else { return Ok(None) };
+        Ok(Some((request.clone(), reads.read(run)?)))
     }
 }
 
@@ -312,7 +337,7 @@ mod sealed {
 
     impl<Q: sqlive_compose::Read> Sealed for Q {}
     impl<A, B> Sealed for super::Both<A, B> {}
-    impl<S> Sealed for super::Maybe<S> {}
+    impl<Q, S> Sealed for super::Maybe<Q, S> {}
     impl<R> Sealed for super::ReadAs<R> {}
     impl<T, U> Sealed for super::CovenRead<T, U> {}
     #[cfg(any(test, feature = "test-utils"))]
