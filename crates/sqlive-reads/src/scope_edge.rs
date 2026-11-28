@@ -52,11 +52,11 @@ pub(crate) enum Nesting {
     /// (`derived::passed_source`). The member waits for the source and the
     /// derived item.
     Through(usize),
-    /// The item of a core around the member's whose value this derived
-    /// item of the member's core, a relation of the row around it, holds in
-    /// its one row (`derived::passed_around`): the binding's row of that
-    /// item gives the compared value.
-    Around(usize),
+    /// The partner is an item of a core around the member's, whose value a
+    /// derived item of the member's core, a relation of the row around it,
+    /// holds in its one row (`derived::passed_around`): the binding's row of
+    /// the partner gives the compared value.
+    Around,
 }
 
 impl Nesting {
@@ -70,7 +70,7 @@ impl Nesting {
     pub(crate) fn through(self) -> Option<usize> {
         match self {
             Self::Through(derived) => Some(derived),
-            Self::Named | Self::Subquery | Self::Around(_) => None,
+            Self::Named | Self::Subquery | Self::Around => None,
         }
     }
 }
@@ -329,7 +329,7 @@ impl Planner<'_, '_> {
             }
             let edge = self.column_edge(member, around, first)?;
             return (edge.nesting == Nesting::Named)
-                .then_some(Edge { nesting: Nesting::Around(partner), ..edge });
+                .then_some(Edge { nesting: Nesting::Around, ..edge });
         }
         // A USING join reaches here without `source_of`.
         if self.items[partner].columns.volatile(&partner_column) {
@@ -455,7 +455,7 @@ impl Planner<'_, '_> {
         // A derived item's NULL says nothing of the source its arm passes
         // the column on from, nor of the row around a relation of that row,
         // which a LEFT JOIN of the relation leaves NULL.
-        if matches!(edge.nesting, Nesting::Through(_) | Nesting::Around(_)) {
+        if matches!(edge.nesting, Nesting::Through(_) | Nesting::Around) {
             return None;
         }
         self.items[edge.partner].always_bound().then_some(Edge { nulls: true, ..edge })
