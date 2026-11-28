@@ -908,7 +908,7 @@ async fn a_loaded_snapshot_reruns_a_joined_query_by_the_rows_it_changes() {
     let ana = laptop.schema(tables(), SYNCED_MUSIC).await.unwrap();
     let ben = phone.schema(tables(), SYNCED_MUSIC).await.unwrap();
     let mut query: crate::LiveQuery<_, DbError> =
-        ben.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+        ben.subscribe(crate::test_utils::LiveSql::of(ALBUM_X, |r| r.get::<_, String>(0)));
     assert!(crate::tests::next(&mut query).await.is_empty());
     for (change, reruns) in [
         ("INSERT INTO releases VALUES ('r1','x',2001),('r2','y',2002); INSERT INTO tracks VALUES ('t1','r1',1,'one'),('t2','r2',1,'two'),('t3','r2',2,'three')", true),

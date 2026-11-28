@@ -49,10 +49,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        let device = self.local_device().ok();
-        self.follow(move |db| {
-            crate::members::members(db, device.ok_or(DbError::StoreClosed)?).map_err(E::from)
-        })
+        self.follow(crate::members::members_read(self.local_device().ok()))
     }
 
     /// The circles this installation's member belongs to (E12).
@@ -66,10 +63,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        let device = self.local_device().ok();
-        self.follow(move |db| {
-            crate::members::circles(db, device.ok_or(DbError::StoreClosed)?).map_err(E::from)
-        })
+        self.follow(crate::members::circles_read(self.local_device().ok()))
     }
 
     /// A circle's members who remain in the store; none for an absent or
@@ -90,11 +84,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        let device = self.local_device().ok();
-        self.follow(move |db| {
-            crate::members::circle_members(db, device.ok_or(DbError::StoreClosed)?, circle)
-                .map_err(E::from)
-        })
+        self.follow(crate::members::circle_members_read(self.local_device().ok(), circle))
     }
 
     /// The latest completed replacement of this installation, or None (E5).
@@ -107,7 +97,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(|db| crate::device_reset::read(db).map_err(E::from))
+        self.follow(crate::device_reset::reset_read())
     }
 }
 

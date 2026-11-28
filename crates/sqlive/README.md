@@ -27,8 +27,8 @@ table, adds a row, and receives the new count.
 ```rust
 use panic_as_error::{Bug, BugSink, BugSinkRef, CarriesBug};
 use sqlive::{
-    Database, Error, Handle, HandleFailure, LiveQuery, NoPolicy, Options, PolicyError,
-    ReconfigurableLiveQuery, Recorded, SqliteSettings,
+    Database, Error, Handle, HandleFailure, LiveQuery, LiveStatement, NoPolicy, Options,
+    PolicyError, ReconfigurableLiveQuery, SqliteSettings, Values,
 };
 use std::sync::Arc;
 
@@ -88,18 +88,20 @@ fn main() {
     let mut count: LiveQuery<i64, QueryError> = LiveQuery::new(ReconfigurableLiveQuery::new(
         (),
         Arc::new(move |(), commits| {
+            let statement =
+                LiveStatement::app("SELECT count(*) FROM albums", Values::Positional(Vec::new()));
+            let mut count = 0;
             reader.reader().host(|reader| {
                 reader.live_read(
                     &mut |reads, lookups| commits.finish_judging(reads, lookups),
-                    |reader| {
-                        reader
-                            .app_query_row(Recorded::Yes, "SELECT count(*) FROM albums", [], |row| {
-                                row.get(0)
-                            })
-                            .map_err(|error| QueryError(error.into()))
+                    &[statement],
+                    |_, row| {
+                        count = row.get(0)?;
+                        Ok(())
                     },
                 )
-            })
+            })?;
+            Ok(count)
         }),
         QueryError,
         &handle,

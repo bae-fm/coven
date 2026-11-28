@@ -149,8 +149,7 @@ transaction. A live query reruns whenever a write changes rows it read, whether
 the write was Ana's or arrived from another device:
 
 ```rust
-let mut notes: LiveQuery<_, CovenError> =
-    handle.subscribe(|sql| Ok(sql.fetch(&NoteListParams {})?));
+let mut notes: LiveQuery<_, CovenError> = handle.subscribe(NoteListParams {});
 // On a thread that may block.
 while let Some(Ok(rows)) = notes.next_blocking() {
     show_notes(rows);
@@ -181,7 +180,7 @@ starts syncing. Her note goes out in the next pass. On later launches,
 ## Show what sync is doing
 
 ```rust
-let mut status = handle.subscribe(|sql| Ok::<_, CovenError>(SyncStatus::read(sql)?));
+let mut status: LiveQuery<_, CovenError> = handle.subscribe(SyncStatus::live());
 while let Some(result) = status.next_blocking() {
     let SyncStatus { state, last_synced } = result?;
     show_last_synced(last_synced);

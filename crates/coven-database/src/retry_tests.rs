@@ -116,17 +116,16 @@ async fn an_upload_failure_records_its_wait_and_pending_record_and_completion_re
 }
 
 #[tokio::test]
-async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
+async fn the_pause_setting_and_queue_survive_reopening() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"bytes".to_vec(), true).await.unwrap();
     let owner = FileDatabase::new(db.clone());
-    let mut queue = db.follow(crate::file_queue::state);
-    let first = queue.next_inline().await.expect("the live query answers").unwrap();
+    let first = db.upload_queue().await.unwrap();
     assert!(!first.paused);
     assert_eq!(first.uploads.len(), 1);
     db.write(|sql| sql.set_uploads_paused(true)).await.unwrap();
-    assert!(queue.next_inline().await.expect("the live query answers").unwrap().paused);
+    assert!(db.upload_queue().await.unwrap().paused);
     let session = SecretBytes::new(b"session".to_vec());
     owner
         .record_session(
@@ -136,9 +135,8 @@ async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
         )
         .await
         .unwrap();
-    let recorded = queue.next_inline().await.expect("the live query answers").unwrap();
+    let recorded = db.upload_queue().await.unwrap();
     assert_eq!(recorded.uploads[0].session.as_ref().unwrap().as_bytes(), b"session");
-    drop(queue);
     db.close().await.unwrap();
     let db = open(&store, Provenance::AppProvided).await;
     assert_eq!(db.upload_queue().await.unwrap(), recorded);

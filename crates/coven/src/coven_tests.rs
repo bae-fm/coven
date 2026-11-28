@@ -36,9 +36,10 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     let reader = builder(&app).open_read_only(first.id()).await.unwrap();
-    let mut live = a.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM notes ORDER BY title", [], |r| r.get::<_, String>(0))?)
-    });
+    let mut live = a.subscribe(coven_database::test_utils::LiveSql::of(
+        "SELECT title FROM notes ORDER BY title",
+        |r| r.get::<_, String>(0),
+    ));
     assert!(live.next_inline().await.expect("the live query answers").unwrap().is_empty());
     a.write(|sql| {
         sql.execute("INSERT INTO notes VALUES(?1,?2)", ("a", "Paint colors"))?;
@@ -78,8 +79,9 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     assert!(losses.next_inline().await.expect("the live query answers").unwrap().is_empty());
     a.dismiss_lost_values(&[]).await.unwrap();
     let mut by_id: crate::ReconfigurableLiveQuery<_, _, crate::CovenError> = a
-        .subscribe_reconfigurable("a".to_owned(), |id, sql| {
-            Ok(sql.query("SELECT title FROM notes WHERE id=?1", [id], |r| r.get::<_, String>(0))?)
+        .subscribe_reconfigurable("a".to_owned(), |id| {
+            let sql = "SELECT title FROM notes WHERE id=?1";
+            Ok(coven_database::test_utils::LiveSql::new(sql, &[id], |r| r.get::<_, String>(0)))
         });
     let requests = by_id.requests();
     assert_eq!(

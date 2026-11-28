@@ -1,4 +1,4 @@
-use crate::tests::{QueryError, TestDatabase, TestOptions};
+use crate::tests::{compiled_read, no_values, QueryError, TestDatabase, TestOptions};
 use crate::{HostTables, LiveQuery, SqlValue};
 
 /// Tracks, the uploads the host has under way, by track, and its network.
@@ -38,7 +38,7 @@ fn end(tables: &HostTables, track: &str) {
 }
 
 fn live(db: &TestDatabase, sql: &'static str) -> LiveQuery<Vec<String>, QueryError> {
-    db.subscribe(move |db| Ok(db.query(sql, [], |row| row.get::<_, String>(0))?))
+    db.subscribe_rows(sql, no_values(), |row| row.get::<_, String>(0))
 }
 
 async fn next(query: &mut LiveQuery<Vec<String>, QueryError>) -> Vec<String> {
@@ -214,8 +214,8 @@ async fn a_compiled_read_of_a_host_table_runs_with_its_shipped_plan() {
     )
     .expect("sqlive analyzes the read");
     let (db, tables) = open();
-    let mut query = db
-        .subscribe(move |db| Ok(db.query_compiled(statement, [], |row| row.get::<_, String>(0))?));
+    let mut query =
+        db.subscribe(vec![compiled_read(statement, no_values())], |_, row| row.get::<_, String>(0));
     assert!(next(&mut query).await.is_empty());
     send(&tables, "b1", 0);
     assert!(!query.is_marked_for_rerun());

@@ -205,9 +205,10 @@ async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
         let store = TestStore::new();
         let open = || store.builder(notes_tables(), notes_migrations()).open();
         let db = open().await.unwrap();
-        let mut notes = db.subscribe(|sql| {
-            Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
-        });
+        let mut notes = db
+            .subscribe(crate::test_utils::LiveSql::of("SELECT title FROM notes", |r| {
+                r.get::<_, String>(0)
+            }));
         assert!(notes.next_inline().await.expect("the live query answers").unwrap().is_empty());
         db.inspect_readers(|reader, _| reader.refuse_transaction_end(true));
         let error = db
@@ -455,25 +456,21 @@ async fn joined_runs_against_one_shot_reads() {
     }
     let one_shot = one_shot / RUNS;
     let alone = credit(&db, RUNS / 4, None).await;
-    let spent = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let times = spent.clone();
-    let mut live = db.subscribe(move |sql| {
-        let started = std::time::Instant::now();
-        let rows = sql.query(SQL, [5000], |r| r.get::<_, String>(0))?;
-        times.lock().unwrap().push(started.elapsed());
-        Ok(rows)
-    });
+    let mut spent = Vec::new();
+    let mut live: crate::LiveQuery<_, DbError> =
+        db.subscribe(crate::test_utils::LiveSql::new(SQL, &[&5000], |r| r.get::<_, String>(0)));
     next(&mut live).await;
     for run in 0..RUNS {
         write(&db, &format!("UPDATE tracks SET title = 'run {run}' WHERE id = 59990"));
-        next(&mut live).await;
+        let started = std::time::Instant::now();
+        live.run_changed().expect("the write changed the rows").unwrap();
+        spent.push(started.elapsed());
         assert!(!live.is_marked_for_rerun());
     }
     write(&db, "UPDATE tracks SET title = 'outside' WHERE id = 1");
     assert!(!live.is_marked_for_rerun());
     let beside = credit(&db, RUNS / 4, Some(&live)).await;
-    let spent = spent.lock().unwrap();
-    let live_run = spent.iter().skip(1).sum::<Duration>() / RUNS;
+    let live_run = spent.iter().sum::<Duration>() / RUNS;
     for (metric, time) in [
         ("joined_query/one_shot_read", one_shot),
         ("joined_query/live_run", live_run),

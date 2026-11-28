@@ -1143,16 +1143,18 @@ handle.write(move |sql| {
     Ok::<_, CovenError>(sql.run(&RetitleParams { track, title })?)
 }).await?;
 
-let tracks = AlbumTracksParams { album };
-let screen: LiveQuery<_, CovenError> =
-    handle.subscribe(move |sql| Ok(sql.fetch(&tracks)?));
+let screen: LiveQuery<_, CovenError> = handle.subscribe(AlbumTracksParams { album });
 ```
 
-A context takes a compiled statement by its type. Every context that reads runs
-a read with `fetch`, which returns its rows, or `fetch_row`, which returns the
-first of them. Every context that writes runs a write with `run`, which returns
-how many rows it changed, or, for a write with a RETURNING clause,
-`run_returning`, which returns the rows the clause gives
+A live query takes compiled reads alone: one, or two that read one snapshot
+(`Both`), each bound by its own parameters ([api.md E4](api.md#e4-reading)). No
+Rust runs between its statements, so a live query can't take one statement's
+values from another's rows: a screen whose rows depend on other rows reads them
+in one statement. A context takes a compiled statement by its type. Every
+context that reads runs a read with `fetch`, which returns its rows, or
+`fetch_row`, which returns the first of them. Every context that writes runs a
+write with `run`, which returns how many rows it changed, or, for a write with a
+RETURNING clause, `run_returning`, which returns the rows the clause gives
 ([api.md E4](api.md#e4-reading)). A read marked `writer` runs on `CovenHandle`'s
 reads, live queries and writes, and a read without the mark on
 `CovenReadHandle`'s, which don't type-check the other's. The compiler fails the
@@ -14414,7 +14416,8 @@ the same on any platform.
     a closure, a value that an earlier statement returned or another
     statement's call: one statement, with a join or a subquery, reads both.
     A read value that a statement takes is the handle the statement runs
-    on, never its key.
+    on, never its key. The two find statements in one-shot reads alone: a
+    live query runs compiled statements with no Rust between them (§4.2).
     `clippy::read_kept_state` finds memory kept between reads, since a read
     starts from the database every time. A type that holds a live query or
     one of the policy's `value_stream_types`, at any depth through the

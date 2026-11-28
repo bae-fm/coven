@@ -889,13 +889,15 @@ async fn every_start_counts_even_one_held_for_the_reason_the_last_was() {
 fn status_and_effect(
     f: &Fixture,
 ) -> coven_database::test_utils::Followed<(Option<Vec<u8>>, String), DbError> {
-    coven_database::test_utils::Followed::new(f.handle.subscribe(|sql| {
-        Ok(sql.query_row(
-            "SELECT s.last_pass,e.effect FROM coven_sync_status AS s,coven_retry_effect AS e",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?)
-    }))
+    coven_database::test_utils::Followed::new(
+        f.handle.subscribe(
+            coven_database::test_utils::LiveSql::of(
+                "SELECT s.last_pass,e.effect FROM coven_sync_status AS s,coven_retry_effect AS e",
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .one(),
+        ),
+    )
 }
 
 /// Eve's connection last failed for an update of her app, which no retry

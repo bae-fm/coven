@@ -58,15 +58,16 @@ pub(crate) fn count_capture(db: &StoreSql, name: &str, size: u64) -> Result<(), 
 
 /// Sum the sizes of the store's own files in `coven_library_bytes`: the
 /// value of `LocalBytes::library`.
-pub(crate) fn library(db: &StoreSql) -> Result<u64, DbError> {
-    let sums =
-        db.host_live_read("SELECT coalesce(sum(bytes),0) FROM coven_library_bytes", [], |r| {
-            r.get::<_, i64>(0)
-        })?;
-    crate::sqlite::unsigned(
-        sums.into_iter()
-            .next()
-            .ok_or(DbError::Invariant { what: "a statement of aggregates returns its row" })?,
+pub(crate) fn library() -> crate::live_reads::CovenRead<i64, u64> {
+    let sql = "SELECT coalesce(sum(bytes),0) FROM coven_library_bytes";
+    crate::live_reads::CovenRead::new(sql, crate::live_reads::unbound, |r| r.get::<_, i64>(0)).then(
+        |sums| {
+            crate::sqlite::unsigned(
+                sums.into_iter().next().ok_or(DbError::Invariant {
+                    what: "a statement of aggregates returns its row",
+                })?,
+            )
+        },
     )
 }
 
@@ -218,7 +219,7 @@ impl StoreDatabase {
     /// `rebuild` row: the sizes of its own files together now, then after
     /// each write that changes them, until it closes.
     pub(crate) async fn count_rebuild(&self, rebuild: &StoreDatabase) -> Result<(), DbError> {
-        let (total, first) = next_result(rebuild.follow(library)).await;
+        let (total, first) = next_result(rebuild.follow(library())).await;
         let bytes = first.ok_or(DbError::StoreClosed)??;
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {

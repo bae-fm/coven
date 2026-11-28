@@ -63,7 +63,7 @@ pub use checkpointed_size::CheckpointedSize;
 pub use commit_scope::{committing, enter, CommitScope};
 #[cfg(any(test, feature = "profiles"))]
 pub use connection::ProfiledStatement;
-pub use connection::{CookieScope, HostSql, Operation, Recorded};
+pub use connection::{CookieScope, HostSql, LiveStatement, Operation, Recorded};
 pub use connection_setup::Setup;
 pub use database::{Database, Options, Reader};
 pub use database_changes::DatabaseChanges;
@@ -97,12 +97,12 @@ pub use sqlive_reads::{
     LastRow, Lookup, Lookups, NoAnswer, ProbedColumn, ProbedStatement, ReadCapture, ReadEntry,
     ReadFrame, ReadOnly, ReadPlace, ReadReport, ReadRows, ReadSet, RowChange, RowCondition,
     RowImage, RowScope, SchemaProbe, ScopePlanSize, Scopes, SelectNull, SqlPosition, SqlValue,
-    StandInFunction, TableColumn, TableRead, Unanalyzable, UndecodablePlan, Writer, LOOKUP_STEPS,
-    ROWS_PER_TABLE,
+    StandInFunction, TableColumn, TableRead, Unanalyzable, UndecodablePlan, Values, Writer,
+    LOOKUP_STEPS, ROWS_PER_TABLE,
 };
 pub(crate) use sqlive_reads::{
-    affected_by, compare, parameters, past_row_limit, CompiledPlan, MainSchema, ScopePlan,
-    ValueKey, FTS5_CONTENT, MAIN_TABLES,
+    affected_by, compare, past_row_limit, CompiledPlan, MainSchema, ScopePlan, ValueKey,
+    FTS5_CONTENT, MAIN_TABLES,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_records::{

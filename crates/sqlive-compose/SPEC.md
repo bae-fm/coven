@@ -149,8 +149,8 @@ compiler wrote.
 
 ## 1. Why a read is one statement
 
-A live query can also be a Rust closure that runs several statements in one
-snapshot of the database. Written that way, the issue page's query reads the
+A one-shot read can be a Rust closure that runs several statements in one
+snapshot of the database. Written that way, the issue page's read reads the
 issue, then reads the author that the issue names, and reads the assignee only
 when the issue has one:
 
@@ -175,10 +175,11 @@ read. So the whole read is one constant, and the build can prepare it against
 the schema, give each of its columns a type, and ask sqlive what it depends on
 (section 8).
 
-Composing leaves two things as they are. The closure above already reads one
-snapshot, so its statements agree with each other. The closure also runs again
-as a whole when a write changes anything one of its statements read, as a
-composed statement does.
+The closure above reads one snapshot, so its statements agree with each other,
+as one statement's parts do. A live query takes statements alone, each bound by
+its own values (sqlive's spec, section 3), so it reads the issue page as the
+composed statement, and runs it again as a whole when a write changes anything
+the statement read.
 
 ## 2. Fragments
 

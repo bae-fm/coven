@@ -37,8 +37,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        let kind = kind.to_owned();
-        self.follow(move |db| crate::operation::of_kind(db, &kind).map_err(E::from))
+        self.follow(crate::operation::of_kind_read(kind.to_owned()))
     }
 
     /// Read the earliest unfinished row of a sync-owned kind, including failures.

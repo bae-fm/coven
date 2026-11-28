@@ -26,7 +26,7 @@ async fn a_live_query_of_the_network_runs_again_as_it_changes() {
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"photo".to_vec(), true).await.unwrap();
     let mut network: crate::LiveQuery<_, DbError> =
-        db.subscribe(|sql| Ok(sql.query_row(SHOWN, [], shown)?));
+        db.subscribe(crate::test_utils::LiveSql::of(SHOWN, shown).one());
     assert_eq!(next(&mut network).await, (None, false, false, Some(false)));
     db.record_network(NetworkState { usable: Some(true), metered: true, joined: 1 });
     assert_eq!(next(&mut network).await, (Some(true), true, false, Some(false)));
@@ -46,14 +46,19 @@ async fn a_metered_change_reruns_only_the_upload_reads_that_read_metered() {
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"photo".to_vec(), true).await.unwrap();
     db.write(|sql| sql.set_unmetered_only(true)).await.unwrap();
-    let mut files: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(file) FROM coven_uploads WHERE NOT sending", [], |r| {
-            r.get::<_, i64>(0)
-        })?)
-    });
-    let mut held: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT metered FROM coven_uploads", [], |r| r.get::<_, bool>(0))?)
-    });
+    let mut files: crate::LiveQuery<_, DbError> = db.subscribe(
+        crate::test_utils::LiveSql::of(
+            "SELECT count(file) FROM coven_uploads WHERE NOT sending",
+            |r| r.get::<_, i64>(0),
+        )
+        .one(),
+    );
+    let mut held: crate::LiveQuery<_, DbError> = db.subscribe(
+        crate::test_utils::LiveSql::of("SELECT metered FROM coven_uploads", |r| {
+            r.get::<_, bool>(0)
+        })
+        .one(),
+    );
     assert_eq!(next(&mut files).await, 1);
     assert!(!next(&mut held).await);
     for metered in [true, false] {

@@ -327,7 +327,9 @@ impl Fixture {
     /// The queue as the app's SQL reads it from coven's views (E4), as a
     /// live query.
     fn subscribe_queue(&self) -> coven_database::LiveQuery<ViewedQueue, coven_database::DbError> {
-        self.database.subscribe(viewed_queue)
+        self.database
+            .subscribe(coven_database::test_utils::LiveSql::of(QUEUE, queue_row))
+            .process(queue_of)
     }
     /// The same, read once.
     async fn viewed_queue(&self) -> ViewedQueue {
@@ -338,11 +340,10 @@ impl Fixture {
     fn subscribe_pending(
         &self,
     ) -> coven_database::LiveQuery<Vec<crate::PendingRecord>, coven_database::DbError> {
-        self.database.subscribe(|sql| {
-            Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
-                r.get::<_, crate::PendingRecord>(0)
-            })?)
-        })
+        self.database.subscribe(coven_database::test_utils::LiveSql::of(
+            "SELECT record FROM coven_pending ORDER BY position",
+            |r| r.get::<_, crate::PendingRecord>(0),
+        ))
     }
     /// The pending subjects of this device's upload and downloads of a
     /// file's bytes.
@@ -399,51 +400,6 @@ impl Fixture {
     }
 }
 /// Run the storage model's files runner over JSON cases.
-/// The upload queue as the app's SQL reads it: the pause from
-/// `coven_upload_pause`, and each queued file, oldest first, from
-/// `coven_uploads` (E4).
-#[derive(Clone, Debug, PartialEq)]
-struct ViewedQueue {
-    paused: bool,
-    files: Vec<ViewedUpload>,
-}
-#[derive(Clone, Debug, PartialEq)]
-struct ViewedUpload {
-    file: coven_foundation::id_source::FileId,
-    /// `coven_uploads.sending`: this process sends it now.
-    sending: bool,
-    progress: Option<UploadProgress>,
-    retry_at: Option<i64>,
-    pending: bool,
-}
-fn viewed_queue(
-    sql: coven_database::SqlReadContext<'_>,
-) -> Result<ViewedQueue, coven_database::DbError> {
-    let paused = sql.query_row("SELECT paused FROM coven_upload_pause", [], |r| r.get(0))?;
-    let files = sql.query(
-        "SELECT file,sending,bytes_confirmed,bytes_total,retry_at,pending IS NOT NULL
-         FROM coven_uploads ORDER BY position",
-        [],
-        |r| {
-            let progress = match (r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?) {
-                (Some(confirmed), Some(total)) => Some(UploadProgress {
-                    bytes_confirmed: confirmed as u64,
-                    bytes_total: total as u64,
-                }),
-                _ => None,
-            };
-            Ok(ViewedUpload {
-                file: r.get(0)?,
-                sending: r.get(1)?,
-                progress,
-                retry_at: r.get(4)?,
-                pending: r.get(5)?,
-            })
-        },
-    )?;
-    Ok(ViewedQueue { paused, files })
-}
-
 fn files_runner(cases: &[serde_json::Value]) -> Vec<serde_json::Value> {
     use std::{
         io::Write,
@@ -647,6 +603,9 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
 
 #[path = "file_upload_abandoned_tests.rs"]
 mod abandoned_tests;
+#[path = "files_tests/viewed_queue.rs"]
+mod viewed_queue;
+use viewed_queue::{queue_of, queue_row, viewed_queue, ViewedQueue, QUEUE};
 #[path = "file_cache_tests.rs"]
 mod cache;
 #[path = "file_device_only_tests.rs"]

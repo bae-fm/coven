@@ -3,7 +3,7 @@
 
 use crate::{
     Database, Handle, HandleFailure, HostSql, LiveQuery, NoPolicy, Options, PolicyError,
-    ReconfigurableLiveQuery,
+    ReconfigurableLiveQuery, Values,
 };
 use panic_as_error::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
 use panic_as_error::{Bug, BugSink, BugSinkRef, CarriesBug};
@@ -41,8 +41,7 @@ impl CarriesBug for QueryError {
     }
 }
 
-/// The app's reads on one connection, as a live query or a one-shot read
-/// runs them: the authorizer records each statement's reads.
+/// The app's reads on one connection, as a one-shot read runs them.
 #[derive(Clone, Copy)]
 pub(crate) struct TestRead<'a>(pub(crate) &'a HostSql<NoPolicy>);
 
@@ -66,16 +65,79 @@ impl TestRead<'_> {
     ) -> rusqlite::Result<Vec<T>> {
         self.0.app_query(crate::Recorded::Yes, sql, params, map)
     }
+}
 
-    /// Every row of the compiled statement `statement`, through `map`.
-    pub(crate) fn query_compiled<T, Q: rusqlite::Params>(
-        &self,
-        statement: crate::CompiledStatement<crate::Writer>,
-        params: Q,
-        map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    ) -> rusqlite::Result<Vec<T>> {
-        self.0.app_query_compiled(crate::Recorded::Yes, statement, params, map)
+/// One statement of a test's live query, with the values it binds.
+#[derive(Clone)]
+pub(crate) struct TestStatement {
+    kind: StatementKind,
+    values: Values,
+}
+
+#[derive(Clone)]
+enum StatementKind {
+    App(String),
+    Compiled(crate::CompiledStatement<crate::Writer>),
+    Host(String),
+}
+
+impl TestStatement {
+    fn live(&self) -> crate::LiveStatement<'_> {
+        let values = self.values.clone();
+        match &self.kind {
+            StatementKind::App(sql) => crate::LiveStatement::app(sql, values),
+            StatementKind::Compiled(statement) => {
+                crate::LiveStatement::compiled(*statement, values)
+            }
+            StatementKind::Host(sql) => crate::LiveStatement::host(sql, values),
+        }
     }
+}
+
+/// The app's SELECT `sql`, bound to `values`.
+pub(crate) fn app(sql: impl Into<String>, values: Values) -> TestStatement {
+    TestStatement { kind: StatementKind::App(sql.into()), values }
+}
+
+/// The compiled read `statement`, bound to `values`.
+pub(crate) fn compiled_read(
+    statement: crate::CompiledStatement<crate::Writer>,
+    values: Values,
+) -> TestStatement {
+    TestStatement { kind: StatementKind::Compiled(statement), values }
+}
+
+/// The host's own SELECT `sql`, bound to `values`.
+pub(crate) fn host(sql: impl Into<String>, values: Values) -> TestStatement {
+    TestStatement { kind: StatementKind::Host(sql.into()), values }
+}
+
+/// No values, for a statement with no parameters.
+pub(crate) fn no_values() -> Values {
+    Values::Positional(Vec::new())
+}
+
+/// `values`, bound in order.
+pub(crate) fn at(values: &[&dyn rusqlite::ToSql]) -> Values {
+    Values::positional(values).unwrap()
+}
+
+/// Each of `values`, bound in order.
+pub(crate) fn each_at<T: rusqlite::ToSql>(values: impl IntoIterator<Item = T>) -> Values {
+    let values = values.into_iter().map(|value| crate::SqlValue::of(&value));
+    Values::Positional(values.collect::<rusqlite::Result<_>>().unwrap())
+}
+
+/// `values`, bound by name.
+pub(crate) fn named(values: &[(&'static str, &dyn rusqlite::ToSql)]) -> Values {
+    Values::named(values).unwrap()
+}
+
+/// The first row of `rows`, a live query's result, as `query_row` reads it,
+/// or `QueryReturnedNoRows`.
+pub(crate) fn first<T>(rows: Vec<T>) -> Result<T, QueryError> {
+    let first = rows.into_iter().next();
+    Ok(first.ok_or(rusqlite::Error::QueryReturnedNoRows)?)
 }
 
 /// `sql` with the plan `probe` builds of it, as a compiler ships it, when
@@ -159,6 +221,9 @@ pub(crate) struct TestDatabase {
     handle: Handle<HandleFailure>,
     bugs: Arc<HeardBugs>,
     path: PathBuf,
+    /// The pause the next run of a live query `subscribe_paused` made waits
+    /// in.
+    pause: Arc<Mutex<Option<Pause>>>,
     // Dropped last: the connections close before their directory goes.
     directory: tempfile::TempDir,
 }
@@ -183,6 +248,8 @@ impl TestDatabase {
             directory.path().canonicalize().expect("the directory exists").join("test.sqlite");
         let bugs = Arc::<HeardBugs>::default();
         let handle = Handle::new(Arc::clone(&bugs) as BugSinkRef, options.unrecorded);
+        let pause = Arc::<Mutex<Option<Pause>>>::default();
+        let armed = Arc::clone(&pause);
         let (database, ()) = Database::open_with(
             &path,
             handle.clone(),
@@ -198,6 +265,22 @@ impl TestDatabase {
                     for (name, compare) in &options.collations {
                         setup.collation(name, *compare)?;
                     }
+                    let armed = Arc::clone(&armed);
+                    setup.scalar_function(
+                        "test_pause",
+                        0,
+                        rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                        move |_| {
+                            if let Some(pause) = lock_unpoisoned(&armed).take() {
+                                pause.entered.send(()).expect("the test waits for the pause");
+                                pause
+                                    .released
+                                    .recv_timeout(HANG_GUARD)
+                                    .expect("the test ends the pause");
+                            }
+                            Ok(0)
+                        },
+                    )?;
                     Ok(())
                 },
                 capture: Some(options.captured),
@@ -207,7 +290,14 @@ impl TestDatabase {
             |writer| writer.batch(schema),
         )
         .expect("the test database opens");
-        Self { database: Arc::new(RwLock::new(Some(database))), handle, bugs, path, directory }
+        Self {
+            database: Arc::new(RwLock::new(Some(database))),
+            handle,
+            bugs,
+            path,
+            pause,
+            directory,
+        }
     }
 
     /// The database's file.
@@ -297,26 +387,86 @@ impl TestDatabase {
         self.read(|reader| reader.read_snapshot(|reader| read(TestRead(reader))))
     }
 
-    /// A live query that runs `query`, the app's reads, on a reader, and runs
-    /// it again when a commit changes what it read.
-    pub(crate) fn subscribe<R, F>(&self, query: F) -> LiveQuery<R, QueryError>
+    /// A live query of the app's SELECT `sql` bound to `values`, which gives
+    /// every row through `map`, and runs again when a commit changes what it
+    /// read.
+    pub(crate) fn subscribe_rows<T>(
+        &self,
+        sql: impl Into<String>,
+        values: Values,
+        map: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T> + Send + Sync + 'static,
+    ) -> LiveQuery<Vec<T>, QueryError>
     where
-        F: Fn(TestRead<'_>) -> Result<R, QueryError> + Send + Sync + 'static,
-        R: Send + 'static,
+        T: Send + 'static,
     {
-        LiveQuery::new(self.subscribe_reconfigurable((), move |(), reader| query(reader)))
+        self.subscribe(vec![app(sql, values)], move |_, row| map(row))
     }
 
-    /// A live query whose request the test can replace.
-    pub(crate) fn subscribe_reconfigurable<Q, R, F>(
+    /// A live query of the app's SELECT `sql` bound to `values`, as
+    /// `subscribe_rows`, whose next run pauses once its snapshot has begun,
+    /// before or after `sql` runs as `at` says: the run tells the receiver
+    /// it returns that it paused, and goes on once the sender is told.
+    pub(crate) fn subscribe_paused<T>(
+        &self,
+        sql: impl Into<String>,
+        values: Values,
+        map: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T> + Send + Sync + 'static,
+        at: PauseAt,
+    ) -> (
+        LiveQuery<Vec<T>, QueryError>,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    )
+    where
+        T: Clone + PartialEq + Send + 'static,
+    {
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *lock_unpoisoned(&self.pause) = Some(Pause { entered, released });
+        let pause = host("SELECT test_pause()", no_values());
+        let (statements, read) = match at {
+            PauseAt::BeforeSql => (vec![pause, app(sql, values)], 1),
+            PauseAt::AfterSql => (vec![app(sql, values), pause], 0),
+        };
+        let query = self
+            .subscribe(
+                statements,
+                move |index, row| {
+                    if index == read {
+                        map(row).map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                },
+            )
+            .process(|rows| Ok(rows.into_iter().flatten().collect()));
+        (query, entry, release)
+    }
+
+    /// A live query of `statements`, read on one snapshot, which gives every
+    /// row of each through `map` with the statement's place in the list.
+    pub(crate) fn subscribe<T>(
+        &self,
+        statements: Vec<TestStatement>,
+        map: impl Fn(usize, &rusqlite::Row<'_>) -> rusqlite::Result<T> + Send + Sync + 'static,
+    ) -> LiveQuery<Vec<T>, QueryError>
+    where
+        T: Send + 'static,
+    {
+        LiveQuery::new(self.subscribe_reconfigurable((), move |()| statements.clone(), map))
+    }
+
+    /// A live query whose request the test can replace: `statements` gives
+    /// the statements each request reads.
+    pub(crate) fn subscribe_reconfigurable<Q, T>(
         &self,
         request: Q,
-        query: F,
-    ) -> ReconfigurableLiveQuery<Q, R, QueryError>
+        statements: impl Fn(&Q) -> Vec<TestStatement> + Send + Sync + 'static,
+        map: impl Fn(usize, &rusqlite::Row<'_>) -> rusqlite::Result<T> + Send + Sync + 'static,
+    ) -> ReconfigurableLiveQuery<Q, Vec<T>, QueryError>
     where
         Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, TestRead<'_>) -> Result<R, QueryError> + Send + Sync + 'static,
-        R: Send + 'static,
+        T: Send + 'static,
     {
         let database = Arc::clone(&self.database);
         ReconfigurableLiveQuery::new(
@@ -325,13 +475,20 @@ impl TestDatabase {
                 let slot = read_unpoisoned(&database);
                 let database = slot.as_ref().ok_or(QueryError(crate::Error::Closed))?;
                 let reader = database.reader();
-                let result = reader.host(|reader| {
+                let statements = statements(request);
+                let live: Vec<_> = statements.iter().map(TestStatement::live).collect();
+                let mut rows = Vec::new();
+                reader.host(|reader| {
                     reader.live_read(
                         &mut |reads, lookups| completion.finish_judging(reads, lookups),
-                        |reader| query(request, TestRead(reader)),
+                        &live,
+                        |index, row| {
+                            rows.push(map(index, row)?);
+                            Ok(())
+                        },
                     )
-                });
-                result
+                })?;
+                Ok(rows)
             }),
             QueryError,
             &self.handle,
@@ -368,6 +525,22 @@ impl TestDatabase {
     }
 }
 
+/// Where a live query's run pauses (`subscribe_paused`).
+#[derive(Clone, Copy)]
+pub(crate) enum PauseAt {
+    /// Before the query's SQL runs, so that the run knows nothing yet of what
+    /// it reads.
+    BeforeSql,
+    /// After the query's SQL ran, before the run ends.
+    AfterSql,
+}
+
+/// A run's pause: whom it tells that it paused, and what it waits on.
+struct Pause {
+    entered: tokio::sync::oneshot::Sender<()>,
+    released: std::sync::mpsc::Receiver<()>,
+}
+
 /// How long a test waits for a live query's answer before it fails.
 pub(crate) const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -381,6 +554,17 @@ where
         .await
         .expect("the live query answers in time")
         .expect("the live query is open")
+}
+
+/// Run `query` again, which a commit marked to run again, and return how
+/// many times it has run.
+pub(crate) fn rerun<T>(query: &mut LiveQuery<T, QueryError>) -> u64
+where
+    T: Clone + PartialEq + Send + 'static,
+{
+    assert!(query.is_marked_for_rerun(), "a commit marked the query to run again");
+    drop(query.run_changed());
+    query.runs().runs()
 }
 
 /// A live query's next value, failing a test it doesn't answer or answers

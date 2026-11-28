@@ -478,13 +478,15 @@ type ShownRow = (String, Option<i64>, Option<i64>, SyncState);
 
 /// Follow `coven_sync_state`'s row with a live query, as an app does.
 fn follow_row(device: &Device) -> coven_database::test_utils::Followed<ShownRow, CovenError> {
-    coven_database::test_utils::Followed::new(device.handle.subscribe(|sql| {
-        Ok(sql.query_row(
-            "SELECT state,last_synced,pending,detail FROM coven_sync_state",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?)
-    }))
+    coven_database::test_utils::Followed::new(
+        device.handle.subscribe(
+            coven_database::test_utils::LiveSql::of(
+                "SELECT state,last_synced,pending,detail FROM coven_sync_state",
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .one(),
+        ),
+    )
 }
 
 /// When storage fails a whole pass with a failure that names a state,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::tests::{QueryError, TestDatabase, TestError, TestOptions, TestRead};
+use crate::tests::{no_values, QueryError, TestDatabase, TestError, TestOptions, TestRead};
 use crate::{HostSql, NoPolicy};
 use std::path::Path;
 use std::sync::Arc;
@@ -619,7 +619,9 @@ async fn timed_writes(
     let reader = match reading {
         Reading::None => None,
         Reading::LiveQuery => {
-            let mut query = db.subscribe(read);
+            let mut query = db.subscribe_rows(WHOLE, no_values(), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+            });
             Some(tokio::spawn(async move { while let Some(Ok(_)) = query.next_inline().await {} }))
         }
         Reading::Unpaused => {

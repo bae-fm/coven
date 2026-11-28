@@ -79,7 +79,7 @@ pub async fn retitle(
 
 /// The notes by title, as a live query.
 pub fn notes(handle: &CovenHandle) -> LiveQuery<Vec<NoteListRow>, CovenError> {
-    handle.subscribe(|sql| Ok(sql.fetch(&NoteListParams {})?))
+    handle.subscribe(NoteListParams {})
 }
 
 /// The state of sync now.

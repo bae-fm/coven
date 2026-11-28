@@ -594,11 +594,11 @@ mod pending_records {
         let network = Network::new(2).await;
         let reader = &network.devices[1].handle;
         network.devices[1].stop_sync().await;
-        let mut received: crate::LiveQuery<_, crate::CovenError> = reader.subscribe(|sql| {
-            Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
-                r.get::<_, PendingRecord>(0)
-            })?)
-        });
+        let mut received: crate::LiveQuery<_, crate::CovenError> =
+            reader.subscribe(coven_database::test_utils::LiveSql::of(
+                "SELECT record FROM coven_pending ORDER BY position",
+                |r| r.get::<_, PendingRecord>(0),
+            ));
         assert!(received.next_inline().await.expect("the live query answers").unwrap().is_empty());
         let owner = &network.devices[0].handle;
         owner

@@ -9,10 +9,10 @@ mod bulk_write;
 mod database_file;
 #[path = "event_capture.rs"]
 mod event_capture;
-#[path = "host_live_read.rs"]
-mod host_live_read;
 #[path = "live_judging.rs"]
 mod live_judging;
+#[path = "live_statement.rs"]
+mod live_statement;
 #[path = "page_cache.rs"]
 mod page_cache;
 #[path = "pre_update_changes.rs"]
@@ -42,6 +42,7 @@ mod test_hooks;
 pub(crate) use app_statements::ScopePlans;
 use app_statements::StepsOf;
 pub use event_capture::Operation;
+pub use live_statement::LiveStatement;
 pub use schema_cookie::CookieScope;
 use transaction_capture::ChangeCapture;
 use write_transaction::WriteTransaction;
@@ -621,35 +622,41 @@ impl<P: Policy> HostSql<P> {
         };
         let sql = self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
-        self.authorization.begin_read_statement();
         let result = (|| {
             let mut statement = self.app_statement(sql)?;
-            let schema = statement.schema();
-            let plan = match read {
-                AppRead::Sql(_) => self.live_scope_plan(sql, &statement, schema)?,
-                // The plan is checked in every read, so a schema it doesn't
-                // fit fails a one-shot read too.
-                AppRead::Compiled { plan, .. } => {
-                    let plan = self.compiled_plan(plan, schema)?;
-                    self.authorization.capturing_reads().then_some(plan)
-                }
-            };
-            self.run_rows(
-                recorded,
-                crate::authorization::Owner::App,
-                &mut statement,
-                plan,
-                params,
-                each,
-            )
+            // The plan is checked in every read, so a schema it doesn't fit
+            // fails a one-shot read too. Only a live query's run uses it
+            // (`live_rows`).
+            if let AppRead::Compiled { plan, .. } = read {
+                self.compiled_plan(plan, statement.schema())?;
+            }
+            let owner = crate::authorization::Owner::App;
+            self.run_rows(recorded, owner, &mut statement, None, params, &[], each)
         })();
         self.authorization.app_result(result)
     }
 
-    /// Run the prepared `statement` and hand `each` its rows in order until
-    /// they end or `each` answers false, under the authorizer's step scope,
-    /// counting an app statement's steps. In a live query's read, each table
-    /// it read is recorded in the scope `plan` gives this run.
+    /// Run the prepared `statement` of a live query's run, bound to `values`,
+    /// and hand `each` its rows in order until they end or `each` answers
+    /// false: the run records each table it read in the scope `plan` gives
+    /// these values, or whole with no plan.
+    fn run_bound(
+        &self,
+        owner: crate::authorization::Owner,
+        statement: &mut rusqlite::Statement<'_>,
+        plan: Option<Arc<crate::ScopePlan>>,
+        values: &[crate::SqlValue],
+        each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
+    ) -> rusqlite::Result<()> {
+        let params = rusqlite::params_from_iter(values);
+        self.run_rows(Recorded::Yes, owner, statement, plan, params, values, each)
+    }
+
+    /// Run the prepared `statement` with `params`, whose values are
+    /// `parameters` where `plan` reads them, and hand `each` its rows in
+    /// order until they end or `each` answers false, under the authorizer's
+    /// step scope, counting an app statement's steps. In a live query's run,
+    /// each table it read is recorded in the scope `plan` gives this run.
     fn run_rows<Q: Params>(
         &self,
         recorded: Recorded,
@@ -657,24 +664,15 @@ impl<P: Policy> HostSql<P> {
         statement: &mut rusqlite::Statement<'_>,
         plan: Option<Arc<crate::ScopePlan>>,
         params: Q,
+        parameters: &[crate::SqlValue],
         mut each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
-        // A scope plan reads the bound values, which SQLite gives back only
-        // through a statement of their own; a run with no plan binds `params`
-        // to its statement alone.
-        let (parameters, unread) = match &plan {
-            Some(_) => (crate::parameters(&self.connection, statement, params)?, None),
-            None => (Vec::new(), Some(params)),
-        };
         // A run that returns as many rows as its LIMIT depends only on the
         // rows up to its last one (SPEC.md section 6).
-        let last_row = plan.as_ref().and_then(|plan| plan.last_row(&parameters));
+        let last_row = plan.as_ref().and_then(|plan| plan.last_row(parameters));
         let mut last = None;
         let run = |statement: &mut rusqlite::Statement<'_>| {
-            let mut rows = match unread {
-                Some(params) => statement.query(params)?,
-                None => statement.query(rusqlite::params_from_iter(&parameters))?,
-            };
+            let mut rows = statement.query(params)?;
             let mut returned = 0;
             loop {
                 let row = {
@@ -696,7 +694,7 @@ impl<P: Policy> HostSql<P> {
             crate::authorization::Owner::Host => run(statement),
             _ => self.counting_steps(statement, StepsOf::AppRead, run),
         };
-        self.record_app_statement(plan.as_deref(), &parameters, last.as_deref());
+        self.record_app_statement(plan.as_deref(), parameters, last.as_deref());
         #[cfg(any(test, feature = "test-utils"))]
         if recorded == Recorded::Yes {
             if let Some(log) = self.statement_log.borrow().as_ref() {

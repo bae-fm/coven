@@ -62,7 +62,7 @@ async fn the_expiry_wake_follows_a_clock_set_by_hand() {
         ana.sync.state.clone(),
     );
     let mut open: coven_database::LiveQuery<_, coven_database::DbError> =
-        ana.sync.database.subscribe(|sql| Ok(Invite::list(sql)?.len()));
+        ana.sync.database.subscribe(Invite::live()).process(|invites| Ok(invites.len()));
     assert_eq!(open.next_inline().await.unwrap().unwrap(), 1);
     // The handle waits for the wall clock to reach the expiry; only a setting
     // at or past it ends that wait.
@@ -95,7 +95,7 @@ async fn a_clock_that_cant_wait_for_an_expiry_fails_the_handle() {
         ana.sync.waits.clone(),
         ana.sync.state.clone(),
     );
-    let mut open = ana.sync.database.subscribe(|sql| Ok(Invite::list(sql)?.len()));
+    let mut open = ana.sync.database.subscribe(Invite::live()).process(|invites| Ok(invites.len()));
     let failure = loop {
         match open.next_inline().await.expect("the live query reports the failure") {
             Ok(_) => continue,

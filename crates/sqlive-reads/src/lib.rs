@@ -75,5 +75,5 @@ pub use scope_order::LastRow;
 pub use scope_plan::{ScopePlan, ScopePlanSize};
 pub use scope_row::RowCondition;
 pub use scope_term::Affinity;
-pub use sql_value::{parameters, SqlValue};
+pub use sql_value::{SqlValue, Values};
 pub use table_places::SqlPosition;

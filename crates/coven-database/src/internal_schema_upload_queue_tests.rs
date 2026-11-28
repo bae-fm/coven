@@ -48,11 +48,12 @@ async fn a_local_trigger_follows_each_file_into_and_out_of_the_queue() {
     let store = TestStore::new();
     let db = open(&store, FOLLOWED).await;
     let owner = FileDatabase::new(db.clone());
-    let mut queued: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT files,first FROM queued", [], |r| {
+    let mut queued: crate::LiveQuery<_, DbError> = db.subscribe(
+        crate::test_utils::LiveSql::of("SELECT files,first FROM queued", |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
-        })?)
-    });
+        })
+        .one(),
+    );
     assert_eq!(queued.next_inline().await.unwrap().unwrap(), (0, None));
     stage(&db, b"take".to_vec(), true).await.unwrap();
     let first = owner.uploads().await.unwrap()[0].id;

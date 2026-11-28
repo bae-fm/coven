@@ -269,9 +269,12 @@ fn insert_releases(
 
 /// Wait until the device has uploaded every file it staged.
 async fn uploaded(handle: &CovenHandle) {
-    let mut uploads: coven::LiveQuery<_, coven::CovenError> = handle.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
-    });
+    let mut uploads: coven::LiveQuery<_, coven::CovenError> = handle.subscribe(
+        coven_database::test_utils::LiveSql::of("SELECT count(*) FROM coven_uploads", |r| {
+            r.get::<_, i64>(0)
+        })
+        .one(),
+    );
     while uploads.next_inline().await.expect("the live query answers").unwrap() != 0 {}
 }
 

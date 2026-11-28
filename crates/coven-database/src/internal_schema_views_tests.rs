@@ -335,10 +335,12 @@ async fn coven_upload_pause_says_whether_uploads_are_paused() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let mut paused: crate::LiveQuery<_, DbError> = db
-        .subscribe(|sql| {
-            Ok(sql
-                .query_row("SELECT paused FROM coven_upload_pause", [], |r| r.get::<_, bool>(0))?)
-        })
+        .subscribe(
+            crate::test_utils::LiveSql::of("SELECT paused FROM coven_upload_pause", |r| {
+                r.get::<_, bool>(0)
+            })
+            .one(),
+        )
         .process(Ok);
     assert!(!paused.next_inline().await.unwrap().unwrap());
     db.write(|sql| {
@@ -386,16 +388,13 @@ async fn a_read_of_one_releases_uploads_ignores_another_releases_upload() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     stage_row(&db, "a", b"first").await;
-    let mut release: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query(
-            "SELECT r.source FROM files AS f
+    let mut release: crate::LiveQuery<_, DbError> = db.subscribe(crate::test_utils::LiveSql::of(
+        "SELECT r.source FROM files AS f
              JOIN coven_upload_queue AS q ON q.file=f.file
              JOIN coven_file_reads AS r ON r.file=f.file
              WHERE f.id='a'",
-            [],
-            |r| r.get::<_, String>(0),
-        )?)
-    });
+        |r| r.get::<_, String>(0),
+    ));
     assert_eq!(release.next_inline().await.unwrap().unwrap(), ["here"]);
     stage_row(&db, "b", b"second").await;
     assert!(!release.is_marked_for_rerun());
@@ -415,11 +414,9 @@ async fn a_write_commits_beside_a_read_of_a_view_joining_covens_tables() {
     use crate::Provenance;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    let mut members: crate::LiveQuery<_, DbError> = db.subscribe(|read| {
-        Ok(read.query("SELECT member FROM coven_circle_members WHERE circle='gifts'", [], |r| {
-            r.get::<_, String>(0)
-        })?)
-    });
+    let sql = "SELECT member FROM coven_circle_members WHERE circle='gifts'";
+    let mut members: crate::LiveQuery<_, DbError> =
+        db.subscribe(crate::test_utils::LiveSql::of(sql, |r| r.get::<_, String>(0)));
     assert!(members.next_inline().await.unwrap().unwrap().is_empty());
     // The circle doesn't have the new member: a lookup of
     // `_coven_circle_members`.
@@ -458,15 +455,15 @@ async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
         })
         .await
         .unwrap();
-    let mut release: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query_row(
+    let mut release: crate::LiveQuery<_, DbError> = db.subscribe(
+        crate::test_utils::LiveSql::of(
             "SELECT (SELECT count(*) FROM coven_uploads AS u WHERE u.file=f.file AND u.sending)>0,
                     EXISTS(SELECT 1 FROM coven_sending AS s WHERE s.file=f.file)
              FROM files AS f WHERE f.id='a'",
-            [],
             |r| Ok((r.get::<_, bool>(0)?, r.get::<_, bool>(1)?)),
-        )?)
-    });
+        )
+        .one(),
+    );
     assert_eq!(crate::tests::next(&mut release).await, (false, false));
     let progress = crate::TransferProgress { bytes_transferred: 0, bytes_total: 1 };
     let start = |transfers: crate::InFlight, location: &crate::FileLocation, file| {
@@ -474,14 +471,14 @@ async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
     };
     drop(start(db.uploads_in_flight(), &other, file));
     assert!(!release.is_marked_for_rerun(), "sending");
-    let mut listed: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query_row(
+    let mut listed: crate::LiveQuery<_, DbError> = db.subscribe(
+        crate::test_utils::LiveSql::of(
             "SELECT count(*) FROM files AS f JOIN coven_sending AS s ON s.file=f.file
              WHERE f.id='a'",
-            [],
             |r| r.get::<_, i64>(0),
-        )?)
-    });
+        )
+        .one(),
+    );
     assert_eq!(crate::tests::next(&mut listed).await, 0);
     db.record_network(coven_foundation::network_watch::NetworkState {
         usable: Some(true),
@@ -497,14 +494,11 @@ async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
     assert_eq!(crate::tests::next(&mut release).await, (false, false));
     // A pin downloads stored files.
     crate::file_write::tests::complete_uploads(&db).await;
-    let mut pinning: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query(
-            "SELECT d.file FROM files AS f JOIN coven_downloading AS d ON d.file=f.file
+    let mut pinning: crate::LiveQuery<_, DbError> = db.subscribe(crate::test_utils::LiveSql::of(
+        "SELECT d.file FROM files AS f JOIN coven_downloading AS d ON d.file=f.file
              WHERE f.id='a'",
-            [],
-            |r| r.get::<_, coven_foundation::id_source::FileId>(0),
-        )?)
-    });
+        |r| r.get::<_, coven_foundation::id_source::FileId>(0),
+    ));
     assert!(crate::tests::next(&mut pinning).await.is_empty());
     drop(start(db.downloads_in_flight(), &other, file));
     assert!(!pinning.is_marked_for_rerun(), "downloading");
@@ -565,8 +559,8 @@ async fn a_store_finds_what_a_build_found_in_every_readable_table_and_view() {
         let sql: &'static str = Box::leak(format!("SELECT count(*) FROM {name}").into_boxed_str());
         let plan = probe.compiled_plan(sql).unwrap().expect(name).encode();
         let statement = sqlive::CompiledStatement::new(sql, Box::leak(plan.into_boxed_str()));
-        let mut query: crate::LiveQuery<_, DbError> = db
-            .subscribe(move |read| Ok(read.query_compiled(statement, [], |r| r.get::<_, i64>(0))?));
+        let mut query: crate::LiveQuery<_, DbError> =
+            db.subscribe(crate::test_utils::LiveSql::compiled(statement, |r| r.get::<_, i64>(0)));
         let answer = query.next_inline().await.unwrap();
         // A test of the database crate opens a store without sync's
         // computations, which these two views call.

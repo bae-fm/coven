@@ -397,8 +397,7 @@ coven::read!(
 "#
 );
 
-let mut outbox: LiveQuery<_, CovenError> =
-    handle.subscribe(|sql| Ok(sql.fetch(&OutboxParams {})?));
+let mut outbox: LiveQuery<_, CovenError> = handle.subscribe(OutboxParams {});
 // On a thread that may block.
 while let Some(rows) = outbox.next_blocking() {
     let rows = rows?;

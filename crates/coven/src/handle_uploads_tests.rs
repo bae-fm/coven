@@ -113,11 +113,11 @@ async fn stopped(device: &Device) {
 
 /// Wait until the device records `failure` for an upload.
 async fn upload_failed(device: &Device, failure: StorageFailure) {
-    let mut pending: crate::LiveQuery<_, crate::CovenError> = device.handle.subscribe(|sql| {
-        Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
-            r.get::<_, PendingRecord>(0)
-        })?)
-    });
+    let mut pending: crate::LiveQuery<_, crate::CovenError> =
+        device.handle.subscribe(coven_database::test_utils::LiveSql::of(
+            "SELECT record FROM coven_pending ORDER BY position",
+            |r| r.get::<_, PendingRecord>(0),
+        ));
     tokio::time::timeout(HANG_GUARD, async {
         while !pending
             .next_inline()

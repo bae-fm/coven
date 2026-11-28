@@ -3763,12 +3763,14 @@ let moved = handle
   (`DbError::Bug`, E15): after that one, `next_blocking()` returns `None`, and
   never repeats it. The examples below call `next_blocking()` on a blocking
   thread for brevity; a program with no runtime calls it alone.
-- A read and a live query fail with their closure's own error type, as a
-  write does (E3): Ana's music app's closures return its `LibraryError`, and
-  its live query of albums delivers one. The type takes coven's `DbError`
-  with `From` and says which bug it carries (E15). `process` fails with the
-  same type. An app with no error type of its own uses `CovenError`, and
-  names it as a live query's: `LiveQuery<Vec<String>, CovenError>`.
+- A read fails with its closure's own error type, as a write does (E3), and
+  a live query with the error type its caller names: Ana's music app's
+  closures return its `LibraryError`, and its live query of albums, a
+  `LiveQuery<_, LibraryError>`, delivers one. The type takes coven's
+  `DbError` with `From` and says which bug it carries (E15). `process` fails
+  with the same type. An app with no error type of its own uses
+  `CovenError`, and names it as a live query's:
+  `LiveQuery<Vec<String>, CovenError>`.
 - Each screen is one live query over the local database, its SQL returning the
   rows the screen draws in the order it draws them, with their counts
   ([§4.1](coven.md#41-showing-data)). Writes go to the database and live
@@ -3777,9 +3779,20 @@ let moved = handle
   filters by lives in a local table that local triggers keep in the same write.
   Only values with no table, such as progress, stay in memory, each on its own
   stream.
-- The closure passed to `read` or `subscribe` runs SQL while it holds its read
-  snapshot and a reader connection; `process` maps the result to the app's types
-  after the connection is released.
+- The closure passed to `read` runs SQL while it holds its read snapshot and a
+  reader connection, and a live query runs its statements the same way;
+  `process` maps the result to the app's types after the connection is
+  released.
+- A live query runs compiled reads alone (`read!`, [§4.2](coven.md#42-compiled-statements)):
+  one, two on one snapshot (`Both`), or a read of coven's own tables that
+  coven gives, such as `SyncStatus::live()`, and a request with nothing to
+  read reads none (`Maybe`). A list whose sort picks one of several
+  statements reads each one's rows as one type (`ReadAs`). A one-shot read
+  runs the same reads with `SqlReadContext::reads`. Each statement takes its values
+  from its own parameters, and no Rust runs between two statements, so a
+  live query can't take one statement's values from another's rows. A
+  screen whose rows depend on other rows reads them in one statement. A
+  one-shot read takes a closure, which may run any SQL.
 - Table-backed built-in reads work offline. Each `subscribe_x()` counterpart reports the same
   committed data and later changes as its corresponding one-shot read.
 - Upload progress counts provider-confirmed parts; file progress counts verified bytes
@@ -3869,22 +3882,21 @@ let moved = handle
   stored. The tables in memory behind these views are coven's own: app SQL that
   reads one fails with `InternalTable`.
 - `coven_sync_state` and `coven_upload_phases` are the two views whose rows
-  coven's own code computes. `coven_sync_state` reads the facts coven
-  computes the sync state from and passes them to `_coven_sync_state`, which
-  runs the computation that the Lean model of
-  [§19.1](coven.md#191-what-the-app-sees) checks. A status screen reads the view
-  beside its own rows in its live query, which runs again whenever one of
-  those facts changes, a transfer starting or ending included, and gives the
-  current state as its first value. `SyncStatus::read` reads the view's row
-  as a `SyncStatus`. `coven_upload_phases` passes each queued upload's facts
-  to `_coven_upload_phase`, which runs the computation of its phase that
-  `uploads()` runs and the Lean model of
-  [§17.9](coven.md#179-uploads) checks, so a screen that lists files reads
-  what each upload is doing beside its own rows, and its live query runs
-  again as the pause, the network, a send, a retry or a record changes it.
-  A read of either view on a read-only handle fails with
-  `StatementForbidden`, as a read of `coven_sync_status` does (E5), and
-  gives no row.
+  coven's own code computes. `coven_sync_state` reads the facts coven computes
+  the sync state from and passes them to `_coven_sync_state`, which runs the
+  computation that the Lean model of [§19.1](coven.md#191-what-the-app-sees)
+  checks. A status screen reads the view beside its own rows in its live query,
+  which runs again whenever one of those facts changes, a transfer starting or
+  ending included, and gives the current state as its first value.
+  `SyncStatus::read` reads the view's row as a `SyncStatus` once, and
+  `SyncStatus::live()` follows it in a live query. `coven_upload_phases` passes
+  each queued upload's facts to `_coven_upload_phase`, which runs the
+  computation of its phase that `uploads()` runs and the Lean model of
+  [§17.9](coven.md#179-uploads) checks, so a screen that lists files reads what
+  each upload is doing beside its own rows, and its live query runs again as the
+  pause, the network, a send, a retry or a record changes it. A read of either
+  view on a read-only handle fails with `StatementForbidden`, as a read of
+  `coven_sync_status` does (E5), and gives no row.
 - Count what is being sent through `coven_sending`, which holds one row per
   upload in flight and finds each by index. Counting `sending` over
   `coven_uploads` reads every queued file.
@@ -4035,7 +4047,7 @@ let moved = handle
 | | `halted` | 1 once the upload worker's panic has halted sync until the store reopens (E15): no pass writes the row from then on, so the failure the halt wrote stands; opening writes 0 |
 | | `last_synced` | when a pass last reached the end of the sequence, or setup, joining or restoring finished, in milliseconds since the Unix epoch by the store's clock; never earlier than before; NULL until then |
 | | `starts` | how many times sync has started in this installation, the app's starts and the one setup makes alike; each start adds one in the step that starts it, so a trigger hears a start that holds for the reason the last one did, which changes no other column; 0 until sync first starts |
-| `coven_retry_effect`: what the person's retry would do if made now, in one row from the store's creation on (E5); a table, which local triggers can follow; not readable on a read-only handle | `effect` | `pass`, `cooling_down`, `failed` or `not_syncing`, computed from the columns below, read as `RetryEffect` with `RetryEffect::read`, or, in an app's own query that joins the view, with `RetryEffect::from_columns(effect, cooling_until)` |
+| `coven_retry_effect`: what the person's retry would do if made now, in one row from the store's creation on (E5); a table, which local triggers can follow; not readable on a read-only handle | `effect` | `pass`, `cooling_down`, `failed` or `not_syncing`, computed from the columns below, read as `RetryEffect` with `RetryEffect::read` once or `RetryEffect::live()` in a live query, or, in an app's own query that joins the view, with `RetryEffect::from_columns(effect, cooling_until)` |
 | | `syncing` | 1 while a started connection will plan |
 | | `held` | 1 while a failure only new credentials, an update or a reset can clear holds every pass |
 | | `cooling_until` | while syncing, when the provider cooldown holding every pass ends, in milliseconds since the Unix epoch by the store's clock, rounded up; NULL with no cooldown, and while stopped |
@@ -4053,7 +4065,7 @@ let moved = handle
 | | `reason_kind` | the kind of `PendingReason` the record gives, in snake case: `missing`, `waits`, `key_unavailable`, `original`, `paused`, `failed` and so on, one for each variant |
 | | `original_path` | for a record whose reason is `original`, the original's path as the operating system's bytes, the form `coven_user_files.path` holds, so a join on it finds the original's row; NULL otherwise |
 | | `id` | the row's key, which SQLite picks: it names the row for live queries and means nothing else |
-| `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write, or a pass refuses its request (E10) | `invite` | the invite with its stage, decoded with `operation` by `Invite::from_columns`, which `Invite::list` uses |
+| `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write, or a pass refuses its request (E10) | `invite` | the invite with its stage, decoded with `operation` by `Invite::from_columns`, which `Invite::list` and `Invite::live` use |
 | | `operation` | the invite's operation, which names its pending record in `coven_pending`, read as `i64` for `OperationId`; smallest first is the order the invites were made |
 | | `stage` | `granting` until the invite's code is shown, `waiting` while it waits for its request or the admin's decision, `approving` once the admin approved the request; as `InviteStage` names them |
 | | `request_member` | the member the invite's request names, as canonical UUID text and read as `MemberId`, once a request has arrived; NULL before |
@@ -4108,47 +4120,32 @@ Example:
 ```rust
 // The albums still uploading come first, one live query over the app's
 // tables and coven's queue.
-let albums: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query(
-        "SELECT a.title FROM albums AS a
-         ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
-                         ON u.file=p.file
-                         WHERE p.album_id=a.id) DESC, a.title",
-        [],
-        |row| row.get::<_, String>(0),
-    )?)
-});
+coven::read!(writer AlbumsUploadingFirst, r#"
+    SELECT a.title FROM albums AS a
+    ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
+                    ON u.file = p.file
+                    WHERE p.album_id = a.id) DESC, a.title
+"#);
+let albums: LiveQuery<_, CovenError> = handle.subscribe(AlbumsUploadingFirstParams {});
 ```
 
 ```rust
 // How many of an album's photos are going out now: a lookup per file being
 // sent, run again as each upload starts or ends.
-let mut sending: LiveQuery<_, CovenError> = handle.subscribe(move |sql| {
-    Ok(sql.query_row(
-        "SELECT count(*) FROM coven_sending AS s JOIN photos AS p ON s.file=p.file
-         WHERE p.album_id=?1",
-        [&album],
-        |row| row.get::<_, i64>(0),
-    )?)
-});
+coven::read!(writer AlbumSending(album: String), r#"
+    SELECT count(*) AS n FROM coven_sending AS s JOIN photos AS p ON s.file = p.file
+    WHERE p.album_id = :album
+"#);
+let mut sending: LiveQuery<_, CovenError> = handle.subscribe(AlbumSendingParams { album });
 ```
 
 ```rust
 // The photos that can't upload, each with its error.
-let mut failing: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query(
-        "SELECT e.record, e.cause, p.title FROM coven_pending AS e
-         JOIN photos AS p ON e.file=p.file",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, PendingRecord>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
-    )?)
-});
+coven::read!(writer FailingPhotos, r#"
+    SELECT e.record, e.cause, p.title FROM coven_pending AS e
+    JOIN photos AS p ON e.file = p.file
+"#);
+let mut failing: LiveQuery<_, CovenError> = handle.subscribe(FailingPhotosParams {});
 loop {
     failing.changed().await;
     let (failing_next, answer) = tokio::task::spawn_blocking(move || {
@@ -4197,7 +4194,54 @@ where
 /// `LiveQueryRevision`, `LiveQueryClosed`, `ReconfigurableLiveQueryEvent`,
 /// `LiveQueryCause` and, with test-utils, `LiveQueryRuns` are sqlive's, which
 /// coven re-exports (sqlive's spec, section 3). A `LiveQuery<T, E>` that
-/// coven returns fails with `E`, the query closure's own error type.
+/// coven returns fails with `E`, which its caller names.
+
+/// What a live query reads on each request (sealed): a compiled read of the
+/// writer (`read!`), whose rows it returns; two on one snapshot (`Both`),
+/// which return each one's rows; a read of coven's own tables that coven
+/// gives (`CovenRead`), such as `SyncStatus::live()`; one whose rows read
+/// as another type (`ReadAs`); or one of these only when there is one
+/// (`Maybe`).
+pub trait LiveReads: Send + Sync + 'static {
+    type Rows: Send + 'static;
+}
+impl<Q: coven::Read<Handle = Writer> + Send + Sync + 'static> LiveReads for Q {
+    type Rows = Vec<Q::Row>;
+}
+/// Two compiled reads that a live query runs on one snapshot: a concern's
+/// read that is too large for SQLite to prepare as one statement.
+pub struct Both<A, B>(pub A, pub B);
+impl<A, B> LiveReads for Both<A, B> {
+    type Rows = (Vec<A::Row>, Vec<B::Row>);
+}
+/// A read of coven's own tables, which coven gives for a live query and
+/// reads in one statement. `U` is what it returns of rows of `T`.
+pub struct CovenRead<T, U> { /* private fields */ }
+impl<T, U> LiveReads for CovenRead<T, U> {
+    type Rows = U;
+}
+/// A compiled read whose rows read as `R`: a list that one of several
+/// statements reads, as its sort picks, each with its own row type, reads
+/// its rows as one type whichever statement the request picks.
+pub struct ReadAs<R> { /* private fields */ }
+impl<R> ReadAs<R> {
+    /// `read`'s rows, each made an `R` by `row`. Fails when one of `read`'s
+    /// values doesn't bind.
+    pub fn new<Q: coven::Read<Handle = Writer> + 'static>(
+        read: &Q,
+        row: impl Fn(Q::Row) -> R + Send + Sync + 'static,
+    ) -> Result<ReadAs<R>, DbError>;
+}
+impl<R> LiveReads for ReadAs<R> {
+    type Rows = Vec<R>;
+}
+/// A read that runs only when there is one: a request with nothing to read,
+/// such as a detail pane with nothing selected, reads nothing and returns
+/// `None`, and the query runs again only for a new request.
+pub struct Maybe<S>(pub Option<S>);
+impl<S: LiveReads> LiveReads for Maybe<S> {
+    type Rows = Option<S::Rows>;
+}
 
 /// An open file with checked identity, header and range-reading state (§17.7).
 /// Retaining a stream prevents store deletion, including after the store closes.
@@ -4231,26 +4275,28 @@ impl CovenHandle {
         R: Send + 'static,
         E: From<DbError> + coven::task::CarriesBug + Send + 'static;
 
-    /// A live query. Coven records the tables and columns the query reads,
-    /// and the rows its conditions allow, and reruns it only for writes that
-    /// touch them. Its results fail with the closure's own error type.
-    pub fn subscribe<F, R, E>(&self, query: F) -> LiveQuery<R, E>
+    /// A live query of `reads` (`LiveReads`). Coven records the tables and
+    /// columns the reads read, and the rows their conditions allow, and
+    /// reruns them only for writes that touch them. Its results fail with
+    /// `E`, which the caller names.
+    pub fn subscribe<S, E>(&self, reads: S) -> LiveQuery<S::Rows, E>
     where
-        F: Fn(SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
+        S: LiveReads,
         E: From<DbError> + coven::task::CarriesBug + Send + 'static;
 
     /// A live query whose request, such as a page or a search term, can be
-    /// replaced without starting a new subscription.
-    pub fn subscribe_reconfigurable<Q, F, R, E>(
+    /// replaced without starting a new subscription: `reads` gives the
+    /// reads of each request, or the error that fails its run, such as a
+    /// request whose key doesn't decode. `process` gets the request with
+    /// the rows its run read.
+    pub fn subscribe_reconfigurable<Q, S, E>(
         &self,
         initial_request: Q,
-        query: F,
-    ) -> ReconfigurableLiveQuery<Q, R, E>
+        reads: impl Fn(&Q) -> Result<S, E> + Send + Sync + 'static,
+    ) -> ReconfigurableLiveQuery<Q, S::Rows, E>
     where
         Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
+        S: LiveReads,
         E: From<DbError> + coven::task::CarriesBug + Send + 'static;
 
     /// Every lost value and removed row, as `_coven_lost` holds them (§8.2, §8.4).
@@ -4298,6 +4344,13 @@ impl<M: Mode> SqlReadContext<'_, M> {
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+}
+
+impl SqlReadContext<'_, Writer> {
+    /// What `reads` returns, read once in this snapshot: the reads a live
+    /// query runs, run as a one-shot read, so a screen's read and its first
+    /// value are one value.
+    pub fn reads<S: LiveReads>(&self, reads: &S) -> Result<S::Rows, DbError>;
 }
 
 /// The reads `SqlReadContext`, `CovenWrite`, `BulkSqlContext` and
@@ -4711,13 +4764,10 @@ let titles: Vec<Title> = handle
     .process(|titles: Vec<String>| Ok(titles.into_iter().map(Title::new).collect()))
     .await?;
 
-let mut notes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query(
-        "SELECT id, title, audience FROM notes ORDER BY title",
-        [],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
-    )?)
-});
+coven::read!(writer NotesByTitle, r#"
+    SELECT n.id, n.title, n.audience FROM notes AS n ORDER BY n.title
+"#);
+let mut notes: LiveQuery<_, CovenError> = handle.subscribe(NotesByTitleParams {});
 loop {
     notes.changed().await;
     let (notes_next, answer) = tokio::task::spawn_blocking(move || {
@@ -4980,7 +5030,7 @@ loop {
     again, and uploads and pins report in `pending()`.
   - What `retry_now` would do if called now is the one row of
     `coven_retry_effect` (E4), which the app follows with a live query, as
-    `RetryEffect::read` reads it, or with a local trigger. `pass`: a pass runs
+    `RetryEffect::live()` reads it, or with a local trigger. `pass`: a pass runs
     and its end answers the retry. `cooling_down` with `cooling_until`,
     `failed` and `not_syncing`: the retry gets that answer at once, with no
     pass. The row holds what decides it, whether sync is started, whether such
@@ -6525,9 +6575,11 @@ impl SyncStatus {
     /// `last_synced` the clock can't name is `DamagedDatabase`.
     pub fn from_columns(state: SyncState, last_synced: Option<i64>) -> Result<SyncStatus, DbError>;
     /// The sync state and when sync last finished, as `coven_sync_state`
-    /// shows them in the caller's read, for a live query that reads only the
-    /// view.
+    /// shows them in the caller's read, for a one-shot read.
     pub fn read(sql: SqlReadContext<'_>) -> Result<SyncStatus, DbError>;
+    /// The same row, for a live query that reads only the view:
+    /// `handle.subscribe(SyncStatus::live())`.
+    pub fn live() -> CovenRead<(SyncState, Option<i64>), SyncStatus>;
 }
 
 /// A closed store's sync status, as `Coven::closed_sync_status` reads it
@@ -6795,8 +6847,10 @@ impl RetryEffect {
     /// `cooling_until` columns, which `from_columns` decodes. An app composes
     /// it into its own reads.
     pub const READ: &'static str;
-    /// Reads `coven_retry_effect`: `handle.subscribe(RetryEffect::read)`.
+    /// Reads `coven_retry_effect` once: `handle.read(RetryEffect::read)`.
     pub fn read(sql: SqlReadContext<'_>) -> Result<RetryEffect, DbError>;
+    /// The same row, for a live query: `handle.subscribe(RetryEffect::live())`.
+    pub fn live() -> CovenRead<(String, Option<i64>), RetryEffect>;
     /// The effect `coven_retry_effect`'s `effect` and `cooling_until` columns
     /// name, for an app's own query that reads them; `read` calls it. A pair
     /// the view never computes is an error.
@@ -6889,7 +6943,7 @@ match handle.setup_s3_storage(storage, access_key_id, secret, show_setup_step).a
 
 // The sync state, as a live query of `coven_sync_state` follows it; the
 // first value is the current state.
-let mut status = handle.subscribe(|sql| Ok::<_, CovenError>(SyncStatus::read(sql)?));
+let mut status: LiveQuery<_, CovenError> = handle.subscribe(SyncStatus::live());
 loop {
     status.changed().await;
     let (status_next, answer) = tokio::task::spawn_blocking(move || {
@@ -7454,16 +7508,12 @@ Example:
 ```rust
 // The outbox as a live query over coven's views (E4): each queued photo,
 // whether it is being sent, and the bytes the provider confirmed.
-let mut outbox: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query(
-        "SELECT p.title, u.sending, u.bytes_confirmed, u.bytes_total
-         FROM coven_uploads AS u JOIN photos AS p ON u.file=p.file
-         ORDER BY u.position",
-        [],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?,
-                  row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?)),
-    )?)
-});
+coven::read!(writer Outbox, r#"
+    SELECT p.title, u.sending, u.bytes_confirmed, u.bytes_total
+    FROM coven_uploads AS u JOIN photos AS p ON u.file = p.file
+    ORDER BY u.position
+"#);
+let mut outbox: LiveQuery<_, CovenError> = handle.subscribe(OutboxParams {});
 loop {
     outbox.changed().await;
     let (outbox_next, answer) = tokio::task::spawn_blocking(move || {
@@ -9377,8 +9427,11 @@ impl Invite {
     pub const LIST: &'static str;
 
     /// Reads `coven_invites`, in the order the invites were made, for a
-    /// read or a live query: `handle.subscribe(Invite::list)`.
+    /// one-shot read: `handle.read(Invite::list)`.
     pub fn list<M: Mode>(sql: SqlReadContext<'_, M>) -> Result<Vec<Invite>, DbError>;
+
+    /// The same list, for a live query: `handle.subscribe(Invite::live())`.
+    pub fn live() -> CovenRead<Invite, Vec<Invite>>;
 
     /// Decodes one invite from the `invite` and `operation` columns of a
     /// `coven_invites` row, for a statement that selects them beside other
@@ -10174,7 +10227,7 @@ let (invite, _, _) = handle
     )
     .await?;
 
-let mut invites = handle.subscribe(Invite::list);
+let mut invites: LiveQuery<_, CovenError> = handle.subscribe(Invite::live());
 let mut sent = false;
 loop {
     invites.changed().await;

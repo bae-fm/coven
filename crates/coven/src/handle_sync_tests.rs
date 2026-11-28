@@ -793,10 +793,9 @@ async fn a_view_record_arrives_with_its_cause() {
     let mut faults = Faults::none();
     faults.create_failures.insert(path, (StorageFailure::QuotaExceeded, 507));
     device.storage.set_faults(faults).await;
-    let mut list: crate::LiveQuery<_, crate::CovenError> = device.handle.subscribe(|sql| {
-        Ok(sql.query(
+    let mut list: crate::LiveQuery<_, crate::CovenError> =
+        device.handle.subscribe(coven_database::test_utils::LiveSql::of(
             "SELECT e.record,e.cause,f.id FROM coven_pending AS e JOIN files AS f ON f.file=e.file",
-            [],
             |row| {
                 Ok((
                     row.get::<_, PendingRecord>(0)?,
@@ -804,8 +803,7 @@ async fn a_view_record_arrives_with_its_cause() {
                     row.get::<_, String>(2)?,
                 ))
             },
-        )?)
-    });
+        ));
     device.handle.set_uploads_paused(false).await.unwrap();
     let (record, cause, id) = tokio::time::timeout(HANG_GUARD, async {
         loop {
@@ -832,9 +830,8 @@ async fn a_view_record_arrives_with_its_cause() {
 /// Every pending record as the app's SQL reads it from `coven_pending`,
 /// as a live query (E4).
 fn subscribe_records(handle: &CovenHandle) -> LiveQuery<Vec<PendingRecord>, crate::CovenError> {
-    handle.subscribe(|sql| {
-        Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
-            r.get::<_, PendingRecord>(0)
-        })?)
-    })
+    handle.subscribe(coven_database::test_utils::LiveSql::of(
+        "SELECT record FROM coven_pending ORDER BY position",
+        |r| r.get::<_, PendingRecord>(0),
+    ))
 }

@@ -475,18 +475,24 @@ or its handle failed: after it, `next_blocking()` returns `None`, so a loop over
 it ends. Dropping the `LiveQuery` ends it.
 
 ```rust
-let mut notes: LiveQuery<_, CovenError> =
-    handle.subscribe(|sql| Ok(sql.fetch(&NoteListParams {})?));
+let mut notes: LiveQuery<_, CovenError> = handle.subscribe(NoteListParams {});
 while let Some(Ok(rows)) = notes.next_blocking() {
     show_notes(rows);
 }
 ```
 
-`handle.subscribe_reconfigurable(request, query)` takes a request, such as a
+A live query runs compiled reads alone: one, or two that read one snapshot,
+`handle.subscribe(Both(first, second))`. No Rust runs between its statements,
+so one statement can't take its values from another's rows: a screen whose
+rows depend on other rows reads them in one statement. A one-shot read,
+`handle.read`, takes a closure and may run any SQL.
+
+`handle.subscribe_reconfigurable(request, reads)` takes a request, such as a
 page number or a search term, that the app can replace through
-`requests().set(..)` without starting a new subscription. Each result says
-which request and revision it answers, and whether a new request, a write, or
-both caused it.
+`requests().set(..)` without starting a new subscription, and `reads` gives the
+reads of each request, or the error that fails its run. Its `process` gets the
+request with the rows its run read. Each result says which request and revision it answers,
+and whether a new request, a write, or both caused it.
 
 A screen's read is the live query and nothing else. Everything the screen shows
 comes from SQL: the rows, and beside them any count, total, group, header, sum
@@ -514,13 +520,10 @@ coven::read!(writer NotesFrom(from: String), r#"
 "#);
 coven::read!(writer NoteCount { n: i64 }, r#"SELECT count(*) AS n FROM notes AS counted"#);
 
-let window = |from: &String, sql: SqlReadContext<'_>| {
-    Ok::<_, CovenError>(sql.fetch(&NotesFromParams { from: from.clone() })?)
-};
-let top = handle.subscribe_reconfigurable(String::new(), window);
-// The count, read by itself.
-let count: LiveQuery<_, CovenError> =
-    handle.subscribe(|sql| Ok(sql.fetch_row(&NoteCountParams {})?.n));
+let window = |from: &String| Ok(NotesFromParams { from: from.clone() });
+let top = handle.subscribe_reconfigurable::<_, _, CovenError>(String::new(), window);
+// The count, read by itself: one row, whose `n` is the count.
+let count: LiveQuery<_, CovenError> = handle.subscribe(NoteCountParams {});
 ```
 
 A write that adds a row reruns `count`, and reruns the window only when the
@@ -591,8 +594,7 @@ coven::read!(writer DeviceBytes { bytes: i64 }, r#"
          + (SELECT coalesce(sum(a.bytes), 0) FROM coven_archive_bytes AS a) AS bytes
 "#);
 
-let device_bytes: LiveQuery<_, CovenError> =
-    handle.subscribe(|sql| Ok(sql.fetch_row(&DeviceBytesParams {})?.bytes));
+let device_bytes: LiveQuery<_, CovenError> = handle.subscribe(DeviceBytesParams {});
 ```
 
 The file views and tables name a file by its id, the id the app's file
@@ -606,8 +608,7 @@ coven::read!(writer UploadingFirst, r#"
                     WHERE p.album_id = a.id) DESC, a.title
 "#);
 
-let uploading_first: LiveQuery<_, CovenError> =
-    handle.subscribe(|sql| Ok(sql.fetch(&UploadingFirstParams {})?));
+let uploading_first: LiveQuery<_, CovenError> = handle.subscribe(UploadingFirstParams {});
 ```
 
 Each view is a query over coven's own tables, so it is never out of date, and a
@@ -630,10 +631,8 @@ coven::read!(writer SyncLine { state: String }, r#"
     SELECT s.state FROM coven_sync_state AS s
 "#);
 
-let screen: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    let state = sql.fetch_row(&SyncLineParams {})?.state;
-    Ok((state, sql.fetch(&NoteListParams {})?))
-});
+let screen: LiveQuery<_, CovenError> =
+    handle.subscribe(Both(SyncLineParams {}, NoteListParams {}));
 ```
 
 `coven_pins` is a table rather than a view so the app can follow it: a local
@@ -678,9 +677,7 @@ coven::read!(writer SendingOfAlbum(album: String) { n: i64 }, r#"
     WHERE p.album_id = :album
 "#);
 
-let of_album = SendingOfAlbumParams { album };
-let sending: LiveQuery<_, CovenError> =
-    handle.subscribe(move |sql| Ok(sql.fetch_row(&of_album)?.n));
+let sending: LiveQuery<_, CovenError> = handle.subscribe(SendingOfAlbumParams { album });
 ```
 
 The bytes the provider has confirmed do last, so `coven_uploads` gives them as

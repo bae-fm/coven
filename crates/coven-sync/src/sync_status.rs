@@ -695,9 +695,27 @@ impl SyncStatus {
     /// The sync state and when sync last finished, as `coven_sync_state`
     /// shows them in the caller's read.
     pub fn read(sql: SqlReadContext<'_>) -> Result<Self, DbError> {
-        let (state, last_synced) =
-            sql.query_row(Self::READ, [], |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?)))?;
+        let (state, last_synced) = sql.query_row(Self::READ, [], Self::columns)?;
         Self::from_columns(state, last_synced)
+    }
+
+    /// `coven_sync_state` as a live query follows it:
+    /// `handle.subscribe(SyncStatus::live())`, which `read` reads once.
+    pub fn live() -> coven_database::CovenRead<(SyncState, Option<i64>), Self> {
+        coven_database::CovenRead::new(Self::READ, coven_database::unbound, Self::columns).then(
+            |mut rows| {
+                let (state, last_synced) =
+                    rows.pop().ok_or(coven_database::SqliteError::QueryReturnedNoRows)?;
+                Self::from_columns(state, last_synced)
+            },
+        )
+    }
+
+    /// The columns of `READ`'s row.
+    fn columns(
+        row: &coven_database::Row<'_>,
+    ) -> coven_database::SqliteResult<(SyncState, Option<i64>)> {
+        Ok((row.get(0)?, row.get(1)?))
     }
 
     /// A closed store's sync status (api.md E1, E5): the state opening shows

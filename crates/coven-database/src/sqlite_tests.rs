@@ -373,9 +373,13 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
     let store = TestStore::new();
     let db=store.schema(vec![SyncedTable::new("roots",RowIdentity::SharedKey),SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],"CREATE TABLE roots(id TEXT NOT NULL PRIMARY KEY,value TEXT); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT,root TEXT REFERENCES roots(id)); CREATE INDEX notes_root ON notes(root); CREATE TABLE audit(id INTEGER PRIMARY KEY, value TEXT); CREATE TRIGGER gone AFTER DELETE ON notes BEGIN INSERT INTO audit VALUES(NULL,old.title); END").await.unwrap();
     let mut notes: crate::LiveQuery<_, DbError> = db
-        .subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
+        .subscribe(crate::test_utils::LiveSql::of("SELECT title FROM notes", |r| {
+            r.get::<_, String>(0)
+        }));
     let mut audit: crate::LiveQuery<_, DbError> = db
-        .subscribe(|sql| Ok(sql.query("SELECT value FROM audit", [], |r| r.get::<_, String>(0))?));
+        .subscribe(crate::test_utils::LiveSql::of("SELECT value FROM audit", |r| {
+            r.get::<_, String>(0)
+        }));
     let mut lost = db.subscribe_lost_values::<DbError>();
     assert!(next(&mut notes).await.is_empty());
     assert!(next(&mut audit).await.is_empty());
@@ -464,9 +468,10 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
         let store = TestStore::new();
         let open = || store.builder(notes_tables(), notes_migrations()).open();
         let db = open().await.unwrap();
-        let mut notes = db.subscribe(|sql| {
-            Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
-        });
+        let mut notes = db
+            .subscribe(crate::test_utils::LiveSql::of("SELECT title FROM notes", |r| {
+                r.get::<_, String>(0)
+            }));
         assert!(next(&mut notes).await.is_empty());
         db.inspect_writer(|writer, _| writer.refuse_transaction_end(true));
         // Neither transaction changes pending state; each fails after a change

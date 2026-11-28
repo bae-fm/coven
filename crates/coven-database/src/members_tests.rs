@@ -316,7 +316,9 @@ fn device_rows<M: crate::Mode>(
 async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let mut members = db.subscribe(member_rows);
+    let followed = |r: &crate::Row<'_>| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?));
+    let mut members: crate::LiveQuery<Vec<MemberRow>, DbError> =
+        db.subscribe(crate::test_utils::LiveSql::of(MEMBERS, followed));
     assert!(members.next_inline().await.expect("the live query answers").unwrap().is_empty());
     fixture(&db).await;
     let mut expected = vec![

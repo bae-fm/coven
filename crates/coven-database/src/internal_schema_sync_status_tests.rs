@@ -15,6 +15,14 @@ fn row(db: &crate::sqlite::StoreSql) -> Result<SyncStatusRow, DbError> {
     crate::internal_schema::sync_status::read(db)
 }
 
+/// The row of `coven_sync_status`, as a live query follows it.
+fn followed_row() -> crate::CovenRead<Result<SyncStatusRow, DbError>, SyncStatusRow> {
+    let sql = "SELECT storage,provider,last_pass,moved,last_synced FROM coven_sync_status";
+    let decoded = |row: &crate::Row<'_>| Ok(crate::internal_schema::sync_status::decode(row, 0));
+    crate::CovenRead::new(sql, crate::unbound, decoded)
+        .then(|rows| rows.into_iter().next().ok_or(crate::SqliteError::QueryReturnedNoRows)?)
+}
+
 fn at(millis: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
 }
@@ -36,7 +44,7 @@ async fn a_new_store_reads_no_storage_set_up() {
     let store = TestStore::new();
     let db =
         store.builder(notes_tables(), crate::test_utils::notes_migrations()).open().await.unwrap();
-    let mut rows = db.follow(row);
+    let mut rows = db.follow::<_, _, DbError>(followed_row());
     assert_eq!(
         rows.next_inline().await.unwrap().unwrap(),
         SyncStatusRow {
@@ -54,9 +62,11 @@ async fn a_new_store_reads_no_storage_set_up() {
     db.close().await.unwrap();
 }
 
-/// The location as the row holds it.
-fn location(db: &crate::sqlite::StoreSql) -> Result<Option<String>, DbError> {
-    Ok(db.query_row("SELECT location FROM coven_sync_status", [], |r| r.get(0))?)
+/// The location as the row holds it, as a live query follows it.
+fn location() -> crate::CovenRead<Option<String>, Option<String>> {
+    let sql = "SELECT location FROM coven_sync_status";
+    crate::CovenRead::new(sql, crate::unbound, |r| r.get(0))
+        .then(|rows| Ok(rows.into_iter().next().ok_or(crate::SqliteError::QueryReturnedNoRows)?))
 }
 
 /// Ben renames Household's folder to Family. Ana's laptop records the new
@@ -73,7 +83,7 @@ async fn a_new_label_rewrites_the_location() {
             location: format!("{{\"Dropbox\":{{\"folder\":\"{folder}\"}}}}"),
         })
     };
-    let mut locations = db.follow(location);
+    let mut locations = db.follow::<_, _, DbError>(location());
     assert_eq!(locations.next_inline().await.unwrap().unwrap(), None);
     db.record_opened(labelled("Household"), None).await.unwrap();
     let household = locations.next_inline().await.unwrap().unwrap();
@@ -131,11 +141,10 @@ async fn a_local_trigger_follows_each_change_of_the_row() {
         .open()
         .await
         .unwrap();
-    let mut log: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query("SELECT storage,moved FROM status_log ORDER BY id", [], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })?)
-    });
+    let mut log: crate::LiveQuery<_, DbError> = db.subscribe(crate::test_utils::LiveSql::of(
+        "SELECT storage,moved FROM status_log ORDER BY id",
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+    ));
     assert!(log.next_inline().await.unwrap().unwrap().is_empty());
     db.record_opened(connected(), None).await.unwrap();
     db.record_opened(connected(), None).await.unwrap();

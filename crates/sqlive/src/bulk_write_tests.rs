@@ -1,7 +1,5 @@
-use crate::tests::{next, QueryError, TestDatabase, TestOptions};
+use crate::tests::{first, next, no_values, QueryError, TestDatabase, TestOptions};
 use crate::LiveQuery;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 /// A captured table of notes beside uncaptured ones: `queue`, `other`,
 /// `logged_queue` with the `logged` table its delete trigger writes, and
@@ -39,18 +37,10 @@ fn count(db: &TestDatabase, table: &str) -> i64 {
     db.value(&format!("SELECT count(*) FROM {table}"))
 }
 
-/// A live query counting `table`'s rows, and how many times it has run.
-fn counting(
-    db: &TestDatabase,
-    table: &'static str,
-) -> (LiveQuery<i64, QueryError>, Arc<AtomicUsize>) {
-    let runs = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&runs);
-    let live = db.subscribe(move |sql| {
-        counted.fetch_add(1, Ordering::SeqCst);
-        Ok(sql.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?)
-    });
-    (live, runs)
+/// A live query counting `table`'s rows.
+fn counting(db: &TestDatabase, table: &'static str) -> LiveQuery<i64, QueryError> {
+    db.subscribe_rows(format!("SELECT count(*) FROM {table}"), no_values(), |r| r.get(0))
+        .process(first)
 }
 
 /// With no pre-update hook watching, SQLite empties a table without a
@@ -79,8 +69,8 @@ fn clearing_a_table_takes_one_step() {
 async fn live_queries_rerun_for_the_tables_a_bulk_write_changed() {
     let db = open();
     db.bulk(&fill("queue", ROWS)).unwrap();
-    let (mut queue, queue_runs) = counting(&db, "queue");
-    let (mut other, other_runs) = counting(&db, "other");
+    let mut queue = counting(&db, "queue");
+    let mut other = counting(&db, "other");
     assert_eq!(next(&mut queue).await, ROWS);
     assert_eq!(next(&mut other).await, 0);
     db.bulk("DELETE FROM queue").unwrap();
@@ -88,9 +78,9 @@ async fn live_queries_rerun_for_the_tables_a_bulk_write_changed() {
     assert!(queue.is_marked_for_rerun());
     assert!(!other.is_marked_for_rerun());
     assert_eq!(next(&mut queue).await, 0);
-    assert_eq!(queue_runs.load(Ordering::SeqCst), 2);
+    assert_eq!(queue.runs().runs(), 2);
     assert!(!queue.is_marked_for_rerun());
-    assert_eq!(other_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(other.runs().runs(), 1);
     db.close();
 }
 
@@ -100,12 +90,12 @@ async fn live_queries_rerun_for_the_tables_a_bulk_write_changed() {
 async fn a_trigger_writing_a_table_reruns_its_live_queries() {
     let db = open();
     db.bulk(&fill("logged_queue", 3)).unwrap();
-    let (mut logged, runs) = counting(&db, "logged");
+    let mut logged = counting(&db, "logged");
     assert_eq!(next(&mut logged).await, 0);
     db.bulk("DELETE FROM logged_queue").unwrap();
     assert!(logged.is_marked_for_rerun());
     assert_eq!(next(&mut logged).await, 3);
-    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    assert_eq!(logged.runs().runs(), 2);
     db.close();
 }
 
@@ -116,11 +106,11 @@ async fn a_foreign_key_action_reruns_its_tables_live_queries() {
     let db = open();
     db.bulk("INSERT INTO lanes VALUES(1); INSERT INTO lane_tracks VALUES(1, 'a'), (1, 'b')")
         .unwrap();
-    let (mut tracks, runs) = counting(&db, "lane_tracks");
+    let mut tracks = counting(&db, "lane_tracks");
     assert_eq!(next(&mut tracks).await, 2);
     db.bulk("DELETE FROM lanes").unwrap();
     assert!(tracks.is_marked_for_rerun());
     assert_eq!(next(&mut tracks).await, 0);
-    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    assert_eq!(tracks.runs().runs(), 2);
     db.close();
 }

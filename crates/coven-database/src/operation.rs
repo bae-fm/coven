@@ -305,11 +305,18 @@ pub(crate) fn read(db: &StoreSql) -> Result<Vec<OperationRecord>, DbError> {
 }
 
 pub(crate) fn of_kind(db: &StoreSql, kind: &str) -> Result<Vec<OperationRecord>, DbError> {
-    Ok(db.host_live_read(
+    crate::live_reads::once(&of_kind_read(kind.to_owned()), db)
+}
+
+/// The unfinished rows of `kind`, by id.
+pub(crate) fn of_kind_read(
+    kind: String,
+) -> crate::live_reads::CovenRead<OperationRecord, Vec<OperationRecord>> {
+    crate::live_reads::CovenRead::new(
         "SELECT id,kind,last_step,data,started_by FROM _coven_operations WHERE kind=?1 ORDER BY id",
-        [kind],
+        move || crate::live_reads::bound(&[&kind]),
         record,
-    )?)
+    )
 }
 
 pub(crate) fn find(db: &StoreSql, id: OperationId) -> Result<Option<OperationRecord>, DbError> {

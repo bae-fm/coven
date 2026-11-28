@@ -47,18 +47,18 @@ pub use coven_database::test_utils::{
 pub use coven_database::LiveQueryRuns;
 pub use coven_database::{
     named_params, params, prepare_user_file, sqlite_error_is_disk, types, unix_seconds_and_nanos,
-    Binding, BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CommitSql, CompiledStatement,
-    CovenSchemaError, DbError, Determinism, FileColumn, FileLocation, FilePlace, FileRef,
-    FileSource, FunctionArguments, Joining, JoiningWrite, LiveQuery, LiveQueryCause,
-    LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, LoadStep, Lost, LostCell, LostValue,
-    Migration, MigrationContext, MigrationError, Mode, MoveFile, MoveId, Namespace, OldWrites,
-    OpenStep, Params, PendingRead, Place, PreparedDeviceOnly, PreparedPin, PreparedUserFile,
-    Provenance, ReadOnly, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule,
-    Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError,
-    SnapshotError, SqlRead, SqlReadContext, SqlWrite, SqliteError, SqliteResult, StagedFiles,
-    SyncedTable, TemporaryDirectoryError, ToSql, TransferChange, TransferEnd, TransferProgress,
-    TransferWatch, UnsentWork, UserFile, WriteBatch, WriteFailure, WriteId, WritePermission,
-    WriteWait, Writer, BOUND_FILE_LIMIT,
+    Binding, Both, BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CommitSql,
+    CompiledStatement, CovenRead, CovenSchemaError, DbError, Determinism, FileColumn, FileLocation,
+    FilePlace, FileRef, FileSource, FunctionArguments, Joining, JoiningWrite, LiveQuery,
+    LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, LiveReads, LoadStep,
+    Lost, LostCell, LostValue, Maybe, Migration, MigrationContext, MigrationError, Mode, MoveFile,
+    MoveId, Namespace, OldWrites, OpenStep, Params, PendingRead, Place, PreparedDeviceOnly,
+    PreparedPin, PreparedUserFile, Provenance, ReadAs, ReadOnly, ReconfigurableLiveQuery,
+    ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
+    RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlRead, SqlReadContext, SqlWrite,
+    SqliteError, SqliteResult, StagedFiles, SyncedTable, TemporaryDirectoryError, ToSql,
+    TransferChange, TransferEnd, TransferProgress, TransferWatch, UnsentWork, UserFile, WriteBatch,
+    WriteFailure, WriteId, WritePermission, WriteWait, Writer, BOUND_FILE_LIMIT,
 };
 pub use coven_database::{SchemaDiffers, UndecodablePlan};
 #[cfg(any(test, feature = "test-utils"))]

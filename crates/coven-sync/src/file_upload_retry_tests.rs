@@ -789,14 +789,12 @@ async fn a_pending_records_cause_arrives_with_it_in_the_view() {
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     f.attach("files", "photo", b"photo".to_vec()).await;
-    let mut viewed: coven_database::LiveQuery<_, DbError> = f.database.subscribe(|sql| {
-        Ok(sql.query(
+    let mut viewed: coven_database::LiveQuery<_, DbError> =
+        f.database.subscribe(coven_database::test_utils::LiveSql::of(
             "SELECT p.record,p.cause FROM coven_pending AS p
              JOIN files AS f ON f.file=p.file WHERE f.id='photo'",
-            [],
             |row| Ok((row.get::<_, crate::PendingRecord>(0)?, row.get::<_, Option<String>>(1)?)),
-        )?)
-    });
+        ));
     let mut next = async || viewed.next_inline().await.expect("the live query answers").unwrap();
     assert!(next().await.is_empty());
     f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;

@@ -27,8 +27,7 @@ coven::write!(AddNote(id: coven::UuidText, title: String), r#"
 "#);
 
 handle.write(move |sql| Ok::<_, CovenError>(sql.run(&AddNoteParams { id, title })?)).await?;
-let titles: LiveQuery<_, CovenError> =
-    handle.subscribe(|sql| Ok(sql.fetch(&NoteTitlesParams {})?));
+let titles: LiveQuery<_, CovenError> = handle.subscribe(NoteTitlesParams {});
 ```
 
 SQL strings work too, with `sql.query` and `sql.execute`, for statements an app

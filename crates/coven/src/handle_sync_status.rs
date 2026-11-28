@@ -12,9 +12,7 @@ impl CovenHandle {
     /// app does (E4, E5).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn test_sync_status(&self) -> coven_database::test_utils::Followed<SyncStatus, CovenError> {
-        coven_database::test_utils::Followed::new(
-            self.database.subscribe(|sql| SyncStatus::read(sql).map_err(CovenError::from)),
-        )
+        coven_database::test_utils::Followed::new(self.database.subscribe(SyncStatus::live()))
     }
     /// Follow `coven_sync_status.last_pass` with a live query, as an app's
     /// SQL does (E4): `None` until a pass ends on this device.

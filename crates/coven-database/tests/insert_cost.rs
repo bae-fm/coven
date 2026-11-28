@@ -198,11 +198,10 @@ async fn import(files: bool, live: bool) -> Duration {
         write_releases(&db, files, watched..watched + 1).await;
         for sql in JOINED {
             let album = uuid(1, watched);
-            let mut query = db.subscribe(move |read| {
-                Ok::<_, DbError>(
-                    read.query(sql, [&album], |r| r.get::<_, coven_database::types::Value>(0))?,
-                )
-            });
+            let mut query: coven_database::LiveQuery<_, DbError> =
+                db.subscribe(coven_database::test_utils::LiveSql::new(sql, &[&album], |r| {
+                    r.get::<_, coven_database::types::Value>(0)
+                }));
             assert!(!query.next_inline().await.unwrap().unwrap().is_empty(), "{sql}");
             queries.push(query);
         }
@@ -273,10 +272,10 @@ async fn a_joined_live_querys_run_cost() {
         write_releases(&db, false, write * RELEASES..(write + 1) * RELEASES).await;
     }
     for (index, sql) in JOINED.into_iter().enumerate() {
-        let mut query = db.subscribe_reconfigurable(uuid(1, 0), move |album: &String, read| {
-            Ok::<_, DbError>(
-                read.query(sql, [album], |r| r.get::<_, coven_database::types::Value>(0))?,
-            )
+        let mut query = db.subscribe_reconfigurable::<_, _, DbError>(uuid(1, 0), move |album| {
+            Ok(coven_database::test_utils::LiveSql::new(sql, &[album], |r| {
+                r.get::<_, coven_database::types::Value>(0)
+            }))
         });
         assert!(!query.next_inline().await.unwrap().result.unwrap().is_empty(), "{sql}");
         let requests = query.requests();

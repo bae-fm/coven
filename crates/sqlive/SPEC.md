@@ -135,10 +135,9 @@ panic.
   one past those is prepared again. Preparing has effects beyond judging in a
   migration, in a bulk write and in the host's local scope, and as a connection
   opens, so sqlive prepares the app's statements afresh there each time. A live
-  query's run reads the values bound to a statement, which narrow what the
-  statement reads (section 4), through a `VALUES` statement that the
-  connection keeps prepared too; any other run binds them to the statement
-  alone. An app statement whose triggers read a view of six tables took 16 µs
+  query's run takes each statement's values from the host, as `Values`, binds
+  them to the statement, and narrows what the statement reads by them
+  (section 4). An app statement whose triggers read a view of six tables took 16 µs
   to prepare and runs from the cache in about 3 µs.
 - **ANALYZE in a write.** App SQL in a write can't run `ANALYZE`, and fails
   with `StatementForbidden`: a write's capture records every table it admits,
@@ -256,7 +255,14 @@ first request, the query's run, how its error type holds sqlive's errors, the
 handle and where bugs go; `LiveQuery::new` wraps one whose request never
 changes. A run takes the request, reads on a reader inside `live_read`, and
 releases the reader before it returns, handing sqlive what its statements read.
-A one-shot read records nothing of what it reads: nothing runs it again. Both
+`live_read` takes the run's statements, each a `LiveStatement` with the values
+it binds, runs them in order on one snapshot, and hands each row to the host
+with the statement's place in the list. A run runs no other SQL, so no
+statement's values can come from another's rows.
+A one-shot read records nothing of what it reads: nothing runs it again.
+`HostSql::once_rows` runs one `LiveStatement` that way, so a host reads once
+what a live query reads; it builds no plan, and a compiled read whose plan
+doesn't fit the schema still fails. Both
 run only their own statements; the writes that change a joined table run the
 lookups that judge them (section 7).
 
@@ -289,10 +295,9 @@ it, so a loop over the query ends. sqlive doesn't know what a run that panicked
 read, so no commit could tell whether to run it again. The error type says
 whether it carries a bug (`CarriesBug`).
 
-The run's closure only runs SQL, and holds its read snapshot and a reader
-connection while it runs. `process` maps each result to the program's types
-after the run releases the connection, and compares the processed values to
-tell an equal result.
+The run holds its read snapshot and a reader connection while its statements
+run. `process` maps each result to the program's types after the run releases
+the connection, and compares the processed values to tell an equal result.
 
 ### Requests
 
@@ -308,10 +313,6 @@ both arrived before the run (`LiveQueryCause`). `set` fails with
 
 **Edge cases.**
 
-- **A statement inside a row mapping.** A query can run a statement from inside
-  another's row mapping, as an album list reads each row's cover. The inner
-  statement records its own reads, and the one around it keeps its own range of
-  keys, so the list doesn't rerun for a write to an album it doesn't show.
 - **A write while a query runs.** A live query's run doesn't know its scope
   until it ends, so a write that commits meanwhile can't be judged against it.
   The query keeps the write's changes and judges them as the run ends, with
@@ -335,7 +336,7 @@ both arrived before the run (`LiveQueryCause`). `set` fails with
 
 ```rust
 /// A subscription's results and lifetime; dropping it ends future runs. Its
-/// results fail with `E`, the query closure's own error type.
+/// results fail with `E`, the error type its program names.
 pub struct LiveQuery<T, E> { /* private fields */ }
 
 /// A subscription whose request may be replaced while it runs, its results
@@ -427,13 +428,16 @@ where
     pub fn next_blocking(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
     where
         T: Clone + PartialEq;
-    /// Process each value after its run releases the connection. Request,
-    /// revision and cause stay on the event; errors remain results.
-    /// Equality compares processed values. Existing request handles still work.
+    /// Process each value, with the request its run answered, after the run
+    /// releases the connection: a run's statements take their values from
+    /// the request, and only `process` turns their rows into what the
+    /// request asked for. Request, revision and cause stay on the event;
+    /// errors remain results. Equality compares processed values. Existing
+    /// request handles still work.
     pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U, E>
     where
         T: Clone + PartialEq,
-        P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
+        P: Fn(&Q, T) -> Result<U, E> + Send + Sync + 'static,
         U: Send + 'static;
     pub fn requests(&self) -> LiveQueryRequests<Q>;
     #[cfg(feature = "test-utils")]
@@ -587,14 +591,12 @@ read of every row, with every column the statement reads of the table.
 
 ### The host's statements
 
-A live query's run can also run statements of the host's own through
-`HostSql::host_live_read`, which may read tables app SQL can't. sqlive reads
-such a statement as it reads an app's, so it narrows by the same rules and the
-query runs again only for a write that changes a row the statement read. When a
-write asks SQLite a question about such a row, as for a join's partner rows,
-SQLite answers it as the host's own SQL. A host statement that a live query runs
-through any other call, as `query` or `for_each`, reads each table it names
-whole.
+A live query's run can also run statements of the host's own
+(`LiveStatement::host`), which may read tables app SQL can't. sqlive reads such
+a statement as it reads an app's, so it narrows by the same rules and the query
+runs again only for a write that changes a row the statement read. When a write
+asks SQLite a question about such a row, as for a join's partner rows, SQLite
+answers it as the host's own SQL.
 
 sqlive reads a statement's SQL to work out what it depends on when a live query
 first runs it. The more a statement joins, the longer that takes, so sqlive logs
@@ -611,9 +613,9 @@ composes. `SchemaProbe::compiled_plan` builds the statement's scope plan (below)
 against the app's schema, with the views and tables the host's live queries read
 whole, and `CompiledPlan::encode` gives the plan as text, which the program
 ships beside the statement. A *compiled statement* (`CompiledStatement<H>`) is
-the SQL with that text, and the host runs it with `app_query_compiled`. sqlive
-builds no plan for it, so a live query's first run of the statement costs what
-its later runs do.
+the SQL with that text, and the host runs it with `app_query_compiled`, or in a
+live query's run as `LiveStatement::compiled`. sqlive builds no plan for it, so
+a live query's first run of the statement costs what its later runs do.
 
 `H` is the kind of handle that runs the statement, `Writer` or `ReadOnly`, the
 two types sqlive gives a host that opens a database to write or only to read.
@@ -2056,9 +2058,9 @@ conditions and joins.
   sort or an id; replacing them reruns the same query (section 3).
 - *Do the work in SQL:* joins, rules as `CASE`, filters, sorts, counts with
   `GROUP BY`, positions with `row_number()`, windows with `LIMIT` and `OFFSET` or
-  by key. The query's closure only runs SQL, and holds its read snapshot and a
-  reader connection while it runs. `process` maps rows to the app's types after
-  the snapshot is released.
+  by key. A query's run holds its read snapshot and a reader connection while
+  its statements run. `process` maps rows to the app's types after the snapshot
+  is released.
 - *Read only what the screen draws.* Every table and column a query reads is a
   reason to rerun it, and a query that reads a whole table to show fifty rows
   pays for the whole table on every rerun.

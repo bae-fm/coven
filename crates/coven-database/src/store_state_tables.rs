@@ -94,10 +94,14 @@ pub(crate) fn deleted_circles(db: &StoreSql) -> Result<BTreeMap<CircleId, Slot>,
 }
 
 pub(crate) fn name(database: &StoreSql) -> Result<String, DbError> {
-    database
-        .host_live_read("SELECT name FROM _coven_store WHERE singleton=1", [], |row| row.get(0))?
-        .pop()
-        .ok_or(DbError::DamagedDatabase)
+    crate::live_reads::once(&name_read(), database)
+}
+
+/// The store's name.
+pub(crate) fn name_read() -> crate::live_reads::CovenRead<String, String> {
+    let sql = "SELECT name FROM _coven_store WHERE singleton=1";
+    crate::live_reads::CovenRead::new(sql, crate::live_reads::unbound, |row| row.get(0))
+        .then(|mut names| names.pop().ok_or(DbError::DamagedDatabase))
 }
 
 /// The current name and the slot that set it; a local creation's name counts
@@ -228,10 +232,21 @@ fn fact(row: &Row<'_>) -> sqlive::rusqlite::Result<Fact> {
 /// The applied state, from one statement over the membership and audience
 /// tables and the retained boundaries.
 pub(crate) fn read(database: &StoreSql) -> Result<StoreState, DbError> {
+    crate::live_reads::once(&state_read(), database)
+}
+
+/// The applied state, from one statement over the membership and audience
+/// tables and the retained boundaries.
+pub(crate) fn state_read() -> crate::live_reads::CovenRead<impl Send + 'static, StoreState> {
+    crate::live_reads::CovenRead::new(STATE, crate::live_reads::unbound, fact).then(state_of)
+}
+
+/// The applied state `facts`, the rows of `STATE`, give.
+fn state_of(facts: Vec<Fact>) -> Result<StoreState, DbError> {
     let mut state = StoreState::default();
     let mut circle_members = Vec::new();
     let mut boundaries = Vec::new();
-    for fact in database.host_live_read(STATE, [], fact)? {
+    for fact in facts {
         match fact {
             Fact::Store(store) => state.store = Some(store),
             Fact::Member(id, member) => {

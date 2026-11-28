@@ -1,5 +1,7 @@
 use super::ScopePlans;
-use crate::tests::{next, QueryError, TestDatabase, TestError, TestOptions, TestRead};
+use crate::tests::{
+    compiled_read, next, no_values, QueryError, TestDatabase, TestError, TestOptions, TestRead,
+};
 use crate::triggered_inserts::SCHEMA as TRIGGERED;
 use crate::{MainSchema, ScopePlan, ScopePlanSize};
 use std::sync::Arc;
@@ -41,8 +43,8 @@ fn a_repeated_app_statement_is_prepared_once() {
 #[tokio::test]
 async fn a_cached_query_still_records_its_reads() {
     let db = notes();
-    let mut titles = db.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
+    let mut titles = db.subscribe_rows("SELECT title FROM notes ORDER BY id", no_values(), |r| {
+        r.get::<_, String>(0)
     });
     assert!(next(&mut titles).await.is_empty());
     for (id, title) in [("1", "a"), ("2", "b"), ("3", "c")] {
@@ -64,7 +66,7 @@ async fn a_query_kept_from_a_one_shot_read_still_records_its_reads_live() {
         Ok(sql.query(TITLES, [], |r| r.get::<_, String>(0))?)
     };
     assert!(db.read_app(titles).unwrap().is_empty());
-    let mut live = db.subscribe(titles);
+    let mut live = db.subscribe_rows(TITLES, no_values(), |r| r.get::<_, String>(0));
     assert!(next(&mut live).await.is_empty());
     db.write("INSERT INTO notes VALUES ('1','a')").unwrap();
     assert_eq!(next(&mut live).await, ["a"]);
@@ -107,26 +109,29 @@ fn prepared(reader: &crate::HostSql<crate::NoPolicy>) -> (usize, usize) {
     (reader.app_statements.fresh.get(), reader.app_statements.host_fresh.get())
 }
 
-/// Run `read` on one reader of `db` as a one-shot read, then three times as a
-/// live query's run, and return the app statements and the host statements
-/// those four runs prepared. Each run's transaction also runs sqlive's own
-/// statements, which a run before the counted ones prepares.
+/// Run `read` on one reader of `db` as a one-shot read, then `statement`
+/// three times as a live query's run, and return the app statements and the
+/// host statements those four runs prepared. Each run's transaction also
+/// runs sqlive's own statements, which a run before the counted ones
+/// prepares.
 fn prepared_in_four_runs(
     db: &TestDatabase,
     read: impl Fn(&crate::HostSql<crate::NoPolicy>) -> Result<(), TestError>,
+    statement: crate::LiveStatement<'_>,
 ) -> (usize, usize) {
     db.with_database(|database| {
         let reader = database.reader();
         reader.host(|reader| {
-            let live =
-                |read: &dyn Fn(&crate::HostSql<crate::NoPolicy>) -> Result<(), TestError>| {
-                    reader.live_read(&mut |_reads, _lookups| Ok(()), read).unwrap();
-                };
-            live(&|_| Ok(()));
+            let live = |statements: &[crate::LiveStatement<'_>]| {
+                reader
+                    .live_read(&mut |_reads, _lookups| Ok(()), statements, |_, _| Ok(()))
+                    .unwrap();
+            };
+            live(&[]);
             let before = prepared(reader);
             reader.read_snapshot(&read).unwrap();
             for _ in 0..3 {
-                live(&read);
+                live(std::slice::from_ref(&statement));
             }
             let after = prepared(reader);
             (after.0 - before.0, after.1 - before.1)
@@ -139,10 +144,14 @@ fn prepared_in_four_runs(
 #[test]
 fn one_shot_and_live_runs_share_one_prepared_statement() {
     let db = notes();
-    let app = prepared_in_four_runs(&db, |reader| {
-        reader.app_query(crate::Recorded::No, TITLES, ["1"], |_| Ok(()))?;
-        Ok(())
-    });
+    let app = prepared_in_four_runs(
+        &db,
+        |reader| {
+            reader.app_query(crate::Recorded::No, TITLES, ["1"], |_| Ok(()))?;
+            Ok(())
+        },
+        crate::LiveStatement::app(TITLES, crate::tests::at(&[&"1"])),
+    );
     assert_eq!(app, (1, 0));
     db.close();
 }
@@ -152,10 +161,14 @@ fn one_shot_and_live_runs_share_one_prepared_statement() {
 #[test]
 fn one_shot_and_live_runs_share_one_prepared_host_statement() {
     let db = notes();
-    let host = prepared_in_four_runs(&db, |reader| {
-        reader.host_live_read(TITLES, ["1"], |_| Ok(()))?;
-        Ok(())
-    });
+    let host = prepared_in_four_runs(
+        &db,
+        |reader| {
+            reader.query(TITLES, ["1"], |_| Ok(()))?;
+            Ok(())
+        },
+        crate::LiveStatement::host(TITLES, crate::tests::at(&[&"1"])),
+    );
     assert_eq!(host, (0, 1));
     db.close();
 }
@@ -239,6 +252,27 @@ fn note_of_title() -> (TestDatabase, crate::ConnectionWorkCounter) {
     (db, counter)
 }
 
+/// The values that bind `TITLES` to note 1.
+fn note_one() -> crate::Values {
+    crate::tests::at(&[&"1"])
+}
+
+/// The titles `statement` reads as a live query's run on `reader`.
+fn live_titles(
+    reader: &crate::Reader<'_, crate::NoPolicy>,
+    statement: crate::LiveStatement<'_>,
+) -> Vec<String> {
+    let mut titles = Vec::new();
+    let read: Result<(), TestError> = reader.host(|reader| {
+        reader.live_read(&mut |_reads, _lookups| Ok(()), &[statement], |_, row| {
+            titles.push(row.get(0)?);
+            Ok(())
+        })
+    });
+    read.unwrap();
+    titles
+}
+
 /// Run `TITLES` as a live query's statement on each of `db`'s two readers,
 /// holding both at once so that each run is on a reader of its own, and
 /// return the scope plans the runs built.
@@ -246,16 +280,8 @@ fn plans_built_on_each_reader(db: &TestDatabase, counter: &crate::ConnectionWork
     db.with_database(|database| {
         let (first, second) = (database.reader(), database.reader());
         for reader in [&first, &second] {
-            let title = reader.host(|reader| {
-                reader.live_read(
-                    &mut |_reads, _lookups| Ok(()),
-                    |reader| -> Result<String, TestError> {
-                        Ok(reader
-                            .app_query_row(crate::Recorded::Yes, TITLES, ["1"], |r| r.get(0))?)
-                    },
-                )
-            });
-            assert_eq!(title.unwrap(), "title");
+            let title = live_titles(reader, crate::LiveStatement::app(TITLES, note_one()));
+            assert_eq!(title, ["title"]);
         }
     });
     counter.take().scope_plans_built
@@ -295,7 +321,7 @@ async fn work_of_plan(sql: &'static str, live: bool) -> crate::ConnectionWork {
         Ok(sqlite.query(sql, [], |r| r.get::<_, String>(0))?)
     };
     if live {
-        let mut query = db.subscribe(titles);
+        let mut query = db.subscribe_rows(sql, no_values(), |r| r.get::<_, String>(0));
         next(&mut query).await;
         drop(query);
     } else {
@@ -604,15 +630,8 @@ fn compiled_plans_built(
     db.with_database(|database| {
         let (first, second) = (database.reader(), database.reader());
         for reader in [&first, &second] {
-            let title = reader.host(|reader| {
-                reader.live_read(
-                    &mut |_reads, _lookups| Ok(()),
-                    |reader| -> Result<Vec<String>, TestError> {
-                        Ok(compiled_titles(reader, statement)?)
-                    },
-                )
-            });
-            assert_eq!(title.unwrap(), ["title"]);
+            let title = live_titles(reader, crate::LiveStatement::compiled(statement, note_one()));
+            assert_eq!(title, ["title"]);
         }
     });
     counter.take().scope_plans_built
@@ -634,7 +653,8 @@ async fn a_compiled_plan_narrows_its_live_query() {
     let db = notes();
     db.write_app(|sql| sql.app_execute(INSERT, ["1"])).unwrap();
     let statement = compiled(NOTES, TITLES);
-    let mut title = db.subscribe(move |sql| Ok(compiled_titles(sql.0, statement)?));
+    let mut title =
+        db.subscribe(vec![compiled_read(statement, note_one())], |_, r| r.get::<_, String>(0));
     assert_eq!(next(&mut title).await, ["title"]);
     db.write("INSERT INTO notes VALUES ('2', 'other')").unwrap();
     assert!(!title.is_marked_for_rerun());
@@ -660,7 +680,10 @@ fn a_compiled_statement_of_another_schema_fails() {
     let run = move |reader: TestRead<'_>| -> Result<Vec<String>, QueryError> {
         Ok(compiled_titles(reader.0, statement)?)
     };
-    let live = db.subscribe(run).next_blocking().expect("the query's first result");
+    let live = db
+        .subscribe(vec![compiled_read(statement, note_one())], |_, r| r.get(0))
+        .next_blocking()
+        .expect("the query's first result");
     for result in [db.read_app(run), live] {
         match result {
             Err(QueryError(crate::Error::CompiledSchemaDiffers(crate::SchemaDiffers {

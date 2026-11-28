@@ -42,10 +42,15 @@ async fn open(store: &TestStore, migrations: Vec<Migration>) -> crate::StoreData
 /// What the app's triggers recorded, in order.
 type Changes = Vec<(String, FileId, bool)>;
 
+const CHANGES: &str = "SELECT kind,file,stored FROM file_changes ORDER BY id";
+
 fn changes(sql: crate::SqlReadContext<'_>) -> Result<Changes, DbError> {
-    Ok(sql.query("SELECT kind,file,stored FROM file_changes ORDER BY id", [], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-    })?)
+    Ok(sql.query(CHANGES, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+}
+
+/// What `changes` reads, as a live query follows it.
+fn followed_changes() -> crate::test_utils::LiveSql<(String, FileId, bool)> {
+    crate::test_utils::LiveSql::of(CHANGES, |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
 }
 
 /// A local trigger on `coven_files` follows each record this device makes,
@@ -55,7 +60,7 @@ fn changes(sql: crate::SqlReadContext<'_>) -> Result<Changes, DbError> {
 async fn a_local_trigger_follows_each_record_this_device_changes() {
     let store = TestStore::new();
     let db = open(&store, followed_from_the_start()).await;
-    let mut followed = db.subscribe(changes);
+    let mut followed = db.subscribe::<_, DbError>(followed_changes());
     assert!(followed.next_inline().await.unwrap().unwrap().is_empty());
     let first = stage(&db, b"take".to_vec(), true).await.unwrap();
     let made = ("made".to_owned(), first, false);
@@ -86,7 +91,7 @@ async fn a_local_trigger_follows_each_record_another_device_changes() {
     let (ana_store, ben_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
     let ana = open(&ana_store, followed_from_the_start()).await;
     let ben = open(&ben_store, followed_from_the_start()).await;
-    let mut followed = ben.subscribe(changes);
+    let mut followed = ben.subscribe::<_, DbError>(followed_changes());
     assert!(followed.next_inline().await.unwrap().unwrap().is_empty());
     // Each of Ana's writes reaches its slot, and then Ben's device.
     let deliver = |delivered: usize| {

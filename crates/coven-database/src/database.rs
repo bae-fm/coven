@@ -104,12 +104,19 @@ pub(crate) use call::{finish_blocking, process, start_call};
 /// ```
 /// ```compile_fail
 /// fn cannot_subscribe(handle: &coven_database::Database<coven_database::ReadOnly>) {
-///     handle.subscribe(|_| Ok::<_, coven_database::DbError>(()));
+///     let one = coven_database::CovenRead::new("SELECT 1", coven_database::unbound, |row| {
+///         row.get::<_, i64>(0)
+///     });
+///     handle.subscribe::<_, coven_database::DbError>(one);
 /// }
 /// ```
 /// ```compile_fail
 /// fn cannot_reconfigure(handle: &coven_database::Database<coven_database::ReadOnly>) {
-///     handle.subscribe_reconfigurable((), |_, _| Ok::<_, coven_database::DbError>(()));
+///     handle.subscribe_reconfigurable::<_, _, coven_database::DbError>((), |_| {
+///         coven_database::CovenRead::new("SELECT 1", coven_database::unbound, |row| {
+///             row.get::<_, i64>(0)
+///         })
+///     });
 /// }
 /// ```
 /// ```compile_fail

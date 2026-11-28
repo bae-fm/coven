@@ -1,5 +1,5 @@
 use super::*;
-use crate::tests::{next, TestDatabase, TestError, TestOptions};
+use crate::tests::{first, next, no_values, TestDatabase, TestError, TestOptions};
 use crate::HandleFailure;
 use std::convert::Infallible;
 
@@ -121,9 +121,9 @@ async fn local_table_writes_against_plain_sqlite() {
         let plain_delete = started.elapsed();
 
         let db = captured(&format!("{SCHEMA} {QUEUE}"), &["parent", "child"]);
-        let mut live = db.subscribe(|sql| {
-            Ok(sql.query_row("SELECT count(*) FROM queue", [], |r| r.get::<_, i64>(0))?)
-        });
+        let mut live = db
+            .subscribe_rows("SELECT count(*) FROM queue", no_values(), |r| r.get::<_, i64>(0))
+            .process(first);
         assert_eq!(next(&mut live).await, 0);
         let insert = fill(rows);
         let started = std::time::Instant::now();
@@ -135,11 +135,11 @@ async fn local_table_writes_against_plain_sqlite() {
         let sqlive_delete = started.elapsed();
         assert_eq!(next(&mut live).await, 0);
         drop(live);
-        let mut narrow = db.subscribe(|sql| {
-            Ok(sql.query("SELECT position FROM queue WHERE track = 'none'", [], |r| {
-                r.get::<_, i64>(0)
-            })?)
-        });
+        let mut narrow = db.subscribe_rows(
+            "SELECT position FROM queue WHERE track = 'none'",
+            no_values(),
+            |r| r.get::<_, i64>(0),
+        );
         assert!(next(&mut narrow).await.is_empty());
         let started = std::time::Instant::now();
         db.write(&insert).unwrap();

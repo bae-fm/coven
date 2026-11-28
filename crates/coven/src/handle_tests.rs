@@ -229,7 +229,8 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
     let app = Coven::in_memory(root.path().to_owned());
     let directory = app.create_closed_store("closing", Arc::new(UuidIds)).await.unwrap();
     let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
-    let mut live = handle.subscribe(|_| Ok(()));
+    let mut live: LiveQuery<_, CovenError> = handle
+        .subscribe(coven_database::test_utils::LiveSql::of("SELECT 1", |r| r.get::<_, i64>(0)));
     live.next_inline().await.expect("the live query answers").unwrap();
     // Polling starts closing; dropping only the caller must not cancel it.
     {

@@ -7,6 +7,7 @@ pub(crate) mod readable_objects;
 pub use crate::internal_schema::sync_status::{
     save_last_pass_outside_store, save_location_outside_store,
 };
+pub use crate::live_reads::LiveSql;
 pub use crate::operation::{finish_outside_store, journal_outside_store, OutcomeListing};
 pub use crate::pending::save_outside_store;
 pub use readable_objects::{make_readable_objects, record_user_file};

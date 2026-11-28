@@ -6,8 +6,6 @@ use coven_foundation::id_source::SequentialIds;
 use sqlive::random_scopes::{a_value, b_value, key, query, write, Generated, Rng};
 use sqlive::random_scopes::{CAPTURED, SCHEMA, TABLES};
 use sqlive::SqlValue;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 #[tokio::test]
 async fn download_suppresses_shared_triggers_and_runs_local_triggers_with_applying_true() {
@@ -125,11 +123,10 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         db.receive(initial.clone().into()).await.unwrap();
         sql(&db, "UPDATE notes SET body='local' WHERE id='a'; INSERT INTO notes VALUES('c','collision','local')").await.unwrap();
         let before = contents(&db);
-        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-            Ok(sql.query("SELECT id,title,body FROM notes ORDER BY id", [], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-            })?)
-        });
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(crate::test_utils::LiveSql::of(
+            "SELECT id,title,body FROM notes ORDER BY id",
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+        ));
         let old_rows = query.next_inline().await.expect("the live query answers").unwrap();
         // Count actual row mutations, including repeated changes to one table,
         // local trigger effects, losses and the applied slot.
@@ -244,8 +241,10 @@ async fn assert_rejected_download(
     expected: coven_merge::MergeError,
 ) {
     let before = contents(database);
-    let mut query: crate::LiveQuery<_, DbError> = database
-        .subscribe(|sql| Ok(sql.query("SELECT * FROM notes", [], |r| r.get::<_, String>(0))?));
+    let mut query: crate::LiveQuery<_, DbError> =
+        database.subscribe(crate::test_utils::LiveSql::of("SELECT * FROM notes", |r| {
+            r.get::<_, String>(0)
+        }));
     query.next_inline().await.expect("the live query answers").unwrap();
     for _ in 0..2 {
         let error = database.receive(record.clone()).await.unwrap_err();
@@ -377,11 +376,10 @@ async fn another_devices_writes_record_scoped_values() {
         .await
         .unwrap();
     sql(&db, "INSERT INTO tracks VALUES ('1','a','one'),('2','b','two')").await.unwrap();
-    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM tracks WHERE release='a' ORDER BY id", [], |r| {
-            r.get::<_, String>(0)
-        })?)
-    });
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(crate::test_utils::LiveSql::of(
+        "SELECT title FROM tracks WHERE release='a' ORDER BY id",
+        |r| r.get::<_, String>(0),
+    ));
     assert_eq!(crate::tests::next(&mut query).await, ["one"]);
     crate::tests::remote_update(&db, "tracks", "2", &[("title", Value::Text("deux".into()))]).await;
     assert!(!query.is_marked_for_rerun());
@@ -457,16 +455,14 @@ async fn run_seed(seed: u64) {
     let queries: Vec<Generated> = (0..16).map(|_| query(&mut rng)).collect();
     let mut live = Vec::new();
     for query in &queries {
-        // The query returns its run number with its rows, so a rerun whose
-        // rows equal the last ones still returns a new result.
-        let runs = Arc::new(AtomicUsize::new(0));
-        let sql = query.sql.clone();
-        let parameters = query.parameters.clone();
-        let mut subscription = db.subscribe(move |context| {
-            let run = runs.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, DbError>((run, read(&context, &sql, &parameters)?))
-        });
-        let (_, rows) = next(&mut subscription).await;
+        let values: Vec<&dyn sqlive::rusqlite::ToSql> =
+            query.parameters.iter().map(|value| value as _).collect();
+        let mut subscription: crate::LiveQuery<_, DbError> =
+            db.subscribe(crate::test_utils::LiveSql::new(&query.sql, &values, |row| {
+                let columns = 0..row.as_ref().column_count();
+                columns.map(|index| row.get::<_, SqlValue>(index)).collect::<Result<Vec<_>, _>>()
+            }));
+        let rows = next(&mut subscription).await;
         live.push((subscription, rows));
     }
     for step in 0..24 {
@@ -505,10 +501,12 @@ async fn run_seed(seed: u64) {
             }
             // A marked query sometimes stays marked through the next write,
             // which its judging then skips.
+            // A rerun whose rows equal the last ones returns nothing.
             if marked && rng.chance(75) {
-                let (_, rows) = next(subscription).await;
-                assert_eq!(rows, fresh, "a rerun differs from a read: {}", case());
-                *last = rows;
+                if let Some(rows) = subscription.run_changed() {
+                    *last = rows.unwrap();
+                }
+                assert_eq!(*last, fresh, "a rerun differs from a read: {}", case());
             }
         }
     }

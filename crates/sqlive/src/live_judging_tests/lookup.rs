@@ -1,9 +1,8 @@
 //! A joined table's scope: the rows whose join column holds a value its
 //! partner's rows hold, which a write that changes the table looks up.
 
-use crate::tests::{next, QueryError, TestDatabase, HANG_GUARD};
+use crate::tests::{app, at, next, no_values, PauseAt, QueryError, TestDatabase, HANG_GUARD};
 use crate::LiveQuery;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,22 +24,18 @@ pub(super) async fn follows(
     parameters: Vec<crate::SqlValue>,
     writes: &[(&str, bool)],
 ) {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let count = calls.clone();
-    let bound = parameters.clone();
-    let mut query = db.subscribe(move |db| {
-        let run = count.fetch_add(1, Ordering::SeqCst);
-        let rows =
-            db.query(sql, rusqlite::params_from_iter(&bound), |r| r.get::<_, crate::SqlValue>(0))?;
-        Ok((run, rows))
-    });
-    let mut runs = next(&mut query).await.0;
+    let values = crate::Values::Positional(parameters.clone());
+    let mut query = db.subscribe_rows(sql, values, |r| r.get::<_, crate::SqlValue>(0));
+    let mut rows = next(&mut query).await;
     for (write_sql, reruns) in writes {
         write(db, write_sql);
         if *reruns {
-            let (run, rows) = next(&mut query).await;
-            assert!(run > runs, "{sql} after {write_sql}");
-            runs = run;
+            let before = query.runs().runs();
+            assert!(query.is_marked_for_rerun(), "{sql} after {write_sql}");
+            if let Some(changed) = query.run_changed() {
+                rows = changed.unwrap();
+            }
+            assert!(query.runs().runs() > before, "{sql} after {write_sql}");
             let parameters = parameters.clone();
             let fresh = db
                 .read_app(move |db| {
@@ -268,25 +263,20 @@ async fn joined_runs_against_one_shot_reads() {
     }
     let one_shot = one_shot / RUNS;
     let alone = credit(&db, RUNS / 4, None).await;
-    let spent = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let times = spent.clone();
-    let mut live = db.subscribe(move |sql| {
-        let started = std::time::Instant::now();
-        let rows = sql.query(SQL, [5000], |r| r.get::<_, String>(0))?;
-        times.lock().unwrap().push(started.elapsed());
-        Ok(rows)
-    });
+    let mut spent = Vec::new();
+    let mut live = db.subscribe_rows(SQL, at(&[&5000]), |r| r.get::<_, String>(0));
     next(&mut live).await;
     for run in 0..RUNS {
         write(&db, &format!("UPDATE tracks SET title = 'run {run}' WHERE id = 59990"));
-        next(&mut live).await;
+        let started = std::time::Instant::now();
+        live.run_changed().expect("the write changed a title the query reads").unwrap();
+        spent.push(started.elapsed());
         assert!(!live.is_marked_for_rerun());
     }
     write(&db, "UPDATE tracks SET title = 'outside' WHERE id = 1");
     assert!(!live.is_marked_for_rerun());
     let beside = credit(&db, RUNS / 4, Some(&live)).await;
-    let spent = spent.lock().unwrap();
-    let live_run = spent.iter().skip(1).sum::<Duration>() / RUNS;
+    let live_run = spent.iter().sum::<Duration>() / RUNS;
     for (metric, time) in [
         ("joined_query/one_shot_read", one_shot),
         ("joined_query/live_run", live_run),
@@ -463,7 +453,7 @@ async fn a_run_reads_nothing_for_its_joins_and_a_write_looks_its_values_up() {
     let db = TestDatabase::open(MUSIC);
     let counter = crate::ConnectionWorkCounter::new();
     db.track_work(&counter);
-    let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    let mut query = db.subscribe_rows(ALBUM_X, no_values(), |r| r.get::<_, String>(0));
     assert_eq!(next(&mut query).await, ["one", "two", "three"]);
     let work = counter.take();
     let plain = rusqlite::Connection::open_with_flags(
@@ -499,7 +489,7 @@ async fn a_live_run_runs_the_steps_of_a_one_shot_read() {
     assert_eq!(titles, ["one", "two", "three"]);
     let once = counter.take();
     assert!(once.app_read_steps > 0);
-    let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    let mut query = db.subscribe_rows(ALBUM_X, no_values(), |r| r.get::<_, String>(0));
     assert_eq!(next(&mut query).await, titles);
     let live = counter.take();
     // The live run also builds the statement's scope plan, which a one-shot
@@ -609,21 +599,10 @@ async fn writes_during_a_run_are_judged_against_its_snapshot() {
         ("UPDATE tracks SET title = 'uno' WHERE id = 1", true),
     ] {
         let db = TestDatabase::open(MUSIC);
-        let mut waiting =
-            db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+        let mut waiting = db.subscribe_rows(ALBUM_X, no_values(), |r| r.get::<_, String>(0));
         assert_eq!(next(&mut waiting).await, ["one", "two", "three"]);
-        let (entered, entry) = tokio::sync::oneshot::channel();
-        let entered = std::sync::Mutex::new(Some(entered));
-        let (release, released) = std::sync::mpsc::channel::<()>();
-        let released = std::sync::Mutex::new(released);
-        let mut query = db.subscribe(move |sql| {
-            let rows = sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?;
-            if let Some(entered) = entered.lock().unwrap().take() {
-                entered.send(()).unwrap();
-                released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
-            }
-            Ok(rows)
-        });
+        let (mut query, entry, release) =
+            db.subscribe_paused(ALBUM_X, no_values(), |r| r.get::<_, String>(0), PauseAt::AfterSql);
         let task = tokio::spawn(async move {
             let value = next(&mut query).await;
             (query, value)
@@ -649,9 +628,11 @@ async fn a_run_between_a_writes_judging_and_its_commit_follows_the_write() {
     const SQL: &str =
         "SELECT t.title FROM tracks t JOIN releases r ON t.release = r.id WHERE r.album = ?1 ORDER BY t.id";
     let db = Arc::new(TestDatabase::open(MUSIC));
-    let mut query = db.subscribe_reconfigurable("y".to_owned(), |album: &String, sql| {
-        Ok(sql.query(SQL, [album], |r| r.get::<_, String>(0))?)
-    });
+    let mut query = db.subscribe_reconfigurable(
+        "y".to_owned(),
+        |album: &String| vec![app(SQL, at(&[album]))],
+        |_, r| r.get::<_, String>(0),
+    );
     assert_eq!(next_event(&mut query).await, ["four"]);
     let (judged, judging) = tokio::sync::oneshot::channel();
     let judged = std::sync::Mutex::new(Some(judged));
@@ -700,7 +681,7 @@ where
 #[tokio::test]
 async fn a_streamed_transaction_looks_up_joined_rows() {
     let db = TestDatabase::open(MUSIC);
-    let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    let mut query = db.subscribe_rows(ALBUM_X, no_values(), |r| r.get::<_, String>(0));
     assert_eq!(next(&mut query).await, ["one", "two", "three"]);
     let stream = |sql: &'static str| {
         db.host(|writer| writer.stream_transaction(|writer| writer.batch(sql)).unwrap())

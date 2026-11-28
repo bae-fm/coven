@@ -132,9 +132,12 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     // The pause setting survived reopening; the app resumes uploads.
     assert!(handle.uploads().await.unwrap().paused);
     handle.set_uploads_paused(false).await.unwrap();
-    let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
-    });
+    let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(
+        coven_database::test_utils::LiveSql::of("SELECT count(*) FROM coven_uploads", |r| {
+            r.get::<_, i64>(0)
+        })
+        .one(),
+    );
     tokio::time::timeout(HANG_GUARD, async {
         while uploads.next_inline().await.expect("the live query answers").unwrap() != 0 {}
     })

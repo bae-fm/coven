@@ -51,7 +51,7 @@ pub use circles::Circles;
 
 use crate::*;
 use coven_crypto::custody::{StoreCustody, StoreKeychain};
-use coven_database::StoreDatabase;
+use coven_database::{LiveReads, StoreDatabase};
 use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
@@ -358,15 +358,13 @@ impl CovenHandle {
         &self,
         operation: OperationId,
     ) -> Result<O, SyncError> {
-        let mut listed: LiveQuery<_, SyncError> = self.database.subscribe(move |sql| {
-            Ok(sql
-                .query(
-                    "SELECT outcome FROM coven_operations WHERE operation=?1",
-                    [operation.0],
-                    |row| row.get::<_, Option<O>>(0),
-                )?
-                .pop())
-        });
+        let outcome = coven_database::CovenRead::new(
+            "SELECT outcome FROM coven_operations WHERE operation=?1",
+            move || coven_database::bound(&[&operation.0]),
+            |row| row.get::<_, Option<O>>(0),
+        )
+        .then(|mut outcomes| Ok(outcomes.pop()));
+        let mut listed: LiveQuery<_, SyncError> = self.database.subscribe(outcome);
         loop {
             let (next, answer) = coven_database::next_result(listed).await;
             listed = next;
@@ -468,31 +466,33 @@ impl CovenHandle {
         self.database.read(read)
     }
 
-    /// A live query. Coven records the tables, columns and keys the query
-    /// reads, and reruns it only for writes that touch them.
-    pub fn subscribe<F, R, E>(&self, query: F) -> LiveQuery<R, E>
+    /// A live query of `reads`: a read the app's build compiled, two that
+    /// read one snapshot (`Both`), or a read of coven's tables that coven
+    /// gives (`CovenRead`). Coven records the tables, columns and keys the
+    /// reads read, and runs them again only for writes that touch them. Its
+    /// results fail with `E`, which the caller names.
+    pub fn subscribe<S, E>(&self, reads: S) -> LiveQuery<S::Rows, E>
     where
-        F: Fn(SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
+        S: LiveReads,
         E: From<DbError> + task::CarriesBug + Send + 'static,
     {
-        self.database.subscribe(query)
+        self.database.subscribe(reads)
     }
 
     /// A live query whose request, such as a page or a search term, can be
-    /// replaced without starting a new subscription.
-    pub fn subscribe_reconfigurable<Q, F, R, E>(
+    /// replaced without starting a new subscription: `reads` gives the
+    /// reads of each request, or the error that fails its run.
+    pub fn subscribe_reconfigurable<Q, S, E>(
         &self,
         initial_request: Q,
-        query: F,
-    ) -> ReconfigurableLiveQuery<Q, R, E>
+        reads: impl Fn(&Q) -> Result<S, E> + Send + Sync + 'static,
+    ) -> ReconfigurableLiveQuery<Q, S::Rows, E>
     where
         Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
+        S: LiveReads,
         E: From<DbError> + task::CarriesBug + Send + 'static,
     {
-        self.database.subscribe_reconfigurable(initial_request, query)
+        self.database.subscribe_reconfigurable(initial_request, reads)
     }
 
     /// The SQLite settings the store's connections have in effect (§4).

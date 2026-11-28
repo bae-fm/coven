@@ -14,10 +14,15 @@ const LOGGED: &str = "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TE
 
 type Row = (String, Option<i64>);
 
+const EFFECT: &str = "SELECT effect,cooling_until FROM coven_retry_effect";
+
 fn effect_row(sql: crate::SqlReadContext<'_>) -> Result<Row, DbError> {
-    Ok(sql.query_row("SELECT effect,cooling_until FROM coven_retry_effect", [], |r| {
-        Ok((r.get(0)?, r.get(1)?))
-    })?)
+    Ok(sql.query_row(EFFECT, [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+}
+
+/// The row `effect_row` reads, as a live query follows it.
+fn followed_effect() -> crate::test_utils::LiveSql<Row, Row> {
+    crate::test_utils::LiveSql::of(EFFECT, |r| Ok((r.get(0)?, r.get(1)?))).one()
 }
 
 /// Write `state` and return it as committed.
@@ -42,7 +47,7 @@ async fn a_live_query_follows_each_retry_effect_as_it_changes() {
     let store = TestStore::new();
     let db =
         store.builder(notes_tables(), crate::test_utils::notes_migrations()).open().await.unwrap();
-    let mut row = crate::test_utils::Followed::new(db.subscribe(effect_row));
+    let mut row = crate::test_utils::Followed::<_, DbError>::new(db.subscribe(followed_effect()));
     assert_eq!(row.next().await, ("not_syncing".into(), None));
     change(&db, syncing(false, None)).await;
     assert_eq!(row.next().await, ("pass".into(), None));
@@ -109,13 +114,11 @@ async fn a_local_trigger_follows_each_retry_effect_as_it_changes() {
         .open()
         .await
         .unwrap();
-    let mut log = crate::test_utils::Followed::new(db.subscribe(|sql| {
-        Ok::<_, crate::DbError>(sql.query(
-            "SELECT effect FROM effect_log ORDER BY id",
-            [],
-            |r| r.get::<_, String>(0),
-        )?)
-    }));
+    let mut log = crate::test_utils::Followed::<_, DbError>::new(db.subscribe(
+        crate::test_utils::LiveSql::of("SELECT effect FROM effect_log ORDER BY id", |r| {
+            r.get::<_, String>(0)
+        }),
+    ));
     assert!(log.next().await.is_empty());
     for state in [syncing(false, None), syncing(false, None), syncing(true, None)] {
         change(&db, state).await;

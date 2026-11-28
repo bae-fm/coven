@@ -142,7 +142,7 @@ fn calls_whose_runtime_is_shutting_down_return_shutdown() {
     let store = TestStore::new();
     let database =
         runtime.block_on(store.builder(notes_tables(), notes_migrations()).open()).unwrap();
-    let query = database.follow(crate::store_state_tables::read);
+    let query = database.follow::<_, _, DbError>(crate::store_state_tables::state_read());
     drop(runtime);
     let outlived = tokio::runtime::Builder::new_current_thread().build().unwrap();
     outlived.block_on(async {
@@ -910,9 +910,9 @@ async fn a_panicking_write_hook_rolls_the_write_back_with_its_bug() {
 async fn a_panic_holding_the_live_query_state_fails_the_handle() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    let mut query = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
-    });
+    let mut query = db.subscribe(
+        crate::test_utils::LiveSql::of("SELECT count(*) FROM notes", |r| r.get::<_, i64>(0)).one(),
+    );
     assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
     db.observer.test_poison();
     assert!(matches!(

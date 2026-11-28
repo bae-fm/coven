@@ -40,6 +40,7 @@ mod interpretation;
 mod joining_write;
 mod judge;
 mod judge_view;
+mod live_reads;
 mod live_results;
 mod load_step;
 mod local_write;
@@ -193,6 +194,9 @@ pub use error::{sqlite_error_is_disk, DbError};
 pub use file_location::{FileLocation, FileLocationKey};
 pub use file_queue::{FileUpload, UnsentWork, UploadCompletion, UploadProgress, UploadQueueState};
 pub use file_ref::{FilePlace, FileRef, LocalFileError, LocalFileStream, Located};
+#[doc(hidden)]
+pub use live_reads::{bound, unbound};
+pub use live_reads::{Both, CovenRead, LiveReads, Maybe, ReadAs};
 pub use live_results::next_result;
 pub use lost::{
     ChangeSource, Lost, LostCell, LostValue, RemovalRule, Replacement, RowAuthorizationFailure,
@@ -214,6 +218,7 @@ pub use sql_read::SqlRead;
 pub use sql_write::SqlWrite;
 #[cfg(any(test, feature = "test-utils"))]
 pub use sqlive::LiveQueryRuns;
+pub use sqlive::Values;
 pub use sqlive::{
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,

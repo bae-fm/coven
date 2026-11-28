@@ -3,9 +3,7 @@
 //! picker read: a USING join, CTEs read inside subqueries, a row value
 //! compared with a subquery, and a row value equality between two tables.
 
-use crate::tests::{next, TestDatabase};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use crate::tests::{at, next, TestDatabase};
 
 const SCHEMA: &str =
     "CREATE TABLE scan(id INTEGER PRIMARY KEY, root TEXT, path TEXT, hash TEXT, rev INTEGER);
@@ -48,19 +46,13 @@ SELECT
 async fn a_burst_of_writes_to_other_keys_reruns_no_query_of_one_key() {
     let db = TestDatabase::open(SCHEMA);
     db.commit(&scan(0));
-    let runs = Arc::new(AtomicUsize::new(0));
-    let count = runs.clone();
-    let mut query = db.subscribe(move |db| {
-        count.fetch_add(1, Ordering::SeqCst);
-        let row = db.query(PANE, ["/m/0"], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
-        Ok(row)
+    let mut query = db.subscribe_rows(PANE, at(&[&"/m/0"]), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
     });
     let first = next(&mut query).await;
     assert_eq!(first, vec![(1, Some("new".to_owned()), Some("cover.jpg".to_owned()), 1)]);
@@ -68,10 +60,10 @@ async fn a_burst_of_writes_to_other_keys_reruns_no_query_of_one_key() {
         db.commit(&scan(key));
         assert!(!query.is_marked_for_rerun(), "the scan of key {key} reran the query");
     }
-    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert_eq!(query.runs().runs(), 1);
     db.commit("UPDATE state SET value = 'seen' WHERE hash = 'h0'");
     let rerun = next(&mut query).await;
     assert_eq!(rerun, vec![(1, Some("seen".to_owned()), Some("cover.jpg".to_owned()), 1)]);
-    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    assert_eq!(query.runs().runs(), 2);
     db.close();
 }

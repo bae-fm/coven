@@ -1,4 +1,4 @@
-use crate::tests::{next, QueryError, TestDatabase, TestRead};
+use crate::tests::{at, host, next, TestDatabase, TestError};
 
 const TITLE: &str = "SELECT title FROM notes WHERE id = ?1 ORDER BY id";
 
@@ -9,16 +9,12 @@ fn notes() -> TestDatabase {
     )
 }
 
-fn titles(reader: TestRead<'_>, id: &str) -> Result<Vec<String>, QueryError> {
-    Ok(reader.0.host_live_read(TITLE, [id], |row| row.get(0))?)
-}
-
-/// A host statement in a live query's read runs again for the writes that
+/// A host statement in a live query's run runs again for the writes that
 /// change the rows its plan names, and for no others.
 #[tokio::test]
 async fn a_host_statement_narrows_as_an_app_statement_does() {
     let db = notes();
-    let mut live = db.subscribe(|reader| titles(reader, "1"));
+    let mut live = db.subscribe(vec![host(TITLE, at(&[&"1"]))], |_, row| row.get::<_, String>(0));
     assert_eq!(next(&mut live).await, ["one"]);
     db.commit(
         "UPDATE notes SET title = 'other' WHERE id = '2'; INSERT INTO notes VALUES ('3', 'three')",
@@ -26,15 +22,6 @@ async fn a_host_statement_narrows_as_an_app_statement_does() {
     assert!(!live.is_marked_for_rerun());
     db.commit("UPDATE notes SET title = 'first' WHERE id = '1'");
     assert_eq!(next(&mut live).await, ["first"]);
-    db.close();
-}
-
-/// Outside a live query's read a host statement reads rows and records
-/// nothing.
-#[test]
-fn a_host_statement_in_a_one_shot_read_returns_its_rows() {
-    let db = notes();
-    assert_eq!(db.read_app(|reader| titles(reader, "2")).unwrap(), ["two"]);
     db.close();
 }
 
@@ -49,12 +36,16 @@ fn readers_share_a_host_statements_plan() {
         db.with_database(|database| {
             let (first, second) = (database.reader(), database.reader());
             for reader in [&first, &second] {
-                let rows = reader.host(|reader| {
-                    reader.live_read(&mut |_reads, _lookups| Ok(()), |reader| {
-                        titles(TestRead(reader), "1")
+                let mut rows = Vec::<String>::new();
+                let statement = crate::LiveStatement::host(TITLE, at(&[&"1"]));
+                let read: Result<(), TestError> = reader.host(|reader| {
+                    reader.live_read(&mut |_reads, _lookups| Ok(()), &[statement], |_, row| {
+                        rows.push(row.get(0)?);
+                        Ok(())
                     })
                 });
-                assert_eq!(rows.unwrap(), ["one"]);
+                read.unwrap();
+                assert_eq!(rows, ["one"]);
             }
         });
         built.push(counter.take().scope_plans_built);
@@ -167,7 +158,12 @@ fn a_host_statements_join_questions_run_as_the_hosts_own_sql() {
         }
     };
     let mut asked = Vec::new();
-    let titles: Result<Vec<String>, crate::Error<Failed, Refused>> = database.live_read(
+    let mut titles = Vec::<String>::new();
+    let statement = crate::LiveStatement::host(
+        "SELECT n.title FROM host_notes n JOIN host_books b ON b.id=n.book WHERE b.name=?1",
+        at(&[&"x"]),
+    );
+    let read: Result<(), crate::Error<Failed, Refused>> = database.live_read(
         &mut |reads, lookups| {
             for book in ["b2", "b1"] {
                 let affected = crate::affected(
@@ -180,14 +176,13 @@ fn a_host_statements_join_questions_run_as_the_hosts_own_sql() {
             }
             Ok(())
         },
-        |database| {
-            database.host_live_read(
-                "SELECT n.title FROM host_notes n JOIN host_books b ON b.id=n.book WHERE b.name=?1",
-                ["x"],
-                |row| row.get(0),
-            )
+        &[statement],
+        |_, row| {
+            titles.push(row.get(0)?);
+            Ok(())
         },
     );
-    assert_eq!(titles.unwrap(), ["one"]);
+    read.unwrap();
+    assert_eq!(titles, ["one"]);
     assert_eq!(asked, [("b2", false), ("b1", true)]);
 }

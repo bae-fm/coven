@@ -11,32 +11,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 impl<P: Policy> HostSql<P> {
-    /// A live query's run on one snapshot. What its statements read goes to
-    /// `judge` before the snapshot ends, which judges the writes that committed
-    /// during the run by lookups in that snapshot (SPEC.md section 3). A schema
-    /// with a table that has no primary key refuses the run.
-    pub fn live_read<F, R, E>(
+    /// A live query's run on one snapshot: each of `statements` in turn,
+    /// whose rows go to `each` with the statement's place in the list. What
+    /// the statements read goes to `judge` before the snapshot ends, which
+    /// judges the writes that committed during the run by lookups in that
+    /// snapshot (SPEC.md section 3). A schema with a table that has no
+    /// primary key refuses the run.
+    pub fn live_read(
         &self,
         judge: &mut dyn FnMut(ReadSet, &mut Lookups<'_>) -> rusqlite::Result<()>,
-        read: F,
-    ) -> Result<R, E>
-    where
-        F: FnOnce(&Self) -> Result<R, E>,
-        E: From<PolicyError<P>>,
-    {
+        statements: &[crate::LiveStatement<'_>],
+        mut each: impl FnMut(usize, &rusqlite::Row<'_>) -> rusqlite::Result<()>,
+    ) -> Result<(), PolicyError<P>> {
         let mut finished = false;
         let result = self.read_transaction(|| {
             let _reading = self.authorization.live_reading();
             // A table with no primary key refuses the read before it starts.
             // The shapes are metadata, so the run doesn't record reading them.
             let shapes = self.authorization.unrecorded(|| self.table_shapes());
-            let result = shapes.map_err(E::from).and_then(|_| read(self));
+            let result = shapes.and_then(|_| {
+                statements.iter().enumerate().try_for_each(|(index, statement)| {
+                    self.live_rows(statement, |row| each(index, row))
+                })
+            });
             let reads = self.authorization.reads();
             finished = true;
             let judged = judge(reads, &mut |judging| self.ask_judged(judging));
-            let value = result?;
+            result?;
             judged.map_err(crate::Error::from)?;
-            Ok(value)
+            Ok(())
         });
         // A run that never began read nothing.
         if !finished {

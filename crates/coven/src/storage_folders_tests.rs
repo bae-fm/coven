@@ -877,9 +877,13 @@ async fn each_connection_reads_the_folders_name_again() {
         f.handle.close().await.unwrap();
         f.storage.rename_folder("Family").await;
         let handle = f.reopen().await;
-        let mut shown: LiveQuery<Option<StorageConfig>, CovenError> = handle.subscribe(|sql| {
-            Ok(sql.query_row("SELECT location FROM coven_sync_status", [], |r| r.get(0))?)
-        });
+        let mut shown: LiveQuery<Option<StorageConfig>, CovenError> = handle.subscribe(
+            coven_database::test_utils::LiveSql::of(
+                "SELECT location FROM coven_sync_status",
+                |r| r.get(0),
+            )
+            .one(),
+        );
         let before = recorded(location.clone(), "ana@example.com", "Household");
         assert_eq!(handle.storage_config().await.unwrap(), Some(before.clone()));
         let first = shown.next_inline().await.expect("the live query answers").unwrap();

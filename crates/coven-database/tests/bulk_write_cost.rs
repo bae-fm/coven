@@ -55,9 +55,12 @@ async fn bulk(db: &StoreDatabase, sql: &'static str) -> Duration {
 async fn clearing_a_local_table_through_a_write_and_a_bulk_write() {
     let directory = tempfile::tempdir().unwrap();
     let db = open(&directory).await;
-    let mut live: coven_database::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(*) FROM queue", [], |r| r.get::<_, i64>(0))?)
-    });
+    let mut live: coven_database::LiveQuery<_, DbError> = db.subscribe(
+        coven_database::test_utils::LiveSql::of("SELECT count(*) FROM queue", |r| {
+            r.get::<_, i64>(0)
+        })
+        .one(),
+    );
     assert_eq!(live.next_inline().await.unwrap().unwrap(), 0);
 
     let write_fill = write(&db, FILL).await;

@@ -1,6 +1,6 @@
-use crate::tests::{next, QueryError, TestDatabase, TestError, TestOptions};
+use crate::tests::{first, next, no_values, QueryError, TestDatabase, TestError, TestOptions};
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[test]
@@ -24,8 +24,8 @@ fn bundled_sqlite_keeps_a_statements_journal_in_memory_up_to_124_kib() {
 async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_queries() {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     let db = TestDatabase::open("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)");
-    let mut query = db
-        .subscribe(|sql| Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?));
+    let mut query =
+        db.subscribe_rows("SELECT value FROM items", no_values(), |r| r.get::<_, String>(0));
     assert!(next(&mut query).await.is_empty());
     db.host(|writer| {
         // Fail SQLite's own session lookup while taking its changeset, once
@@ -66,12 +66,8 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
 #[tokio::test]
 async fn commit_failure_and_net_zero_transactions_do_not_publish() {
     let db = TestDatabase::open("CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE items(id INTEGER PRIMARY KEY,parent REFERENCES parent DEFERRABLE INITIALLY DEFERRED,value TEXT)");
-    let calls = Arc::new(AtomicUsize::new(0));
-    let count = Arc::clone(&calls);
-    let mut query = db.subscribe(move |sql| {
-        count.fetch_add(1, Ordering::SeqCst);
-        Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?)
-    });
+    let mut query =
+        db.subscribe_rows("SELECT value FROM items", no_values(), |r| r.get::<_, String>(0));
     assert!(next(&mut query).await.is_empty());
     db.host(|writer| {
         assert!(writer
@@ -81,16 +77,16 @@ async fn commit_failure_and_net_zero_transactions_do_not_publish() {
     assert!(!query.is_marked_for_rerun());
     db.commit("INSERT INTO items VALUES(1,NULL,'temporary'); DELETE FROM items");
     assert!(!query.is_marked_for_rerun());
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(query.runs().runs(), 1);
     db.close();
 }
 
 #[tokio::test]
 async fn every_host_statement_path_is_observed_by_the_transaction() {
     let db = TestDatabase::open("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)");
-    let mut query = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT value FROM items", [], |r| r.get::<_, String>(0))?)
-    });
+    let mut query = db
+        .subscribe_rows("SELECT value FROM items", no_values(), |r| r.get::<_, String>(0))
+        .process(first);
     assert!(query.next_inline().await.expect("the live query answers").is_err());
     let commit = |run: &dyn Fn(&crate::HostSql<crate::NoPolicy>)| {
         db.host(|writer| {
@@ -183,8 +179,8 @@ async fn a_live_read_refuses_a_schema_with_a_table_that_has_no_primary_key() {
     let db = TestDatabase::open(
         "CREATE TABLE keyed(id TEXT NOT NULL PRIMARY KEY,value TEXT); CREATE TABLE unkeyed(value TEXT)",
     );
-    let mut query = db
-        .subscribe(|sql| Ok(sql.query("SELECT value FROM keyed", [], |r| r.get::<_, String>(0))?));
+    let mut query =
+        db.subscribe_rows("SELECT value FROM keyed", no_values(), |r| r.get::<_, String>(0));
     let error = crate::tests::next_result(&mut query).await.unwrap_err();
     assert!(format!("{error:?}").contains("unkeyed"), "{error:?}");
     db.close();
@@ -199,19 +195,16 @@ async fn ordinary_tables_get_no_hook_change_and_retain_column_and_key_precision(
         ("TEXT PRIMARY KEY", " STRICT", "'a'", "'b'"),
     ] {
         let db = TestDatabase::open(&format!("CREATE TABLE items(id {key},value INTEGER,extra INTEGER){suffix}; INSERT INTO items VALUES({first},10,0),({second},20,0); CREATE TABLE hook_target(id INTEGER PRIMARY KEY,value TEXT)"));
-        let runs = Arc::new(AtomicUsize::new(0));
-        let count = Arc::clone(&runs);
-        let query = format!("SELECT value FROM items WHERE id={first}");
-        let mut query = db.subscribe(move |sql| {
-            let value = sql.query_row(&query, [], |r| r.get::<_, i64>(0))?;
-            Ok((count.fetch_add(1, Ordering::SeqCst), value))
-        });
-        assert_eq!(next(&mut query).await, (0, 10));
+        let sql = format!("SELECT value FROM items WHERE id={first}");
+        let mut query = db
+            .subscribe_rows(sql, no_values(), |r| r.get::<_, i64>(0))
+            .process(crate::tests::first);
+        assert_eq!(next(&mut query).await, 10);
         db.commit(&format!("UPDATE items SET extra=1 WHERE id={first}; UPDATE items SET value=21 WHERE id={second}; INSERT INTO hook_target(value) VALUES('unrelated')"));
         assert!(!query.is_marked_for_rerun(), "{key}{suffix}");
-        assert_eq!(runs.load(Ordering::SeqCst), 1, "{key}{suffix}");
+        assert_eq!(query.runs().runs(), 1, "{key}{suffix}");
         db.commit(&format!("UPDATE items SET value=11 WHERE id={first}"));
-        assert_eq!(next(&mut query).await, (1, 11));
+        assert_eq!(next(&mut query).await, 11);
         db.close();
     }
 }
@@ -256,9 +249,8 @@ async fn a_failed_rollback_keeps_both_causes_and_fails_the_handle_until_reopen()
         let db = TestDatabase::open(
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)",
         );
-        let mut notes = db.subscribe(|sql| {
-            Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
-        });
+        let mut notes =
+            db.subscribe_rows("SELECT title FROM notes", no_values(), |r| r.get::<_, String>(0));
         assert!(next(&mut notes).await.is_empty());
         db.host(|writer| writer.refuse_transaction_end(true));
         // Each fails after a change that its refused ROLLBACK leaves on the

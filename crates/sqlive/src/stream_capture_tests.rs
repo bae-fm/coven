@@ -1,14 +1,14 @@
-use crate::tests::{next, TestDatabase, TestError};
+use crate::tests::{next, no_values, TestDatabase, TestError};
 
 #[tokio::test]
 async fn streamed_commits_observe_without_rowid_and_virtual_tables_and_discard_rollbacks() {
     let db = TestDatabase::open(
         "CREATE TABLE items(id TEXT PRIMARY KEY,value TEXT) WITHOUT ROWID; CREATE VIRTUAL TABLE search USING fts5(value)",
     );
-    let mut items = db
-        .subscribe(|sql| Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?));
-    let mut search = db
-        .subscribe(|sql| Ok(sql.query("SELECT value FROM search", [], |r| r.get::<_, String>(0))?));
+    let mut items =
+        db.subscribe_rows("SELECT value FROM items", no_values(), |r| r.get::<_, String>(0));
+    let mut search =
+        db.subscribe_rows("SELECT value FROM search", no_values(), |r| r.get::<_, String>(0));
     assert!(next(&mut items).await.is_empty());
     assert!(next(&mut search).await.is_empty());
     db.host(|writer| {

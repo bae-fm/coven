@@ -1,4 +1,6 @@
-use crate::tests::{QueryError, TestDatabase, TestError, TestOptions, HANG_GUARD};
+use crate::tests::{
+    first, no_values, QueryError, TestDatabase, TestError, TestOptions, HANG_GUARD,
+};
 use crate::{CheckpointMode, SqliteSettings, WalAutocheckpoint, WalCheckpoint};
 use std::convert::Infallible;
 use std::num::NonZeroU32;
@@ -97,9 +99,9 @@ async fn sqlive_checkpoints_the_wal_past_its_threshold() {
     let pages: i64 = db.value("PRAGMA wal_autocheckpoint");
     assert_eq!(pages, 0, "the writer never checkpoints as it commits");
     let mut restarts = db.with_database(|database| database.report_checkpoints());
-    let mut query = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))?)
-    });
+    let mut query = db
+        .subscribe_rows("SELECT count(*) FROM blobs", no_values(), |r| r.get::<_, i64>(0))
+        .process(first);
     let reader = tokio::spawn(async move { while let Some(Ok(_)) = query.next_inline().await {} });
     tokio::time::timeout(HANG_GUARD, async {
         let mut started_over = 0;
@@ -386,9 +388,9 @@ async fn checkpointer_failure(
     fault: impl FnMut() -> Result<(), TestError> + Send + 'static,
 ) -> TestError {
     let mut tries = faulted(db, fault);
-    let mut query = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))?)
-    });
+    let mut query = db
+        .subscribe_rows("SELECT count(*) FROM blobs", no_values(), |r| r.get::<_, i64>(0))
+        .process(first);
     checkpointed(db, &mut tries).await;
     let QueryError(failure) = tokio::time::timeout(HANG_GUARD, async {
         loop {

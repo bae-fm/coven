@@ -3,7 +3,7 @@
 //! before or after it, and those whose scope has no such key, however many
 //! other live queries wait (SPEC.md section 7).
 
-use crate::tests::{next, QueryError, TestDatabase};
+use crate::tests::{at, next, no_values, QueryError, TestDatabase};
 use crate::{ConnectionWorkCounter, LiveQuery};
 
 const SCHEMA: &str = "CREATE TABLE tracks(id INTEGER PRIMARY KEY, release INTEGER, title TEXT)";
@@ -12,13 +12,11 @@ const SCHEMA: &str = "CREATE TABLE tracks(id INTEGER PRIMARY KEY, release INTEGE
 const PAGES: i64 = 200;
 
 fn page(db: &TestDatabase, release: i64) -> LiveQuery<Vec<String>, QueryError> {
-    db.subscribe(move |sql| {
-        Ok(sql.query(
-            "SELECT title FROM tracks WHERE release = ?1 ORDER BY id",
-            [release],
-            |r| r.get::<_, String>(0),
-        )?)
-    })
+    db.subscribe_rows(
+        "SELECT title FROM tracks WHERE release = ?1 ORDER BY id",
+        at(&[&release]),
+        |r| r.get::<_, String>(0),
+    )
 }
 
 #[tokio::test]
@@ -31,21 +29,19 @@ async fn a_write_is_judged_only_against_its_candidates() {
         next(&mut query).await;
         pages.push(query);
     }
-    let mut pair = db.subscribe(|sql| {
-        Ok(sql.query(
-            "SELECT title FROM tracks WHERE release IN (300, 301) ORDER BY id",
-            [],
-            |r| r.get::<_, String>(0),
-        )?)
-    });
+    let mut pair = db.subscribe_rows(
+        "SELECT title FROM tracks WHERE release IN (300, 301) ORDER BY id",
+        no_values(),
+        |r| r.get::<_, String>(0),
+    );
     assert!(next(&mut pair).await.is_empty());
     // A comparison other than an equality gives the scope no key, so every
     // write to `tracks` judges this query.
-    let mut late = db.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM tracks WHERE title > 'x' ORDER BY id", [], |r| {
-            r.get::<_, String>(0)
-        })?)
-    });
+    let mut late = db.subscribe_rows(
+        "SELECT title FROM tracks WHERE title > 'x' ORDER BY id",
+        no_values(),
+        |r| r.get::<_, String>(0),
+    );
     assert!(next(&mut late).await.is_empty());
     let counter = ConnectionWorkCounter::new();
     db.track_work(&counter);

@@ -138,8 +138,7 @@ handle.write(move |sql| {
     Ok::<_, CovenError>(())
 }).await?;
 
-let mut titles: LiveQuery<_, CovenError> =
-    handle.subscribe(|sql| Ok(sql.fetch(&NoteTitlesParams {})?));
+let mut titles: LiveQuery<_, CovenError> = handle.subscribe(NoteTitlesParams {});
 // On a thread that may block.
 while let Some(Ok(rows)) = titles.next_blocking() {
     show(rows);

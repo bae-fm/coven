@@ -29,9 +29,11 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     let receiver_store = TestStore::with_ids(&ids);
     let source = open(&source_store).await;
     let receiver = open(&receiver_store).await;
-    let mut query: crate::LiveQuery<_, DbError> = receiver.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
-    });
+    let mut query: crate::LiveQuery<_, DbError> = receiver.subscribe(
+        crate::test_utils::LiveSql::of("SELECT title FROM notes ORDER BY id", |r| {
+            r.get::<_, String>(0)
+        }),
+    );
     assert!(query.next_inline().await.expect("the live query answers").unwrap().is_empty());
     sql(&source, "INSERT INTO notes VALUES('n','first','body')").await.unwrap();
     sql(&source, "UPDATE notes SET title='second'").await.unwrap();

@@ -28,8 +28,15 @@ pub(crate) fn select_listed() -> String {
 }
 
 pub(crate) fn lost_values(sql: &StoreSql) -> Result<Vec<crate::LostValue>, DbError> {
-    let records = sql.host_live_read(&format!("{SELECT} ORDER BY l.id"), [], read)?;
-    records.into_iter().map(crate::LostValue::from_record).collect()
+    crate::live_reads::once(&lost_values_read(), sql)
+}
+
+/// The decoded lost cells and removed rows, by id.
+pub(crate) fn lost_values_read(
+) -> crate::live_reads::CovenRead<impl Send + 'static, Vec<crate::LostValue>> {
+    let sql = format!("{SELECT} ORDER BY l.id");
+    crate::live_reads::CovenRead::new(sql, crate::live_reads::unbound, read)
+        .then(|records| records.into_iter().map(crate::LostValue::from_record).collect())
 }
 
 /// A table holding loss records: this device's, or the losses a snapshot

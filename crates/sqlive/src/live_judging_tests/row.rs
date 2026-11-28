@@ -1,9 +1,7 @@
 use super::lookup::follows;
-use crate::tests::{next, QueryError, TestDatabase};
+use crate::tests::{next, no_values, rerun, QueryError, TestDatabase};
 use crate::SqlValue;
 use rusqlite::functions::FunctionFlags;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 fn write(db: &TestDatabase, sql: &str) {
     db.commit(sql);
@@ -149,15 +147,10 @@ async fn conditions_sqlive_cannot_ask_sqlite_about_keep_whole_tables() {
         "SELECT value FROM items WHERE abs(rowid) > 3",
         "SELECT items.value FROM items JOIN u ON u.id = items.id WHERE items.a + u.a = 3",
     ] {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let count = calls.clone();
-        let mut query = db.subscribe(move |db| {
-            let run = count.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok((run, db.query(sql, [], |r| r.get::<_, i64>(0))?))
-        });
+        let mut query = db.subscribe_rows(sql, no_values(), |r| r.get::<_, i64>(0));
         next(&mut query).await;
         write(&db, "UPDATE items SET value=value+1 WHERE id=9");
-        assert_eq!(next(&mut query).await.0, 2, "{sql}");
+        assert_eq!(rerun(&mut query), 2, "{sql}");
     }
     db.close();
 }
@@ -458,7 +451,7 @@ async fn writes_pay_for_the_judged_conditions_they_meet() {
         "SELECT note FROM tracks WHERE CASE WHEN position = 2 THEN 0 ELSE 1 END = 0 AND title GLOB 'zz*' ORDER BY id",
     ] {
         let mut query =
-            db.subscribe(move |db| Ok(db.query(sql, [], |r| r.get::<_, String>(0))?));
+            db.subscribe_rows(sql, no_values(), |r| r.get::<_, String>(0));
         next(&mut query).await;
         queries.push(query);
     }
@@ -491,7 +484,7 @@ async fn an_error_in_the_question_counts_as_a_match() {
                  INSERT INTO docs VALUES (1,'{\"k\":\"x\"}',3,0),(2,'{\"k\":\"y\"}',4,0)",
         );
         let sql = format!("SELECT value FROM docs WHERE {condition}");
-        let mut query = db.subscribe(move |db| Ok(db.query(&sql, [], |r| r.get::<_, i64>(0))?));
+        let mut query = db.subscribe_rows(&sql, no_values(), |r| r.get::<_, i64>(0));
         next(&mut query).await;
         write(&db, bad);
         assert!(query.is_marked_for_rerun(), "{condition}");

@@ -1,20 +1,24 @@
 //! This installation's completed replacement notice, and the record that it
 //! stopped because another installation uses its device id (§19.3).
 
+use crate::live_reads::{unbound, CovenRead};
 use crate::sqlite::StoreSql;
 use crate::DbError;
 use coven_foundation::files::DeviceReset;
 use coven_merge::Slot;
 
 pub(crate) fn read(database: &StoreSql) -> Result<Option<DeviceReset>, DbError> {
-    Ok(database
-        .host_live_read(
-            "SELECT old_device,new_device FROM _coven_device_reset WHERE singleton=1",
-            [],
-            |row| Ok(DeviceReset { old_device: row.get(0)?, new_device: row.get(1)? }),
-        )?
-        .into_iter()
-        .next())
+    crate::live_reads::once(&reset_read(), database)
+}
+
+/// This installation's completed replacement notice, if any.
+pub(crate) fn reset_read() -> CovenRead<DeviceReset, Option<DeviceReset>> {
+    CovenRead::new(
+        "SELECT old_device,new_device FROM _coven_device_reset WHERE singleton=1",
+        unbound,
+        |row| Ok(DeviceReset { old_device: row.get(0)?, new_device: row.get(1)? }),
+    )
+    .then(|resets| Ok(resets.into_iter().next()))
 }
 
 pub(crate) fn record(database: &StoreSql, reset: &DeviceReset) -> Result<(), DbError> {

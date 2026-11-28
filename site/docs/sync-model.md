@@ -225,7 +225,7 @@ What a retry would do right now is the one row of the `coven_retry_effect`
 table: `pass`, `cooling_down` until `cooling_until`, `failed` for a failure
 only new credentials, an update or a reset can clear, or `not_syncing`. The
 same row decides the retry's answer, so an app that follows it with a live
-query, `handle.subscribe(RetryEffect::read)`, and offers Retry Now only while
+query, `handle.subscribe(RetryEffect::live())`, and offers Retry Now only while
 it says `pass` offers it only when pressing it runs a pass.
 
 ## Status and pending work

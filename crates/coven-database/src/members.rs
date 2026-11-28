@@ -1,6 +1,7 @@
 //! Members, devices and circles as the committed prefix has them (E9, E12).
 //! Each call and its live subscription run the same query.
 
+use crate::live_reads::{bound, CovenRead};
 use crate::sqlite::StoreSql;
 use crate::{store_state::DeviceState, DbError};
 use coven_format::admin::{MemberPublicKeys, MemberRole};
@@ -69,12 +70,21 @@ const MEMBERS: &str = "SELECT m.member,m.signing,m.sealing,m.role,m.removed,m.ac
      ORDER BY m.member,d.device";
 
 pub(crate) fn members(db: &StoreSql, device: DeviceId) -> Result<Vec<MemberInfo>, DbError> {
-    let rows = db.host_live_read(MEMBERS, [device], |r| {
+    crate::live_reads::once(&members_read(Some(device)), db)
+}
+
+/// Every active member with their devices, as `device`, the local device,
+/// reads them: none while the store is closed.
+pub(crate) fn members_read(
+    device: Option<DeviceId>,
+) -> CovenRead<impl Send + 'static, Vec<MemberInfo>> {
+    let values = move || bound(&[&device.ok_or(DbError::StoreClosed)?]);
+    CovenRead::new(MEMBERS, values, move |r| {
         let (id, member) = crate::store_state_tables::stored_member(r)?;
         let listed = match r.get::<_, Option<DeviceId>>(9)? {
             Some(id) => Some(DeviceInfo {
                 id,
-                is_self: id == device,
+                is_self: Some(id) == device,
                 name: r.get(10)?,
                 state: crate::write_encoding::stored(r, 11, sqlive::rusqlite::types::Type::Text)?,
             }),
@@ -85,7 +95,14 @@ pub(crate) fn members(db: &StoreSql, device: DeviceId) -> Result<Vec<MemberInfo>
             _ => Some(crate::store_state_tables::member(r, 12)?),
         };
         Ok((id, member, listed, me))
-    })?;
+    })
+    .then(member_infos)
+}
+
+/// The members `rows`, the rows of `MEMBERS`, list.
+fn member_infos(
+    rows: Vec<(MemberId, crate::StoreMember, Option<DeviceInfo>, Option<MemberId>)>,
+) -> Result<Vec<MemberInfo>, DbError> {
     let mut members: Vec<MemberInfo> = Vec::new();
     for (id, crate::StoreMember { keys, access, role, .. }, listed, me) in rows {
         if members.last().is_none_or(|last| last.id != id) {
@@ -110,14 +127,20 @@ pub(crate) fn members(db: &StoreSql, device: DeviceId) -> Result<Vec<MemberInfo>
 /// the device's member, so a registration that doesn't decode fails the read
 /// whether or not the member has circles.
 pub(crate) fn circles(db: &StoreSql, device: DeviceId) -> Result<Vec<Circle>, DbError> {
-    let rows = db.host_live_read(
+    crate::live_reads::once(&circles_read(Some(device)), db)
+}
+
+/// The circles of the member `device`, the local device, registered under:
+/// none while the store is closed.
+pub(crate) fn circles_read(device: Option<DeviceId>) -> CovenRead<Option<Circle>, Vec<Circle>> {
+    CovenRead::new(
         "SELECT x.member,NULL,NULL FROM _coven_devices x WHERE x.device=?1
          UNION ALL
          SELECT NULL,c.circle,c.name FROM _coven_devices x
          JOIN _coven_circle_members m ON m.member=x.member
          JOIN _coven_circles c ON c.circle=m.circle
          WHERE x.device=?1 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=c.circle)",
-        [device],
+        move || bound(&[&device.ok_or(DbError::StoreClosed)?]),
         |r| {
             Ok(match r.get_ref(0)? {
                 sqlive::rusqlite::types::ValueRef::Null => {
@@ -129,10 +152,12 @@ pub(crate) fn circles(db: &StoreSql, device: DeviceId) -> Result<Vec<Circle>, Db
                 }
             })
         },
-    )?;
-    let mut circles: Vec<Circle> = rows.into_iter().flatten().collect();
-    circles.sort_by_key(|circle| circle.id);
-    Ok(circles)
+    )
+    .then(|rows| {
+        let mut circles: Vec<Circle> = rows.into_iter().flatten().collect();
+        circles.sort_by_key(|circle| circle.id);
+        Ok(circles)
+    })
 }
 
 /// A circle's members who remain in the store; none for an absent or deleted
@@ -144,28 +169,40 @@ pub(crate) fn circle_members(
     device: DeviceId,
     circle: CircleId,
 ) -> Result<Vec<CircleMemberInfo>, DbError> {
-    let rows = db.host_live_read(
+    crate::live_reads::once(&circle_members_read(Some(device), circle), db)
+}
+
+/// `circle`'s members who remain in the store, as `device`, the local device,
+/// reads them: none while the store is closed.
+pub(crate) fn circle_members_read(
+    device: Option<DeviceId>,
+    circle: CircleId,
+) -> CovenRead<(Option<MemberId>, Option<MemberId>), Vec<CircleMemberInfo>> {
+    CovenRead::new(
         "SELECT NULL,x.member FROM _coven_devices x WHERE x.device=?1
          UNION ALL
          SELECT m.member,NULL
          FROM _coven_circle_members m JOIN _coven_members s ON s.member=m.member
          WHERE m.circle=?2 AND s.removed=0
            AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=m.circle)",
-        (device, circle),
+        move || bound(&[&device.ok_or(DbError::StoreClosed)?, &circle]),
         |r| {
             Ok(match r.get_ref(0)? {
                 sqlive::rusqlite::types::ValueRef::Null => (None, Some(member(r, 1)?)),
                 _ => (Some(member(r, 0)?), None),
             })
         },
-    )?;
-    let me = rows.iter().find_map(|(_, me)| *me);
-    let mut members: Vec<MemberId> = rows.into_iter().filter_map(|(member, _)| member).collect();
-    members.sort();
-    Ok(members
-        .into_iter()
-        .map(|member| CircleMemberInfo { is_self: me.as_ref() == Some(&member), member })
-        .collect())
+    )
+    .then(|rows| {
+        let me = rows.iter().find_map(|(_, me)| *me);
+        let mut members: Vec<MemberId> =
+            rows.into_iter().filter_map(|(member, _)| member).collect();
+        members.sort();
+        Ok(members
+            .into_iter()
+            .map(|member| CircleMemberInfo { is_self: me.as_ref() == Some(&member), member })
+            .collect())
+    })
 }
 
 #[cfg(test)]

@@ -59,6 +59,19 @@ impl<'connection, M: Mode> SqlReadContext<'connection, M> {
     }
 }
 
+impl SqlReadContext<'_, Writer> {
+    /// What `reads` returns, read once in this snapshot: the reads a live
+    /// query runs, run as a one-shot read, which records nothing.
+    pub fn reads<S: crate::LiveReads>(&self, reads: &S) -> Result<S::Rows, DbError> {
+        reads.read(&mut |statements, each| {
+            for (index, statement) in statements.iter().enumerate() {
+                self.database.once_rows(statement, |row| each(index, row))?;
+            }
+            Ok(())
+        })
+    }
+}
+
 /// A read that starts when polled and retains its store borrow until it
 /// ends, on the store's writer or a read-only handle.
 #[must_use = "reads run when awaited"]

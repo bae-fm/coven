@@ -2,59 +2,60 @@
 //! when a commit changes what it read (§4).
 
 use super::StoreDatabase;
-use crate::sqlite::StoreSql;
-use crate::write_failure::Hosted;
-use crate::{DbError, LiveQuery, LostValue, ReconfigurableLiveQuery, SqlReadContext};
+use crate::live_reads::{CovenRead, LiveReads, Run};
+use crate::{DbError, LiveQuery, LostValue, ReconfigurableLiveQuery};
 use coven_foundation::task::CarriesBug;
 use std::sync::Arc;
 
 impl StoreDatabase {
-    /// Observe the tables and columns a query reads, and the rows its
-    /// conditions allow. Its results fail with the closure's own error type.
-    pub fn subscribe<F, R, E>(&self, query: F) -> LiveQuery<R, E>
+    /// Observe the rows `reads` returns: coven runs the reads again for each
+    /// commit that changes what they read. Its results fail with `E`, which
+    /// holds a database failure.
+    pub fn subscribe<S, E>(&self, reads: S) -> LiveQuery<S::Rows, E>
     where
-        F: Fn(SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
+        S: LiveReads,
         E: From<DbError> + CarriesBug + Send + 'static,
     {
-        LiveQuery::new(self.subscribe_reconfigurable((), move |(), sql| query(sql)))
+        LiveQuery::new(self.live((), move |(), run| Ok(reads.read(run)?)))
     }
 
-    /// Observe a query whose request the caller can replace through a shared
-    /// handle.
-    pub fn subscribe_reconfigurable<Q, F, R, E>(
+    /// Observe the rows the reads `reads` makes of each request return,
+    /// where the caller replaces the request through a shared handle. A
+    /// request `reads` can't make reads of fails its run with `reads`'s
+    /// error.
+    pub fn subscribe_reconfigurable<Q, S, E>(
         &self,
         initial_request: Q,
-        query: F,
+        reads: impl Fn(&Q) -> Result<S, E> + Send + Sync + 'static,
+    ) -> ReconfigurableLiveQuery<Q, S::Rows, E>
+    where
+        Q: Clone + PartialEq + Send + Sync + 'static,
+        S: LiveReads,
+        E: From<DbError> + CarriesBug + Send + 'static,
+    {
+        self.live(initial_request, move |request, run| Ok(reads(request)?.read(run)?))
+    }
+
+    /// Follow `read`, coven's own SQL on its tables, live: it runs again
+    /// after each commit that changes what it read.
+    pub(crate) fn follow<T, U, E>(&self, read: CovenRead<T, U>) -> LiveQuery<U, E>
+    where
+        T: Send + 'static,
+        U: Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
+    {
+        self.subscribe(read)
+    }
+
+    /// A live query that runs `read` on the store's readers for each
+    /// request.
+    fn live<Q, R, E>(
+        &self,
+        initial_request: Q,
+        read: impl Fn(&Q, Run<'_>) -> Result<R, E> + Send + Sync + 'static,
     ) -> ReconfigurableLiveQuery<Q, R, E>
     where
         Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
-        E: From<DbError> + CarriesBug + Send + 'static,
-    {
-        self.live(initial_request, move |request, reader| {
-            query(request, SqlReadContext::new(reader))
-        })
-    }
-
-    /// Follow `query`, coven's own SQL on its tables, live: it runs again
-    /// after each commit that changes what it read.
-    pub(crate) fn follow<F, R, E>(&self, query: F) -> LiveQuery<R, E>
-    where
-        F: Fn(&StoreSql) -> Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
-        E: From<DbError> + CarriesBug + Send + 'static,
-    {
-        LiveQuery::new(self.live((), move |(), reader| query(reader)))
-    }
-
-    /// A live query that runs `query` on the store's readers for each
-    /// request.
-    fn live<Q, F, R, E>(&self, initial_request: Q, query: F) -> ReconfigurableLiveQuery<Q, R, E>
-    where
-        Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, &StoreSql) -> Result<R, E> + Send + Sync + 'static,
         R: Send + 'static,
         E: From<DbError> + CarriesBug + Send + 'static,
     {
@@ -70,12 +71,25 @@ impl StoreDatabase {
                 inner.call(|inner| {
                     inner.access.with_reader(|reader, call| {
                         let _constants = crate::transaction_constants::keep_constants(reader, call);
-                        reader
-                            .live_read(
-                                &mut |reads, lookups| completion.finish_judging(reads, lookups),
-                                |reader| query(request, reader).map_err(Hosted),
-                            )
-                            .map_err(Hosted::into_inner)
+                        let mut ran = false;
+                        let result = read(request, &mut |statements, each| {
+                            ran = true;
+                            let judge = &mut |reads, lookups: &mut sqlive::Lookups<'_>| {
+                                completion.finish_judging(reads, lookups)
+                            };
+                            Ok(reader.live_read(judge, statements, each)?)
+                        });
+                        // Reads that failed before they ran read nothing,
+                        // which the query's judging still hears.
+                        if !ran {
+                            let judge = &mut |reads, lookups: &mut sqlive::Lookups<'_>| {
+                                completion.finish_judging(reads, lookups)
+                            };
+                            reader
+                                .live_read(judge, &[], |_, _| Ok(()))
+                                .map_err(|error| E::from(DbError::from(error)))?;
+                        }
+                        result
                     })
                 })
             }),
@@ -90,7 +104,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(|db| crate::loss_record::lost_values(db).map_err(E::from))
+        self.follow(crate::loss_record::lost_values_read())
     }
 }
 

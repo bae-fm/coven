@@ -7,7 +7,7 @@
 //! whole, the host's transaction under a session, a streamed transaction, and a
 //! write whose host phase undoes its app phase.
 
-use crate::tests::{next, QueryError, TestDatabase, TestError, TestOptions};
+use crate::tests::{next, no_values, QueryError, TestDatabase, TestError, TestOptions};
 use crate::LiveQuery;
 
 const SCHEMA: &str = "CREATE TABLE notes(id INTEGER PRIMARY KEY, title TEXT, pinned INTEGER);
@@ -49,16 +49,14 @@ fn run(db: &TestDatabase, path: Path, sql: &str) {
 
 /// The first note's title, read by its key.
 fn first(db: &TestDatabase) -> LiveQuery<Vec<String>, QueryError> {
-    db.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM notes WHERE id = 1", [], |r| r.get::<_, String>(0))?)
+    db.subscribe_rows("SELECT title FROM notes WHERE id = 1", no_values(), |r| {
+        r.get::<_, String>(0)
     })
 }
 
 /// Every note's title, read with no condition.
 fn every(db: &TestDatabase) -> LiveQuery<Vec<String>, QueryError> {
-    db.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
-    })
+    db.subscribe_rows("SELECT title FROM notes ORDER BY id", no_values(), |r| r.get::<_, String>(0))
 }
 
 /// Writes whose changes to each row cancel out: an insert and a delete, an
@@ -184,9 +182,10 @@ async fn an_fts5_rewrite_that_changes_nothing_reruns_no_query() {
         "CREATE VIRTUAL TABLE search USING fts5(title, body);
          INSERT INTO search(rowid, title, body) VALUES (1, 'a', 'x'), (2, 'b', 'y')",
     );
-    let mut titles = db.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM search ORDER BY rowid", [], |r| r.get::<_, String>(0))?)
-    });
+    let mut titles =
+        db.subscribe_rows("SELECT title FROM search ORDER BY rowid", no_values(), |r| {
+            r.get::<_, String>(0)
+        });
     assert_eq!(next(&mut titles).await, ["a", "b"]);
     db.write("UPDATE search SET title = title WHERE rowid = 1").unwrap();
     assert!(!titles.is_marked_for_rerun());

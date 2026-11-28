@@ -19,18 +19,21 @@ fn next_result_after_a_skipped_write_waits_without_holding_a_pool_thread() {
         let store = TestStore::new();
         let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
         db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
-        let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
-        let query: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
-            ran.send(()).unwrap();
-            Ok(sql.query_row("SELECT count(*) > 0 FROM notes", [], |r| r.get::<_, bool>(0))?)
-        });
+        static GATE: crate::tests::Gate = crate::tests::Gate::new();
+        let sql = "SELECT count(*) > 0 FROM notes";
+        let query: crate::LiveQuery<_, DbError> =
+            db.subscribe(crate::test_utils::LiveSql::of(sql, |r| {
+                GATE.pass();
+                r.get::<_, bool>(0)
+            }));
         let (query, first) = crate::next_result(query).await;
-        assert!(first.unwrap().unwrap());
-        runs.recv().await.unwrap();
+        assert_eq!(first.unwrap().unwrap(), [true]);
+        let (entry, release) = GATE.close();
         let answer = tokio::spawn(crate::next_result(query));
         db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
-        // The run that finds an equal result has started.
-        runs.recv().await.unwrap();
+        // The run that finds an equal result has started, and goes on.
+        entry.recv_timeout(coven_foundation::clock::HANG_GUARD).unwrap();
+        release.send(()).unwrap();
         // Blocking work queued behind that run starts once it ends, which a
         // parked thread would prevent.
         coven_foundation::clock::within(tokio::task::spawn_blocking(|| ()))
@@ -40,7 +43,7 @@ fn next_result_after_a_skipped_write_waits_without_holding_a_pool_thread() {
         assert!(!answer.is_finished(), "next_result returned an equal result");
         db.commit_writer(|sql, _| sql.batch("DELETE FROM notes").unwrap());
         let (_query, second) = answer.await.unwrap();
-        assert!(!second.unwrap().unwrap());
+        assert_eq!(second.unwrap().unwrap(), [false]);
         db.close().await.unwrap();
     });
 }

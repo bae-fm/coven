@@ -7,14 +7,15 @@ use serde::Deserialize;
 /// The pending records as the app's SQL reads them from `coven_pending`,
 /// as a live query.
 fn records(db: &crate::StoreDatabase) -> crate::LiveQuery<Vec<Record>, DbError> {
-    db.subscribe(|sql| {
-        sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
-            r.get::<_, Vec<u8>>(0)
-        })?
-        .iter()
-        .map(|record| serde_json::from_slice(record).map_err(DbError::StateEncoding))
-        .collect()
-    })
+    let sql = "SELECT record FROM coven_pending ORDER BY position";
+    db.subscribe(crate::test_utils::LiveSql::of(sql, |r| r.get::<_, Vec<u8>>(0))).process(
+        |records: Vec<Vec<u8>>| {
+            records
+                .iter()
+                .map(|record| serde_json::from_slice(record).map_err(DbError::StateEncoding))
+                .collect()
+        },
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,7 +245,7 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
             std::slice::from_ref(&pending)
         );
         let mut ordinary =
-            db.subscribe(|sql| Ok(sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?));
+            db.subscribe(crate::test_utils::LiveSql::of("SELECT 1", |r| r.get::<_, i64>(0)).one());
         assert_eq!(ordinary.next_inline().await.expect("the live query answers").unwrap(), 1);
         db.inspect_writer(|sql, _| {
             if statement == "COMMIT" {
@@ -288,22 +289,20 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     db.inspect_writer(|sql, _| {
         sql.batch("CREATE TEMP TRIGGER fail_pending BEFORE INSERT ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;").unwrap();
     });
-    let (entered, entry) = tokio::sync::oneshot::channel();
-    let entered = std::sync::Mutex::new(Some(entered));
-    let (release, released) = std::sync::mpsc::channel();
-    let released = std::sync::Mutex::new(released);
-    let live = db.follow(move |db| {
-        let records = crate::pending::read::<Record>(db)?;
-        entered.lock().unwrap().take().unwrap().send(()).unwrap();
-        released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
-        Ok(records)
-    });
+    static GATE: crate::tests::Gate = crate::tests::Gate::new();
+    let (entry, release) = GATE.close();
+    let live: crate::LiveQuery<_, DbError> =
+        db.subscribe(crate::test_utils::LiveSql::of("SELECT count(*) FROM coven_pending", |r| {
+            GATE.pass();
+            r.get::<_, i64>(0)
+        }));
     // The query's run holds a thread of tokio's blocking pool until the test
     // releases it, so the test's own thread stays free to record the update.
     let mut held = tokio::spawn(crate::next_result(live));
+    let entered = tokio::task::spawn_blocking(move || entry.recv_timeout(HANG_GUARD));
     tokio::select! {
         result = &mut held => panic!("held query returned: {:?}", result.unwrap().1),
-        result = entry => result.unwrap(),
+        result = entered => result.unwrap().unwrap(),
     }
     let failed = db.record_pending(pending).await;
     release.send(()).unwrap();
@@ -635,12 +634,13 @@ async fn a_records_cause_is_written_with_it_and_cleared_at_open() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let follow = |db: &crate::StoreDatabase| {
-        db.subscribe(|sql| {
-            Ok(sql.query("SELECT record,cause FROM coven_pending ORDER BY position", [], |r| {
+        db.subscribe(crate::test_utils::LiveSql::of(
+            "SELECT record,cause FROM coven_pending ORDER BY position",
+            |r| {
                 let record: Vec<u8> = r.get(0)?;
                 Ok((serde_json::from_slice::<Record>(&record).unwrap(), r.get(1)?))
-            })?)
-        })
+            },
+        ))
     };
     let mut live: crate::LiveQuery<_, DbError> = follow(&db);
     let mut next = async || live.next_inline().await.expect("the live query answers").unwrap();

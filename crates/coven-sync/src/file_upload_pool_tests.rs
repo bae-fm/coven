@@ -655,20 +655,25 @@ async fn the_worker_s_attempts_are_what_sending_reads() {
     for (n, id) in ["a", "b", "c"].into_iter().enumerate() {
         files.push(f.attach("files", id, photo(n as u8)).await.id().to_string());
     }
-    let mut counts: coven_database::LiveQuery<_, DbError> = f.database.subscribe(|sql| {
-        let sending =
-            sql.query("SELECT s.file FROM coven_sending AS s ORDER BY s.file", [], |row| {
-                row.get::<_, String>(0)
-            })?;
-        let (counted, queued) = sql.query_row(
-            "SELECT count(*) FILTER (WHERE sending),count(*) FROM coven_uploads",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?;
-        Ok((sending, counted, queued))
-    });
+    // The counts with each file being sent: one row with no file when none is.
+    let sql = "SELECT s.file,c.counted,c.queued
+               FROM (SELECT count(*) FILTER (WHERE sending) AS counted,count(*) AS queued
+                     FROM coven_uploads) AS c
+               LEFT JOIN coven_sending AS s ON 1
+               ORDER BY s.file";
+    let row = |row: &coven_database::Row<'_>| {
+        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+    };
     // The files being sent, how many `sending` counts, and how many are queued.
     type Outbox = (Vec<String>, i64, i64);
+    let mut counts: coven_database::LiveQuery<_, DbError> = f
+        .database
+        .subscribe(coven_database::test_utils::LiveSql::of(sql, row))
+        .process(|rows: Vec<(Option<String>, i64, i64)>| {
+            let (_, counted, queued) = rows[0];
+            let sending = rows.into_iter().filter_map(|(file, _, _)| file).collect();
+            Ok::<Outbox, DbError>((sending, counted, queued))
+        });
     let mut until = async |done: &dyn Fn(&Outbox) -> bool| loop {
         let answer = tokio::time::timeout(HANG_GUARD, counts.next_inline())
             .await
@@ -808,11 +813,13 @@ async fn the_sync_state_view_runs_again_as_a_transfer_starts_and_ends() {
     f.attach("covers", "x", photo(1)).await;
     let mut shown: coven_database::LiveQuery<_, coven_database::DbError> = f
         .database
-        .subscribe(|sql| {
-            Ok(sql.query_row("SELECT state,pending,detail FROM coven_sync_state", [], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?, row.get(2)?))
-            })?)
-        })
+        .subscribe(
+            coven_database::test_utils::LiveSql::of(
+                "SELECT state,pending,detail FROM coven_sync_state",
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?, row.get(2)?)),
+            )
+            .one(),
+        )
         .process(Ok);
     let waiting =
         ("waiting_to_sync".to_owned(), None, SyncState::WaitingToSync(SyncWait::NotSyncing));

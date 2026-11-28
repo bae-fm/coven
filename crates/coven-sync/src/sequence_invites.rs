@@ -298,22 +298,31 @@ impl Invite {
         Ok(work.shown(operation, stage))
     }
 
-    /// Read `coven_invites`, as an app's live query does:
-    /// `handle.subscribe(Invite::list)`. This device's invites that haven't
-    /// ended, in the order they were made (§13.2).
+    /// Read `coven_invites` in a one-shot read: `handle.read(Invite::list)`.
+    /// This device's invites that haven't ended, in the order they were
+    /// made (§13.2).
     pub fn list<M: coven_database::Mode>(
         sql: coven_database::SqlReadContext<'_, M>,
     ) -> Result<Vec<Self>, DbError> {
-        Ok(sql.query(Self::LIST, [], |row| {
-            let data: Vec<u8> = row.get(0)?;
-            Self::from_columns(&data, OperationId(row.get(1)?)).map_err(|error| {
-                coven_database::SqliteError::FromSqlConversionFailure(
-                    0,
-                    coven_database::types::Type::Blob,
-                    Box::new(error),
-                )
-            })
-        })?)
+        Ok(sql.query(Self::LIST, [], Self::listed)?)
+    }
+
+    /// `coven_invites` as a live query follows it:
+    /// `handle.subscribe(Invite::live())`, which `list` reads once.
+    pub fn live() -> coven_database::CovenRead<Self, Vec<Self>> {
+        coven_database::CovenRead::new(Self::LIST, coven_database::unbound, Self::listed)
+    }
+
+    /// The invite a row of `LIST` holds.
+    fn listed(row: &coven_database::Row<'_>) -> coven_database::SqliteResult<Self> {
+        let data: Vec<u8> = row.get(0)?;
+        Self::from_columns(&data, OperationId(row.get(1)?)).map_err(|error| {
+            coven_database::SqliteError::FromSqlConversionFailure(
+                0,
+                coven_database::types::Type::Blob,
+                Box::new(error),
+            )
+        })
     }
 
     /// The code the invite shows.
@@ -341,7 +350,7 @@ impl Invite {
     pub fn follow(
         database: &coven_database::StoreDatabase,
     ) -> coven_database::test_utils::Followed<Vec<Self>, DbError> {
-        coven_database::test_utils::Followed::new(database.subscribe(Self::list))
+        coven_database::test_utils::Followed::new(database.subscribe(Self::live()))
     }
 }
 

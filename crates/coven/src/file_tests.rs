@@ -182,9 +182,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         });
         memory.reset_request_peak();
         creations.add_permits(ids.len());
-        let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
-            Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
-        });
+        let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(coven_database::test_utils::LiveSql::of("SELECT count(*) FROM coven_uploads", |r| r.get::<_, i64>(0)).one());
         while uploads.next_inline().await.expect("the live query answers").unwrap() != 0 {}
         // The two in flight finish; each later upload starts under the new limit.
         assert_eq!(memory.peak_requests(), 1, "remaining files start one at a time");
@@ -604,15 +602,15 @@ const QUEUED: &str = "SELECT r.title,u.paused,u.retry_at IS NOT NULL,u.pending
       ON r.file=u.file
     ORDER BY u.position";
 
-fn queued_rows(sql: SqlReadContext<'_>) -> CovenResult<Vec<QueuedRow>> {
-    Ok(sql.query(QUEUED, [], |r| {
+fn queued_rows() -> coven_database::test_utils::LiveSql<QueuedRow> {
+    coven_database::test_utils::LiveSql::of(QUEUED, |r| {
         Ok(QueuedRow {
             title: r.get(0)?,
             paused: r.get(1)?,
             retrying: r.get(2)?,
             pending: r.get(3)?,
         })
-    })?)
+    })
 }
 
 /// The app's SQL reads the upload queue, pins and pending records as coven
@@ -692,7 +690,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         .await
         .unwrap();
 
-    let mut queued = handle.subscribe(queued_rows);
+    let mut queued: LiveQuery<_, CovenError> = handle.subscribe(queued_rows());
     let waiting = |title: &str, paused| QueuedRow {
         title: title.into(),
         paused,
@@ -707,17 +705,14 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     let listed: Vec<FileId> =
         handle.uploads().await.unwrap().files.iter().map(|upload| upload.file).collect();
     assert_eq!(listed, [take, preview]);
-    let pinned = |sql: SqlReadContext<'_>| -> CovenResult<Vec<String>> {
-        Ok(sql.query(
-            "SELECT r.title FROM coven_pins AS p
-             JOIN (SELECT file,title FROM thumbnails UNION ALL SELECT file,title FROM attachments) AS r
-               ON r.file=p.file
-             ORDER BY r.title",
-            [],
-            |r| r.get(0),
-        )?)
-    };
-    let mut pins = handle.subscribe(pinned);
+    let pinned = coven_database::test_utils::LiveSql::of(
+        "SELECT r.title FROM coven_pins AS p
+         JOIN (SELECT file,title FROM thumbnails UNION ALL SELECT file,title FROM attachments) AS r
+           ON r.file=p.file
+         ORDER BY r.title",
+        |r| r.get::<_, String>(0),
+    );
+    let mut pins: LiveQuery<_, CovenError> = handle.subscribe(pinned);
     assert!(pins.next_inline().await.expect("the live query answers").unwrap().is_empty());
 
     // The recording changes while uploads are paused. Once the pause ends,

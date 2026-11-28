@@ -327,14 +327,11 @@ async fn a_failed_device_only_write_releases_its_copy_reservations_together() {
     let second_folder = tempfile::tempdir().unwrap();
     let first = prepare_device_only(&db, file, location.clone(), first_folder.path()).await;
     let second = prepare_device_only(&db, other, location, second_folder.path()).await;
-    let count_placed = |sql: crate::SqlReadContext<'_>| {
-        Ok::<_, DbError>(sql.query_row(
-            "SELECT count(*) FROM coven_device_only_placed",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?)
-    };
-    let mut placed = db.subscribe(count_placed);
+    let count_placed =
+        crate::test_utils::LiveSql::of("SELECT count(*) FROM coven_device_only_placed", |row| {
+            row.get::<_, i64>(0)
+        });
+    let mut placed: crate::LiveQuery<_, DbError> = db.subscribe(count_placed.one());
     assert_eq!(placed.next_inline().await.unwrap().unwrap(), 2);
     let notices = db.collect_commit_notices();
     let error = db
@@ -348,7 +345,11 @@ async fn a_failed_device_only_write_releases_its_copy_reservations_together() {
     assert!(matches!(error, DbError::NotInCloud { file: refused } if refused == file));
     assert_eq!(notices.pending_notices_for("_coven_reserved_copies"), 1);
     assert!(placed.is_marked_for_rerun());
-    assert_eq!(db.read(count_placed).await.unwrap(), 0);
+    let counted = db.read(|sql| {
+        let sql_text = "SELECT count(*) FROM coven_device_only_placed";
+        Ok::<_, DbError>(sql.query_row(sql_text, [], |row| row.get::<_, i64>(0))?)
+    });
+    assert_eq!(counted.await.unwrap(), 0);
     db.close().await.unwrap();
 }
 

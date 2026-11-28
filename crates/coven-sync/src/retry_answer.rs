@@ -126,13 +126,30 @@ impl RetryEffect {
     /// composes it into its own reads.
     pub const READ: &'static str = "SELECT effect,cooling_until FROM coven_retry_effect";
 
-    /// Read `coven_retry_effect`, as an app's live query does:
-    /// `handle.subscribe(RetryEffect::read)`.
+    /// Read `coven_retry_effect` in a one-shot read:
+    /// `handle.read(RetryEffect::read)`.
     pub fn read(sql: coven_database::SqlReadContext<'_>) -> Result<Self, DbError> {
-        let (effect, until) = sql.query_row(Self::READ, [], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
-        })?;
+        let (effect, until) = sql.query_row(Self::READ, [], Self::columns)?;
         Self::from_columns(&effect, until)
+    }
+
+    /// `coven_retry_effect` as a live query follows it:
+    /// `handle.subscribe(RetryEffect::live())`, which `read` reads once.
+    pub fn live() -> coven_database::CovenRead<(String, Option<i64>), Self> {
+        coven_database::CovenRead::new(Self::READ, coven_database::unbound, Self::columns).then(
+            |mut rows| {
+                let (effect, until) =
+                    rows.pop().ok_or(coven_database::SqliteError::QueryReturnedNoRows)?;
+                Self::from_columns(&effect, until)
+            },
+        )
+    }
+
+    /// The columns of `READ`'s row.
+    fn columns(
+        row: &coven_database::Row<'_>,
+    ) -> coven_database::SqliteResult<(String, Option<i64>)> {
+        Ok((row.get(0)?, row.get(1)?))
     }
 
     /// The effect that `coven_retry_effect`'s `effect` and `cooling_until`
@@ -155,7 +172,7 @@ impl RetryEffect {
     pub fn follow(
         database: &coven_database::StoreDatabase,
     ) -> coven_database::test_utils::Followed<Self, DbError> {
-        coven_database::test_utils::Followed::new(database.subscribe(Self::read))
+        coven_database::test_utils::Followed::new(database.subscribe(Self::live()))
     }
 }
 

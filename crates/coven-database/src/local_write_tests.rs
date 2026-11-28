@@ -145,9 +145,10 @@ async fn local_table_writes_against_plain_sqlite() {
             .open()
             .await
             .unwrap();
-        let mut live: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-            Ok(sql.query_row("SELECT count(*) FROM queue", [], |r| r.get::<_, i64>(0))?)
-        });
+        let mut live: crate::LiveQuery<_, DbError> = db.subscribe(
+            crate::test_utils::LiveSql::of("SELECT count(*) FROM queue", |r| r.get::<_, i64>(0))
+                .one(),
+        );
         assert_eq!(live.next_inline().await.expect("the live query answers").unwrap(), 0);
         let insert: &'static str = Box::leak(fill(rows).into_boxed_str());
         let started = std::time::Instant::now();
@@ -162,11 +163,11 @@ async fn local_table_writes_against_plain_sqlite() {
         let coven_delete = started.elapsed();
         assert_eq!(live.next_inline().await.expect("the live query answers").unwrap(), 0);
         drop(live);
-        let mut narrow: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-            Ok(sql.query("SELECT position FROM queue WHERE track = 'none'", [], |r| {
-                r.get::<_, i64>(0)
-            })?)
-        });
+        let mut narrow: crate::LiveQuery<_, DbError> =
+            db.subscribe(crate::test_utils::LiveSql::of(
+                "SELECT position FROM queue WHERE track = 'none'",
+                |r| r.get::<_, i64>(0),
+            ));
         assert!(narrow.next_inline().await.expect("the live query answers").unwrap().is_empty());
         let started = std::time::Instant::now();
         crate::write::tests::sql(&db, insert).await.unwrap();
@@ -240,7 +241,9 @@ async fn timed_writes(
     let reader = match reading {
         Reading::None => None,
         Reading::LiveQuery => {
-            let mut query = db.subscribe(read);
+            let whole = |r: &crate::Row<'_>| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?));
+            let mut query: crate::LiveQuery<_, DbError> =
+                db.subscribe(crate::test_utils::LiveSql::of(WHOLE, whole).one());
             Some(tokio::spawn(async move { while let Some(Ok(_)) = query.next_inline().await {} }))
         }
         Reading::Unpaused => {

@@ -16,15 +16,13 @@ async fn a_live_query_shows_placed_copies_and_the_current_device_only_download()
     f.drain().await;
     let second = f.database.file_ref(second.id()).await.unwrap();
     let music = tempfile::tempdir().unwrap();
-    let mut rows: coven_database::LiveQuery<_, DbError> = f.database.subscribe(|sql| {
-        Ok(sql.query(
+    let mut rows: coven_database::LiveQuery<_, DbError> =
+        f.database.subscribe(coven_database::test_utils::LiveSql::of(
             "SELECT f.id,p.file IS NOT NULL,d.file IS NOT NULL FROM files AS f
              LEFT JOIN coven_device_only_placed AS p ON p.file=f.file
              LEFT JOIN coven_device_only_downloading AS d ON d.file=f.file ORDER BY f.id",
-            [],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?, r.get::<_, bool>(2)?)),
-        )?)
-    });
+        ));
     let expected = |first, second, downloading| {
         [("first".to_owned(), first, false), ("second".to_owned(), second, downloading)]
     };

@@ -618,9 +618,12 @@ async fn a_restored_handle_moves_files_with_the_builders_transfer_limits() {
         .expect("the restored handle's queue runs two uploads at once")
         .unwrap();
     creations.add_permits(3);
-    let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
-    });
+    let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(
+        coven_database::test_utils::LiveSql::of("SELECT count(*) FROM coven_uploads", |r| {
+            r.get::<_, i64>(0)
+        })
+        .one(),
+    );
     tokio::time::timeout(HANG_GUARD, async {
         while uploads.next_inline().await.expect("the live query answers").unwrap() != 0 {}
     })

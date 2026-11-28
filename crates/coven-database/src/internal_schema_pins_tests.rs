@@ -60,13 +60,14 @@ async fn pin_stored(db: &crate::StoreDatabase) -> crate::FileRef {
 async fn a_local_trigger_follows_each_pin_as_it_changes() {
     let store = TestStore::new();
     let db = open(&store, vec![Migration::addition(1, "files", FOLLOWED)]).await;
-    let mut pinned: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query("SELECT id FROM pinned_files ORDER BY id", [], |r| r.get::<_, String>(0))?)
-    });
+    let mut pinned: crate::LiveQuery<_, DbError> = db.subscribe(crate::test_utils::LiveSql::of(
+        "SELECT id FROM pinned_files ORDER BY id",
+        |r| r.get::<_, String>(0),
+    ));
     let mut pins: crate::LiveQuery<_, DbError> = db
-        .subscribe(|sql| {
-            Ok(sql.query("SELECT file FROM coven_pins", [], |r| r.get::<_, String>(0))?)
-        })
+        .subscribe(crate::test_utils::LiveSql::of("SELECT file FROM coven_pins", |r| {
+            r.get::<_, String>(0)
+        }))
         .process(Ok);
     assert!(pinned.next_inline().await.unwrap().unwrap().is_empty());
     assert!(pins.next_inline().await.unwrap().unwrap().is_empty());

@@ -15,7 +15,7 @@ use coven_database::{ReadOnly, StoreDatabase};
 /// ```
 /// ```compile_fail
 /// fn no_live_query(handle: &coven::CovenReadHandle) {
-///     handle.subscribe(|_| Ok::<_, coven::CovenError>(()));
+///     handle.subscribe::<_, coven::CovenError>(coven::SyncStatus::live());
 /// }
 /// ```
 ///

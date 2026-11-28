@@ -168,11 +168,12 @@ async fn a_pass_end_that_cant_be_written_fails_the_handle() {
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let mut status = ana.sync.database.subscribe(|sql| {
-        Ok(sql.query_row("SELECT last_pass FROM coven_sync_status", [], |row| {
+    let mut status = ana.sync.database.subscribe(
+        coven_database::test_utils::LiveSql::of("SELECT last_pass FROM coven_sync_status", |row| {
             row.get::<_, Option<LastPass>>(0)
-        })?)
-    });
+        })
+        .one(),
+    );
     assert_eq!(status.next_inline().await.unwrap().unwrap(), None);
     ana.sync.database.test_fail_sync_status().await.unwrap();
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
@@ -634,19 +635,20 @@ async fn the_exported_statement_lists_the_rows_list_decodes() {
 
 /// Follow the sync state through `coven_sync_state`, as an app does.
 fn follow(device: &Device) -> Followed<SyncStatus, coven_database::DbError> {
-    Followed::new(device.sync.database.subscribe(SyncStatus::read))
+    Followed::new(device.sync.database.subscribe(SyncStatus::live()))
 }
 
 /// Wait until the sync status row says the running pass last moved `moved`,
 /// as `coven_sync_status.moved` names it.
 async fn moved_is(device: &Device, moved: &'static str) {
-    let mut row = Followed::new(device.sync.database.subscribe(|sql| {
-        Ok::<_, coven_database::DbError>(sql.query_row(
-            "SELECT moved FROM coven_sync_status",
-            [],
-            |row| row.get::<_, Option<String>>(0),
-        )?)
-    }));
+    let mut row = Followed::<_, coven_database::DbError>::new(
+        device.sync.database.subscribe(
+            coven_database::test_utils::LiveSql::of("SELECT moved FROM coven_sync_status", |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .one(),
+        ),
+    );
     row.wait_for(|row| row.as_deref() == Some(moved)).await;
 }
 

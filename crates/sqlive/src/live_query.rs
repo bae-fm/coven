@@ -110,7 +110,7 @@ impl<Q> Drop for QueryLifetime<Q> {
 }
 
 /// A subscription whose request may be replaced while it runs. Its results
-/// fail with `E`, the query closure's own error type.
+/// fail with `E`, the error type its program names.
 pub struct ReconfigurableLiveQuery<Q, T, E> {
     lifetime: QueryLifetime<Q>,
     run: Run<Q, T, E>,
@@ -198,12 +198,13 @@ where
         LiveQueryRequests { state: Arc::clone(&self.lifetime.0) }
     }
 
-    /// Process each value after its run releases the connection.
-    /// Equality compares processed values; request handles and event metadata remain.
+    /// Process each value, with the request its run answered, after the run
+    /// releases the connection. Equality compares processed values; request
+    /// handles and event metadata remain.
     pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U, E>
     where
         T: Clone + PartialEq,
-        P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
+        P: Fn(&Q, T) -> Result<U, E> + Send + Sync + 'static,
         U: Send + 'static,
     {
         let ReconfigurableLiveQuery {
@@ -221,7 +222,7 @@ where
         let failing = Arc::clone(&failed);
         let mapped: Run<Q, U, E> = Arc::new(move |request, commits| {
             let value = run(request, commits)?;
-            caught_sync("process a read", || process(value))
+            caught_sync("process a read", || process(request, value))
                 .unwrap_or_else(|bug| Err(failing(Stop::Bug(bug))))
         });
         // A new output type has no previous result to compare. Rerun the current
@@ -390,7 +391,7 @@ where
 }
 
 /// A subscription's results and lifetime; dropping it ends future runs. Its
-/// results fail with `E`, the query closure's own error type.
+/// results fail with `E`, the error type its program names.
 pub struct LiveQuery<T, E> {
     inner: ReconfigurableLiveQuery<(), T, E>,
 }
@@ -474,6 +475,6 @@ impl<T: Send + 'static, E: CarriesBug + Send + 'static> LiveQuery<T, E> {
         P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
         U: Send + 'static,
     {
-        LiveQuery { inner: self.inner.process(process) }
+        LiveQuery { inner: self.inner.process(move |(), value| process(value)) }
     }
 }

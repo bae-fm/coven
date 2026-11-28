@@ -3,6 +3,7 @@
 //! snapshot load and a migration as the store opens (§9.4).
 
 use crate::joining_write::tests::{dan, registered, registration};
+use crate::test_utils::LiveSql;
 use crate::tests::{next, remote_update, remote_update_beside_queue, try_remote_update, TestStore};
 use crate::write::tests::{count, records};
 use crate::{CommitSql, DbError, Migration, StoreDatabase, SyncedTable};
@@ -150,10 +151,9 @@ async fn a_failing_function_rolls_the_local_write_back() {
 async fn a_bulk_write_runs_the_function_after_its_sql() {
     let store = TestStore::new();
     let db = open(&store, computing(&Arc::new(AtomicBool::new(false)))).await;
-    let mut query = db.subscribe(|sql| {
-        Ok::<_, DbError>(sql.query_row("SELECT rows FROM tally", [], |r| r.get::<_, i64>(0))?)
-    });
-    assert_eq!(next(&mut query).await, 0);
+    let mut query: crate::LiveQuery<_, DbError> =
+        db.subscribe(LiveSql::of("SELECT rows FROM tally", |r| r.get::<_, i64>(0)));
+    assert_eq!(next(&mut query).await, [0]);
     db.write_bulk(|sql| {
         sql.execute_batch("INSERT INTO local_rows VALUES('a'),('b')")?;
         Ok::<_, DbError>(())
@@ -162,7 +162,7 @@ async fn a_bulk_write_runs_the_function_after_its_sql() {
     .unwrap();
     assert_eq!(tally(&db), 2);
     // The live query reading what the function wrote runs again.
-    assert_eq!(next(&mut query).await, 2);
+    assert_eq!(next(&mut query).await, [2]);
     db.close().await.unwrap();
 }
 
@@ -171,11 +171,8 @@ async fn an_applied_slot_runs_the_function_before_it_commits() {
     let store = TestStore::new();
     let db = open(&store, computing(&Arc::new(AtomicBool::new(false)))).await;
     write_note(&db, "n1", "milk").await.unwrap();
-    let mut query = db.subscribe(|sql| {
-        Ok::<_, DbError>(
-            sql.query("SELECT title FROM shown ORDER BY id", [], |r| r.get::<_, String>(0))?,
-        )
-    });
+    let mut query: crate::LiveQuery<_, DbError> =
+        db.subscribe(LiveSql::of("SELECT title FROM shown ORDER BY id", |r| r.get::<_, String>(0)));
     assert_eq!(next(&mut query).await, vec!["MILK".to_owned()]);
     remote_update(&db, "notes", "n1", &[("title", Value::Text("bread".into()))]).await;
     assert_eq!(shown(&db), shown_as("n1", "BREAD"));

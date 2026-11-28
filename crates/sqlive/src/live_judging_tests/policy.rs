@@ -8,7 +8,7 @@ use rusqlite::hooks::AuthAction;
 use crate::tests::HeardBugs;
 use crate::{
     Database, EngineFailure, Handle, HostSql, LiveQuery, Options, Policy, PolicyAction,
-    ReconfigurableLiveQuery, Recorded, Refresh,
+    ReconfigurableLiveQuery, Refresh,
 };
 
 /// The table the policy refused app SQL.
@@ -125,25 +125,27 @@ async fn a_lookup_reads_a_table_app_sql_reads_only_through_a_view() {
     .expect("the database opens");
     let database = Arc::new(database);
     let reading = Arc::clone(&database);
-    let mut query =
-        LiveQuery::new(ReconfigurableLiveQuery::new(
-            (),
-            Arc::new(move |(), completion| {
-                reading.reader().host(|reader| {
-                    reader.live_read(
-                        &mut |reads, lookups| completion.finish_judging(reads, lookups),
-                        |reader| {
-                            Ok::<_, Error>(reader.app_query(Recorded::Yes, LOUD, [], |row| {
-                                row.get::<_, String>(0)
-                            })?)
-                        },
-                    )
-                })
-            }),
-            |error: crate::Error<Failed, Refused>| Error(error),
-            &handle,
-            bugs as panic_as_error::BugSinkRef,
-        ));
+    let mut query = LiveQuery::new(ReconfigurableLiveQuery::new(
+        (),
+        Arc::new(move |(), completion| {
+            let mut titles = Vec::new();
+            let loud = crate::LiveStatement::app(LOUD, crate::Values::Positional(Vec::new()));
+            reading.reader().host(|reader| {
+                reader.live_read(
+                    &mut |reads, lookups| completion.finish_judging(reads, lookups),
+                    &[loud],
+                    |_, row| {
+                        titles.push(row.get::<_, String>(0)?);
+                        Ok(())
+                    },
+                )
+            })?;
+            Ok::<_, Error>(titles)
+        }),
+        |error: crate::Error<Failed, Refused>| Error(error),
+        &handle,
+        bugs as panic_as_error::BugSinkRef,
+    ));
     let write = |sql: &str| {
         database.host(|writer| {
             writer.write_with(

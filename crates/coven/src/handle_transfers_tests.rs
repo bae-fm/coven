@@ -71,9 +71,12 @@ fn encrypted(file: &FileRef) -> u64 {
 /// with the path of its stored object.
 async fn stored(handle: &CovenHandle, file: &FileRef) -> (FileRef, ObjectPath) {
     handle.set_uploads_paused(false).await.unwrap();
-    let mut queue: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
-    });
+    let mut queue: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(
+        coven_database::test_utils::LiveSql::of("SELECT count(*) FROM coven_uploads", |r| {
+            r.get::<_, i64>(0)
+        })
+        .one(),
+    );
     while queue.next_inline().await.unwrap().unwrap() != 0 {}
     let file = handle.file_ref(file.id()).await.unwrap();
     let FilePlace::Cloud { location, .. } = file.place() else {

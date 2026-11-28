@@ -1,9 +1,11 @@
 //! Pin progress as a query over committed cache coverage (§17.8, E8).
 //! Nothing here counts bytes in flight.
 
+use crate::live_reads::{bound, CovenRead};
 use crate::sqlite::StoreSql;
 use crate::{DbError, FileRef, LiveQuery, StoreDatabase};
 use coven_foundation::id_source::{DeviceId, FileId};
+use sqlive::Values;
 
 /// Verified cache coverage of requested files (§17.8, E8).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,14 +31,23 @@ struct Held {
     kept: bool,
 }
 
-/// What the cache holds of each of `files`, stored files with their content
-/// hashes, in order: one statement reads the files as a JSON array.
-fn held(
-    db: &StoreSql,
-    files: &[(&FileRef, &coven_crypto::ContentHash)],
-) -> Result<Vec<Held>, DbError> {
-    let listed = files
-        .iter()
+/// The SELECT of what the cache holds of each file a JSON array lists.
+const HELD: &str = "SELECT EXISTS(SELECT 1 FROM _coven_cache
+                       WHERE namespace=json_extract(j.value,'$.namespace')
+                         AND object_path=json_extract(j.value,'$.object') AND chunk=?3),
+                coalesce((SELECT sum(size-chunks*?2) FROM _coven_cache
+                          WHERE namespace=json_extract(j.value,'$.namespace')
+                            AND object_path=json_extract(j.value,'$.object') AND chunk>=0),0),
+                EXISTS(SELECT 1 FROM _coven_cache
+                       WHERE namespace=json_extract(j.value,'$.namespace')
+                         AND object_path=json_extract(j.value,'$.object') AND chunk=?3
+                         AND checked_hash=unhex(json_extract(j.value,'$.hash')))
+         FROM json_each(?1) AS j ORDER BY j.key";
+
+/// The values `HELD` binds for the stored files among `files`, with their
+/// content hashes: the files as a JSON array.
+fn held_values(files: &[FileRef]) -> Result<Values, DbError> {
+    let listed = stored(files)
         .map(|(file, content_hash)| {
             let hash: String = content_hash.as_bytes().iter().map(|b| format!("{b:02X}")).collect();
             Ok(serde_json::json!({
@@ -48,25 +59,19 @@ fn held(
         .collect::<Result<Vec<_>, DbError>>()?;
     let listed = serde_json::to_string(&listed)
         .map_err(|_unencodable| DbError::Invariant { what: "cache keys encode as JSON" })?;
-    Ok(db.host_live_read(
-        "SELECT EXISTS(SELECT 1 FROM _coven_cache
-                       WHERE namespace=json_extract(j.value,'$.namespace')
-                         AND object_path=json_extract(j.value,'$.object') AND chunk=?3),
-                coalesce((SELECT sum(size-chunks*?2) FROM _coven_cache
-                          WHERE namespace=json_extract(j.value,'$.namespace')
-                            AND object_path=json_extract(j.value,'$.object') AND chunk>=0),0),
-                EXISTS(SELECT 1 FROM _coven_cache
-                       WHERE namespace=json_extract(j.value,'$.namespace')
-                         AND object_path=json_extract(j.value,'$.object') AND chunk=?3
-                         AND checked_hash=unhex(json_extract(j.value,'$.hash')))
-         FROM json_each(?1) AS j ORDER BY j.key",
-        (
-            listed,
-            coven_crypto::FILE_CHUNK_TAG_LEN as i64,
-            crate::internal_schema::CACHE_COMPLETE_FILE,
-        ),
-        |r| Ok(Held { complete: r.get(0)?, chunks: r.get(1)?, kept: r.get(2)? }),
-    )?)
+    bound(&[
+        &listed,
+        &(coven_crypto::FILE_CHUNK_TAG_LEN as i64),
+        &crate::internal_schema::CACHE_COMPLETE_FILE,
+    ])
+}
+
+/// The stored files among `files`, with their content hashes, in order.
+fn stored(files: &[FileRef]) -> impl Iterator<Item = (&FileRef, &coven_crypto::ContentHash)> {
+    files.iter().filter_map(|file| match file.place() {
+        crate::FilePlace::Cloud { content_hash, .. } => Some((file, content_hash)),
+        crate::FilePlace::DeviceOnly { .. } => None,
+    })
 }
 
 /// Verified plaintext bytes of the stored file `file` the cache holds, given
@@ -95,10 +100,10 @@ pub(crate) fn covered(db: &StoreSql, file: &FileRef, device: DeviceId) -> Result
     match file.place() {
         crate::FilePlace::DeviceOnly { device: on } if on == device => Ok(file.size()),
         crate::FilePlace::DeviceOnly { .. } => Ok(0),
-        crate::FilePlace::Cloud { content_hash, .. } => {
-            let held = held(db, &[(file, content_hash)])?.pop().ok_or(DbError::Invariant {
-                what: "the statement returns a row for each stored file",
-            })?;
+        crate::FilePlace::Cloud { .. } => {
+            let held = crate::live_reads::once(&held_read(vec![file.clone()]), db)?.pop().ok_or(
+                DbError::Invariant { what: "the statement returns a row for each stored file" },
+            )?;
             covered_by(&held, file)
         }
     }
@@ -109,17 +114,38 @@ pub(crate) fn covered(db: &StoreSql, file: &FileRef, device: DeviceId) -> Result
 /// device is already whole here.
 pub(crate) fn pin_progress(
     db: &StoreSql,
-    files: &[FileRef],
+    files: Vec<FileRef>,
     device: DeviceId,
 ) -> Result<PinProgress, DbError> {
-    let stored: Vec<(&FileRef, &coven_crypto::ContentHash)> = files
-        .iter()
-        .filter_map(|file| match file.place() {
-            crate::FilePlace::Cloud { content_hash, .. } => Some((file, content_hash)),
-            crate::FilePlace::DeviceOnly { .. } => None,
-        })
-        .collect();
-    let mut held = held(db, &stored)?.into_iter();
+    crate::live_reads::once(&pin_progress_read(files, Some(device)), db)
+}
+
+/// Requested files' verified coverage, as `device`, the local device, holds
+/// them: none while the store is closed.
+pub(crate) fn pin_progress_read(
+    files: Vec<FileRef>,
+    device: Option<DeviceId>,
+) -> CovenRead<impl Send + 'static, PinProgress> {
+    let held = held_read(files.clone());
+    held.then(move |held| progress_of(&files, held, device.ok_or(DbError::StoreClosed)?))
+}
+
+/// What the cache holds of each stored file among `files`, in order.
+fn held_read(files: Vec<FileRef>) -> CovenRead<Held, Vec<Held>> {
+    CovenRead::new(
+        HELD,
+        move || held_values(&files),
+        |r| Ok(Held { complete: r.get(0)?, chunks: r.get(1)?, kept: r.get(2)? }),
+    )
+}
+
+/// The coverage of `files` that `held`, a row for each stored one, gives.
+fn progress_of(
+    files: &[FileRef],
+    held: Vec<Held>,
+    device: DeviceId,
+) -> Result<PinProgress, DbError> {
+    let mut held = held.into_iter();
     let mut progress = PinProgress {
         files_completed: 0,
         files_total: files.len() as u64,
@@ -152,47 +178,55 @@ pub(crate) fn pin_progress(
 /// The answer is whether `coven_pins` lists the file, so the app's SQL and
 /// this call agree. It reads no merge state, so a live query of it reruns
 /// only for those tables' changes.
-pub(crate) fn files_pinned(db: &StoreSql, files: &[FileId]) -> Result<Vec<Option<bool>>, DbError> {
+pub(crate) fn files_pinned(
+    db: &StoreSql,
+    files: Vec<FileId>,
+) -> Result<Vec<Option<bool>>, DbError> {
+    crate::live_reads::once(&files_pinned_read(files), db)
+}
+
+/// Whether each of `files` is pinned, in order.
+pub(crate) fn files_pinned_read(files: Vec<FileId>) -> CovenRead<Option<bool>, Vec<Option<bool>>> {
     // The requested files as a JSON array of their canonical texts, which one
     // statement reads a row of for each element, repeats included.
-    let listed =
-        serde_json::to_string(&files.iter().map(|file| file.0.to_string()).collect::<Vec<_>>())
-            .map_err(|_unencodable| DbError::Invariant { what: "file ids encode as JSON" })?;
-    Ok(db.host_live_read(
+    let values = move || {
+        let listed =
+            serde_json::to_string(&files.iter().map(|file| file.0.to_string()).collect::<Vec<_>>())
+                .map_err(|_unencodable| DbError::Invariant { what: "file ids encode as JSON" })?;
+        bound(&[&listed])
+    };
+    CovenRead::new(
         "SELECT EXISTS(SELECT 1 FROM main.coven_files WHERE id=j.value),
                 EXISTS(SELECT 1 FROM coven_pins WHERE file=j.value)
          FROM json_each(?1) AS j ORDER BY j.key",
-        [listed],
+        values,
         |r| r.get::<_, bool>(0)?.then(|| r.get::<_, bool>(1)).transpose(),
-    )?)
+    )
 }
 
 impl StoreDatabase {
     /// Verified cache coverage for these fixed references, in one snapshot.
     pub async fn pin_progress(&self, files: Vec<FileRef>) -> Result<PinProgress, DbError> {
         let device = self.local_device()?;
-        self.read_committed(move |db| pin_progress(db, &files, device)).await
+        self.read_committed(move |db| pin_progress(db, files, device)).await
     }
     /// The same pre-built cache query with the same fixed references.
     pub fn subscribe_pin_progress<E>(&self, files: Vec<FileRef>) -> LiveQuery<PinProgress, E>
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        let device = self.local_device().ok();
-        self.follow(move |db| {
-            pin_progress(db, &files, device.ok_or(DbError::StoreClosed)?).map_err(E::from)
-        })
+        self.follow(pin_progress_read(files, self.local_device().ok()))
     }
     /// Whether each file is pinned, one answer per file in order.
     pub async fn files_pinned(&self, files: Vec<FileId>) -> Result<Vec<Option<bool>>, DbError> {
-        self.read_committed(move |db| files_pinned(db, &files)).await
+        self.read_committed(move |db| files_pinned(db, files)).await
     }
     /// The same internal query, live.
     pub fn subscribe_files_pinned<E>(&self, files: Vec<FileId>) -> LiveQuery<Vec<Option<bool>>, E>
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(move |db| files_pinned(db, &files).map_err(E::from))
+        self.follow(files_pinned_read(files))
     }
 }
 

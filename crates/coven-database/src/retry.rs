@@ -184,11 +184,21 @@ pub(crate) fn read_all(db: &StoreSql) -> Result<Vec<(RetrySubject, RetryWait)>, 
 }
 
 pub(crate) fn find(db: &StoreSql, subject: RetrySubject) -> Result<Option<RetryWait>, DbError> {
+    crate::live_reads::once(&find_read(subject), db)
+}
+
+/// The wait `subject` keeps, if any.
+pub(crate) fn find_read(
+    subject: RetrySubject,
+) -> crate::live_reads::CovenRead<impl Send + 'static, Option<RetryWait>> {
     let key = key(subject);
-    db.host_live_read(key.statements().find, [key.value()], read_row)?
-        .pop()
-        .map(|row| row.decode().map(|(_, wait)| wait))
-        .transpose()
+    let sql = key.statements().find;
+    crate::live_reads::CovenRead::new(
+        sql,
+        move || crate::live_reads::bound(&[&key.value()]),
+        read_row,
+    )
+    .then(|mut rows| rows.pop().map(|row| row.decode().map(|(_, wait)| wait)).transpose())
 }
 
 /// `W` is stored in whole milliseconds, rounded up so a persisted wait never

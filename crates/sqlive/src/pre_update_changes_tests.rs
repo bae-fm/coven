@@ -1,4 +1,4 @@
-use crate::tests::{next, TestDatabase, TestOptions};
+use crate::tests::{next, no_values, rerun, TestDatabase, TestOptions};
 
 /// An uncaptured queue table beside a captured notes table.
 fn queue() -> TestDatabase {
@@ -15,8 +15,8 @@ fn queue() -> TestDatabase {
 #[tokio::test]
 async fn a_local_tables_columns_still_decide_a_rerun() {
     let db = queue();
-    let mut tracks = db.subscribe(|sql| {
-        Ok(sql.query("SELECT track FROM queue ORDER BY id", [], |r| r.get::<_, String>(0))?)
+    let mut tracks = db.subscribe_rows("SELECT track FROM queue ORDER BY id", no_values(), |r| {
+        r.get::<_, String>(0)
     });
     assert_eq!(next(&mut tracks).await, ["a", "b"]);
     db.write("UPDATE queue SET played=1 WHERE id=1").unwrap();
@@ -36,8 +36,8 @@ async fn a_local_tables_columns_still_decide_a_rerun() {
 #[tokio::test]
 async fn a_key_scoped_query_of_a_local_table_reruns_only_for_its_row() {
     let db = queue();
-    let mut first = db.subscribe(|sql| {
-        Ok(sql.query("SELECT track FROM queue WHERE id = 1", [], |r| r.get::<_, String>(0))?)
+    let mut first = db.subscribe_rows("SELECT track FROM queue WHERE id = 1", no_values(), |r| {
+        r.get::<_, String>(0)
     });
     assert_eq!(next(&mut first).await, ["a"]);
     db.write("UPDATE queue SET track='z' WHERE id=2; INSERT INTO queue(id, track) VALUES (3,'d'); DELETE FROM queue WHERE id=3")
@@ -58,14 +58,11 @@ async fn a_key_scoped_query_of_a_local_table_reruns_only_for_its_row() {
 #[tokio::test]
 async fn a_write_past_the_row_bound_wakes_every_query_of_the_table() {
     let db = queue();
-    let runs = std::sync::atomic::AtomicUsize::new(0);
-    let mut first = db.subscribe(move |sql| {
-        let run = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let tracks =
-            sql.query("SELECT track FROM queue WHERE track = 'a'", [], |r| r.get::<_, String>(0))?;
-        Ok((run, tracks))
-    });
-    assert_eq!(next(&mut first).await, (0, vec!["a".to_string()]));
+    let mut first =
+        db.subscribe_rows("SELECT track FROM queue WHERE track = 'a'", no_values(), |r| {
+            r.get::<_, String>(0)
+        });
+    assert_eq!(next(&mut first).await, ["a"]);
     let fill = |rows: usize| {
         format!(
             "WITH RECURSIVE n(i) AS (VALUES(100000) UNION ALL SELECT i+1 FROM n WHERE i<{}) INSERT INTO queue(id, track) SELECT i, 'other' FROM n",
@@ -77,7 +74,7 @@ async fn a_write_past_the_row_bound_wakes_every_query_of_the_table() {
     db.write("DELETE FROM queue WHERE id >= 100000").unwrap();
     assert!(!first.is_marked_for_rerun());
     db.write(&fill(crate::ROWS_PER_TABLE + 1)).unwrap();
-    assert_eq!(next(&mut first).await, (1, vec!["a".to_string()]));
+    assert_eq!(rerun(&mut first), 2);
     db.close();
 }
 
@@ -130,9 +127,10 @@ async fn a_commit_after_a_schema_change_reads_the_tables_new_shape() {
     db.write("UPDATE queue SET played=1 WHERE id=1").unwrap();
     db.commit("UPDATE queue SET played=2 WHERE id=1");
     db.commit("ALTER TABLE queue ADD COLUMN rating INTEGER");
-    let mut ratings = db.subscribe(|sql| {
-        Ok(sql.query("SELECT rating FROM queue WHERE id = 1", [], |r| r.get::<_, Option<i64>>(0))?)
-    });
+    let mut ratings =
+        db.subscribe_rows("SELECT rating FROM queue WHERE id = 1", no_values(), |r| {
+            r.get::<_, Option<i64>>(0)
+        });
     assert_eq!(next(&mut ratings).await, [None]);
     db.commit("UPDATE queue SET rating=5 WHERE id=1");
     assert!(ratings.is_marked_for_rerun());

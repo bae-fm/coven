@@ -13,12 +13,11 @@
 //! many statements each test runs (default 60). A failure names the seed.
 
 use crate::random_scopes::Rng;
-use crate::tests::{QueryError, TestDatabase, TestRead, HANG_GUARD};
+use crate::tests::{app, compiled_read, no_values, QueryError, TestDatabase, TestRead, HANG_GUARD};
 use crate::{LiveQuery, SqlValue};
 use serde_json::{json, Value as Json};
 use std::io::Write as _;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[path = "narrowing_model/aggregate.rs"]
@@ -561,13 +560,12 @@ fn sorted(rows: &Rows) -> Rows {
     rows
 }
 
-async fn next_rows(query: &mut LiveQuery<(usize, Rows), QueryError>) -> Rows {
+async fn next_rows(query: &mut LiveQuery<Rows, QueryError>) -> Rows {
     tokio::time::timeout(HANG_GUARD, query.next_inline())
         .await
         .expect("the live query answers")
         .expect("the live query is open")
         .unwrap()
-        .1
 }
 
 /// The app's function `nz(e)`, `e` or 0 where `e` is NULL, on every
@@ -637,16 +635,11 @@ async fn run_case(
     db.write(&rows.join("; ")).unwrap();
     let work = crate::ConnectionWorkCounter::new();
     db.track_work(&work);
-    let runs = Arc::new(AtomicUsize::new(0));
-    let text = sql.clone();
-    let mut live = db.subscribe(move |context| {
-        let run = runs.fetch_add(1, Ordering::SeqCst);
-        let rows = match shipped {
-            Some(statement) => context.query_compiled(statement, [], integers)?,
-            None => read(&context, &text)?,
-        };
-        Ok((run, rows))
-    });
+    let read = match shipped {
+        Some(statement) => compiled_read(statement, no_values()),
+        None => app(sql.clone(), no_values()),
+    };
+    let mut live = db.subscribe(vec![read], |_, row| integers(row));
     let mut last = next_rows(&mut live).await;
     let ordered = !statement.order.is_empty();
     let differ = |a: &Rows, b: &Rows| if ordered { a != b } else { sorted(a) != sorted(b) };
@@ -698,7 +691,10 @@ async fn run_case(
             );
         }
         if marked {
-            let rerun = next_rows(&mut live).await;
+            let rerun = match live.run_changed() {
+                Some(rows) => rows.unwrap(),
+                None => last.clone(),
+            };
             assert_eq!(rerun, fresh, "a rerun differs from a read: {}", case());
             last = rerun;
         } else {

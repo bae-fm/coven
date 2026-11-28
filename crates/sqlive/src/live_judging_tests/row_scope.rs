@@ -14,19 +14,18 @@
 
 use crate::random_scopes::{a_value, b_value, key, query, write, Generated, Rng};
 use crate::random_scopes::{CAPTURED, SCHEMA, SHAPES, TABLES};
-use crate::tests::{compiled, next, QueryError, TestDatabase, TestOptions, TestRead, HANG_GUARD};
+use crate::tests::{
+    app, compiled, compiled_read, next, no_values, PauseAt, QueryError, TestDatabase, TestOptions,
+    TestRead, HANG_GUARD,
+};
 use crate::{LiveQuery, SqlValue};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 const TRACKS: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release TEXT, title TEXT)";
 
 fn titles(db: &TestDatabase) -> LiveQuery<Vec<String>, QueryError> {
-    db.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM tracks WHERE release='a' ORDER BY id", [], |r| {
-            r.get::<_, String>(0)
-        })?)
+    db.subscribe_rows("SELECT title FROM tracks WHERE release='a' ORDER BY id", no_values(), |r| {
+        r.get::<_, String>(0)
     })
 }
 
@@ -95,19 +94,12 @@ async fn streamed_transactions_record_scoped_values() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_write_during_the_read_that_reveals_the_scope_wakes_it() {
     let db = TestDatabase::open(TRACKS);
-    let (entered, entry) = tokio::sync::oneshot::channel();
-    let entered = Mutex::new(Some(entered));
-    let (release, released) = std::sync::mpsc::channel();
-    let released = Mutex::new(released);
-    let mut query = db.subscribe(move |sql| -> Result<_, QueryError> {
-        if let Some(entered) = entered.lock().unwrap().take() {
-            entered.send(()).unwrap();
-            released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
-        }
-        Ok(sql.query("SELECT title FROM tracks WHERE release='a' ORDER BY id", [], |r| {
-            r.get::<_, String>(0)
-        })?)
-    });
+    let (mut query, entry, release) = db.subscribe_paused(
+        "SELECT title FROM tracks WHERE release='a' ORDER BY id",
+        no_values(),
+        |r| r.get::<_, String>(0),
+        PauseAt::BeforeSql,
+    );
     let task = tokio::spawn(async move {
         let value = next(&mut query).await;
         (query, value)
@@ -132,21 +124,13 @@ fn read(sql: &TestRead<'_>, text: &str, parameters: &[SqlValue]) -> rusqlite::Re
     sql.query(text, rusqlite::params_from_iter(parameters), values)
 }
 
-fn read_compiled(
-    sql: &TestRead<'_>,
-    statement: crate::CompiledStatement<crate::Writer>,
-    parameters: &[SqlValue],
-) -> rusqlite::Result<Rows> {
-    sql.query_compiled(statement, rusqlite::params_from_iter(parameters), values)
-}
-
 async fn one_shot(db: &TestDatabase, query: &Generated) -> Rows {
     let sql = query.sql.clone();
     let parameters = query.parameters.clone();
     db.read_app(move |context| Ok::<_, QueryError>(read(&context, &sql, &parameters)?)).unwrap()
 }
 
-async fn next_rows(query: &mut LiveQuery<(usize, Rows), QueryError>) -> (usize, Rows) {
+async fn next_rows(query: &mut LiveQuery<Rows, QueryError>) -> Rows {
     tokio::time::timeout(HANG_GUARD, query.next_inline())
         .await
         .expect("query must answer")
@@ -217,20 +201,15 @@ async fn run_seed(seed: u64, precision: &mut BTreeMap<Kind, Precision>) -> (usiz
     let mut live = Vec::new();
     let mut compiled_queries = 0;
     for (position, query) in queries.iter().enumerate() {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let sql = query.sql.clone();
-        let parameters = query.parameters.clone();
-        let compiled = if position % 2 == 1 { compiled(&probe, &sql) } else { None };
+        let parameters = crate::Values::Positional(query.parameters.clone());
+        let compiled = if position % 2 == 1 { compiled(&probe, &query.sql) } else { None };
         compiled_queries += usize::from(compiled.is_some());
-        let mut subscription = db.subscribe(move |context| {
-            let run = runs.fetch_add(1, Ordering::SeqCst);
-            let rows = match compiled {
-                Some(statement) => read_compiled(&context, statement, &parameters)?,
-                None => read(&context, &sql, &parameters)?,
-            };
-            Ok((run, rows))
-        });
-        let (_, rows) = next_rows(&mut subscription).await;
+        let read = match compiled {
+            Some(statement) => compiled_read(statement, parameters),
+            None => app(query.sql.clone(), parameters),
+        };
+        let mut subscription = db.subscribe(vec![read], |_, row| values(row));
+        let rows = next_rows(&mut subscription).await;
         live.push((subscription, rows.clone(), rows));
     }
     let mut spared = 0;
@@ -271,7 +250,10 @@ async fn run_seed(seed: u64, precision: &mut BTreeMap<Kind, Precision>) -> (usiz
             // A marked query sometimes stays marked through the next write,
             // which its judging then skips.
             if marked && rng.chance(75) {
-                let (_, rows) = next_rows(subscription).await;
+                let rows = match subscription.run_changed() {
+                    Some(rows) => rows.unwrap(),
+                    None => last.clone(),
+                };
                 assert_eq!(rows, fresh, "a rerun differs from a read: {}", case());
                 *last = rows;
             } else if !marked && query.narrows {

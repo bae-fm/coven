@@ -59,31 +59,93 @@ impl ToSql for SqlValue {
     }
 }
 
-/// The values `params` binds to `statement`'s parameters, in parameter order,
-/// with one entry for each index, including anonymous parameters and indices
-/// that no parameter in the SQL uses. The connection keeps prepared the
-/// statement that reads them back.
-pub fn parameters<P: rusqlite::Params>(
-    connection: &rusqlite::Connection,
-    statement: &rusqlite::Statement<'_>,
-    params: P,
-) -> rusqlite::Result<Vec<SqlValue>> {
-    let count = statement.parameter_count();
-    let sql = if count == 0 {
-        "SELECT NULL WHERE 0".into()
-    } else {
-        let values = (1..=count)
-            .map(|index| {
-                // Walking every index preserves anonymous slots and holes, and
-                // retains exactly the original names for named binding validation.
-                let parameter = statement.parameter_name(index).unwrap_or("?");
-                format!("({parameter})")
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        format!("VALUES {values}")
-    };
-    let mut capture = connection.prepare_cached(&sql)?;
-    let values = capture.query_map(params, |row| row.get(0))?.collect();
-    values
+/// The values a statement binds, by position or by name, as a host gives them
+/// to a live query's run (SPEC.md section 3), which reads them to narrow what
+/// the statement read.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Values {
+    /// The value of each parameter, in parameter order, one for each index.
+    Positional(Vec<SqlValue>),
+    /// Each parameter's value by its name, with its first character, as
+    /// `:id`. A parameter the list doesn't name binds NULL.
+    Named(Vec<(&'static str, SqlValue)>),
+}
+
+impl Values {
+    /// The values `params` names, as rusqlite would bind them.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a value's `ToSql` fails, or gives a value SQLite doesn't
+    /// store, as an array.
+    pub fn named(params: &[(&'static str, &dyn ToSql)]) -> rusqlite::Result<Self> {
+        let values = params.iter().map(|(name, value)| Ok((*name, SqlValue::of(*value)?)));
+        Ok(Self::Named(values.collect::<rusqlite::Result<_>>()?))
+    }
+
+    /// The values `params` binds in order.
+    ///
+    /// # Errors
+    ///
+    /// As `named`.
+    pub fn positional(params: &[&dyn ToSql]) -> rusqlite::Result<Self> {
+        let values = params.iter().map(|value| SqlValue::of(*value));
+        Ok(Self::Positional(values.collect::<rusqlite::Result<_>>()?))
+    }
+
+    /// The value of each of `statement`'s parameters, in parameter order,
+    /// with one entry for each index, including indices that no parameter
+    /// in the SQL uses.
+    ///
+    /// # Errors
+    ///
+    /// Fails, as rusqlite's binding does, when the values are positional and
+    /// their count isn't the statement's, or name a parameter the statement
+    /// lacks.
+    pub fn of_statement(
+        &self,
+        statement: &rusqlite::Statement<'_>,
+    ) -> rusqlite::Result<Vec<SqlValue>> {
+        let count = statement.parameter_count();
+        match self {
+            Self::Positional(values) if values.len() == count => Ok(values.clone()),
+            Self::Positional(values) => {
+                Err(rusqlite::Error::InvalidParameterCount(values.len(), count))
+            }
+            Self::Named(named) => {
+                let mut values = vec![SqlValue::Null; count];
+                for (name, value) in named {
+                    let index = statement
+                        .parameter_index(name)?
+                        .ok_or_else(|| rusqlite::Error::InvalidParameterName((*name).to_owned()))?;
+                    values[index - 1] = value.clone();
+                }
+                Ok(values)
+            }
+        }
+    }
+}
+
+impl SqlValue {
+    /// The value `value` binds.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `value`'s `ToSql` fails, or gives a value SQLite doesn't
+    /// store.
+    pub fn of(value: &dyn ToSql) -> rusqlite::Result<Self> {
+        Ok(match value.to_sql()? {
+            ToSqlOutput::Borrowed(value) => value.into(),
+            ToSqlOutput::Owned(value) => ValueRef::from(&value).into(),
+            ToSqlOutput::ZeroBlob(length) => {
+                Self::Blob(vec![0; usize::try_from(length).map_err(|_too_long| unstorable())?])
+            }
+            _ => return Err(unstorable()),
+        })
+    }
+}
+
+/// The error of a value SQLite doesn't store.
+fn unstorable() -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure("a value SQLite doesn't store".into())
 }

@@ -808,13 +808,12 @@ async fn a_live_query_reruns_as_a_pass_applies_another_devices_slot() {
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
     ben.sync.pass().await.unwrap();
-    let mut notes = coven_database::test_utils::Followed::new(ben.database().subscribe(|sql| {
-        Ok::<_, coven_database::DbError>(sql.query(
+    let mut notes = coven_database::test_utils::Followed::<_, coven_database::DbError>::new(
+        ben.database().subscribe(coven_database::test_utils::LiveSql::of(
             "SELECT id FROM notes ORDER BY id",
-            [],
             |row| row.get::<_, String>(0),
-        )?)
-    }));
+        )),
+    );
     assert!(notes.next().await.is_empty());
     insert(ana.database(), "from-ana", "written on another device").await;
     ana.sync.pass().await.unwrap();

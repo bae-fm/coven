@@ -11,9 +11,12 @@ async fn a_live_querys_first_run_counts_its_scope_plan() {
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let counter = WorkCounter::new();
     db.test_track_work(counter.clone()).await.unwrap();
-    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT count(*) FROM notes WHERE id = 'a'", [], |r| r.get::<_, i64>(0))?)
-    });
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(
+        crate::test_utils::LiveSql::of("SELECT count(*) FROM notes WHERE id = 'a'", |r| {
+            r.get::<_, i64>(0)
+        })
+        .one(),
+    );
     assert_eq!(next(&mut query).await, 0);
     let work = counter.take();
     assert_eq!(work.scope_plans_built, 1);

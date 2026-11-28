@@ -2,10 +2,8 @@
 //! windows of a list sorted by a nullable column read it (SPEC.md section 5).
 
 use super::lookup::follows;
-use crate::tests::{next, TestDatabase};
+use crate::tests::{app, each_at, next, TestDatabase};
 use crate::SqlValue::{self as Value, Integer, Null};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 fn write(db: &TestDatabase, sql: &str) {
     db.commit(sql);
@@ -75,18 +73,15 @@ INSERT INTO albums VALUES (1,1990,''),(2,1995,''),(3,2000,''),(4,2000,''),(5,200
 /// does.
 async fn window(seeks: Seeks, outside: &[i64], inside: &[i64], moves: &[&str]) {
     let db = TestDatabase::open(ALBUMS_BY_YEAR);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let count = calls.clone();
-    let mut query = db.subscribe(move |db| {
-        count.fetch_add(1, Ordering::SeqCst);
-        let mut rows = Vec::new();
-        for (seek, parameters) in seeks {
+    let statements = seeks
+        .iter()
+        .map(|(seek, parameters)| {
             let sql = format!("SELECT id, year, title FROM albums WHERE {seek}");
-            rows.extend(db.query(&sql, rusqlite::params_from_iter(*parameters), |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, String>(2)?))
-            })?);
-        }
-        Ok(rows)
+            app(sql, each_at(*parameters))
+        })
+        .collect();
+    let mut query = db.subscribe(statements, |_, r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, String>(2)?))
     });
     next(&mut query).await;
     for id in outside {
@@ -101,7 +96,8 @@ async fn window(seeks: Seeks, outside: &[i64], inside: &[i64], moves: &[&str]) {
         write(&db, sql);
         next(&mut query).await;
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 1 + inside.len() + moves.len(), "{seeks:?}");
+    let runs = u64::try_from(1 + inside.len() + moves.len()).unwrap();
+    assert_eq!(query.runs().runs(), runs, "{seeks:?}");
     db.close();
 }
 

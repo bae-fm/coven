@@ -36,9 +36,9 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         c.receive(write.clone().into()).await.unwrap();
     }
     let original = contents(&b);
-    let mut query: crate::LiveQuery<_, DbError> = b.subscribe(|db| {
-        Ok(db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
-    });
+    let mut query: crate::LiveQuery<_, DbError> = b.subscribe(
+        crate::test_utils::LiveSql::of("SELECT title FROM notes", |r| r.get::<_, String>(0)).one(),
+    );
     assert_eq!(query.next_inline().await.expect("the live query answers").unwrap(), "waiting");
     assert!(matches!(
         load_one(&b, id(Audience::Store), snapshot_prefix.clone(), Cursor::new(snapshot.clone()))

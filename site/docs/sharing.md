@@ -216,7 +216,7 @@ let (invite, _, _) = handle
     .await?;
 
 // Ana's open invites are the coven_invites view, which a live query follows.
-let mut invites = handle.subscribe(Invite::list);
+let mut invites: LiveQuery<_, CovenError> = handle.subscribe(Invite::live());
 let mut sent = false;
 while let Some(open) = invites.next_blocking() {
     let found = open?.into_iter().find(|i| i.id == invite).map(|i| i.stage);

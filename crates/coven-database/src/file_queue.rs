@@ -144,11 +144,18 @@ impl UnsentWork {
 }
 
 pub(crate) fn unsent(db: &StoreSql) -> Result<UnsentWork, DbError> {
-    db.host_live_read(concat!("SELECT ", unsent_counts!()), [], |r| {
+    crate::live_reads::once(&unsent_read(), db)
+}
+
+/// The writes and files waiting to upload.
+pub(crate) fn unsent_read() -> crate::live_reads::CovenRead<UnsentWork, UnsentWork> {
+    let sql = concat!("SELECT ", unsent_counts!());
+    crate::live_reads::CovenRead::new(sql, crate::live_reads::unbound, |r| {
         Ok(UnsentWork { writes: r.get::<_, i64>(0)? as u64, files: r.get::<_, i64>(1)? as u64 })
-    })?
-    .pop()
-    .ok_or(DbError::Invariant { what: "a statement of counts returns its row" })
+    })
+    .then(|mut counts| {
+        counts.pop().ok_or(DbError::Invariant { what: "a statement of counts returns its row" })
+    })
 }
 
 pub(crate) fn state(db: &StoreSql) -> Result<UploadQueueState, DbError> {

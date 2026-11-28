@@ -18,19 +18,26 @@ struct Viewed {
     pending: Option<i64>,
 }
 
+const PHASES: &str = "SELECT file,phase,wait,at,pending FROM coven_upload_phases";
+
+/// A row of `coven_upload_phases`, with its file.
+fn phase_row(r: &coven_database::Row<'_>) -> coven_database::SqliteResult<(FileId, Viewed)> {
+    Ok((r.get(0)?, Viewed { phase: r.get(1)?, wait: r.get(2)?, at: r.get(3)?, pending: r.get(4)? }))
+}
+
 /// Every row of `coven_upload_phases`, by file.
 fn viewed(
     sql: coven_database::SqlReadContext<'_>,
 ) -> Result<BTreeMap<FileId, Viewed>, coven_database::DbError> {
-    Ok(sql
-        .query("SELECT file,phase,wait,at,pending FROM coven_upload_phases", [], |r| {
-            Ok((
-                r.get(0)?,
-                Viewed { phase: r.get(1)?, wait: r.get(2)?, at: r.get(3)?, pending: r.get(4)? },
-            ))
-        })?
-        .into_iter()
-        .collect())
+    Ok(sql.query(PHASES, [], phase_row)?.into_iter().collect())
+}
+
+/// Every row of `coven_upload_phases`, by file, as a live query follows it.
+fn followed(
+    database: &coven_database::StoreDatabase,
+) -> coven_database::test_utils::Followed<BTreeMap<FileId, Viewed>, coven_database::DbError> {
+    let rows = database.subscribe(coven_database::test_utils::LiveSql::of(PHASES, phase_row));
+    Followed::new(rows.process(|rows: Vec<(FileId, Viewed)>| Ok(rows.into_iter().collect())))
 }
 
 /// A phase's kind and its wait's, in the names the view gives them.
@@ -87,7 +94,7 @@ async fn the_view_shows_each_phase_that_uploads_gives_and_follows_it() {
     f.set_uploads_paused(true).await;
     let photo = f.attach("files", "photo", vec![7; 64]).await.id();
     let cover = f.attach("covers", "cover", vec![8; 64]).await.id();
-    let mut shown = Followed::new(f.database.subscribe(viewed));
+    let mut shown = followed(&f.database);
     let waits = |rows: &BTreeMap<FileId, Viewed>, file: FileId, wait: UploadWait| {
         rows.get(&file).and_then(|row| row.wait.as_deref()) == Some(wait.kind())
     };
@@ -224,9 +231,11 @@ async fn a_read_of_the_phases_files_alone_follows_the_network() {
     let f = Fixture::new(Provenance::AppProvided).await;
     f.files.stop_background_for_counts().await;
     let photo = f.attach("files", "photo", vec![7; 64]).await.id();
-    let mut files: coven_database::LiveQuery<Vec<FileId>, coven_database::DbError> = f
-        .database
-        .subscribe(|sql| Ok(sql.query("SELECT file FROM coven_upload_phases", [], |r| r.get(0))?));
+    let mut files: coven_database::LiveQuery<Vec<FileId>, coven_database::DbError> =
+        f.database.subscribe(coven_database::test_utils::LiveSql::of(
+            "SELECT file FROM coven_upload_phases",
+            |r| r.get(0),
+        ));
     assert_eq!(files.next_inline().await.unwrap().unwrap(), [photo]);
     f.database.record_network(coven_foundation::network_watch::NetworkState {
         usable: Some(true),

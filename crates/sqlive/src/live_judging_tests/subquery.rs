@@ -2,9 +2,7 @@
 //! the rows whose value that source holds in its scope (SPEC.md section 8).
 
 use super::lookup::follows;
-use crate::tests::{next, TestDatabase};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use crate::tests::{next, no_values, rerun, TestDatabase};
 
 fn write(db: &TestDatabase, sql: &str) {
     db.commit(sql);
@@ -256,15 +254,10 @@ INSERT INTO y VALUES (1,1,'a','a'),(2,2,'b','b')",
         "SELECT x.g FROM x WHERE (x.k, x.g) <> (SELECT y.k, y.g FROM y WHERE y.id = 1)",
         "SELECT x.g FROM x WHERE (x.k, x.g) NOT IN (SELECT y.k, y.g FROM y)",
     ] {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let count = calls.clone();
-        let mut query = db.subscribe(move |db| {
-            let run = count.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok((run, db.query(sql, [], |r| r.get::<_, String>(0))?))
-        });
+        let mut query = db.subscribe_rows(sql, no_values(), |r| r.get::<_, String>(0));
         next(&mut query).await;
         write(&db, "UPDATE x SET g = g || '.' WHERE id = 9");
-        assert_eq!(next(&mut query).await.0, 2, "{sql}");
+        assert_eq!(rerun(&mut query), 2, "{sql}");
     }
     db.close();
 }
@@ -335,7 +328,7 @@ async fn a_cover_write_for_another_album_runs_as_many_lookup_steps_over_any_numb
         }
         let counter = crate::ConnectionWorkCounter::new();
         db.track_work(&counter);
-        let mut query = db.subscribe(|sql| Ok(sql.query(COVER, [], |r| r.get::<_, String>(0))?));
+        let mut query = db.subscribe_rows(COVER, no_values(), |r| r.get::<_, String>(0));
         next(&mut query).await;
         counter.take();
         write(&db, "UPDATE covers SET file = 'f9' WHERE id = 'r5'");

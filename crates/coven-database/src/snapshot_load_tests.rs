@@ -81,9 +81,9 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
         assert_eq!(contents(&b), original);
     }
     b.inspect_writer(|db, _|db.batch("CREATE TABLE store_changes(value INTEGER PRIMARY KEY); CREATE TRIGGER store_change AFTER UPDATE ON notes WHEN new.audience='store' BEGIN INSERT INTO store_changes VALUES(new.value); END").unwrap());
-    let mut query: crate::LiveQuery<_, DbError> = b.subscribe(|db| {
-        Ok(db.query("SELECT value FROM notes ORDER BY audience", [], |r| r.get::<_, i64>(0))?)
-    });
+    let values = "SELECT value FROM notes ORDER BY audience";
+    let mut query: crate::LiveQuery<_, DbError> =
+        b.subscribe(crate::test_utils::LiveSql::of(values, |r| r.get::<_, i64>(0)));
     assert!(query.next_inline().await.expect("the live query answers").unwrap().is_empty());
     // Supply the consecutive suffix required by the earlier circle snapshot.
     b.load_snapshots::<crate::pending::tests::Record, _>(
@@ -306,10 +306,6 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn readers_and_live_queries_observe_only_the_committed_reload() {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    };
     struct GatedRead {
         bytes: Cursor<Vec<u8>>,
         started: Option<tokio::sync::oneshot::Sender<()>>,
@@ -334,17 +330,9 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
     let snapshot = frames(&a, Audience::Store).await;
     let snapshot_prefix = snapshot.prefix.clone();
     let snapshot = snapshot.concat();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let called = calls.clone();
-    let observed = Arc::new(Mutex::new(Vec::new()));
-    let seen = observed.clone();
-    let mut query = b.subscribe(move |db| {
-        let values =
-            db.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?;
-        called.fetch_add(1, Ordering::SeqCst);
-        seen.lock().unwrap().push(values.clone());
-        Ok::<_, DbError>(values)
-    });
+    let titles = "SELECT title FROM notes ORDER BY id";
+    let mut query: crate::LiveQuery<_, DbError> =
+        b.subscribe(crate::test_utils::LiveSql::of(titles, |r| r.get::<_, String>(0)));
     assert!(query.next_inline().await.expect("the live query answers").unwrap().is_empty());
     let (started, notice) = tokio::sync::oneshot::channel();
     let (release, wait) = std::sync::mpsc::channel();
@@ -371,9 +359,8 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
     release.send(()).unwrap();
     task.await.unwrap().unwrap();
     assert_eq!(query.next_inline().await.expect("the live query answers").unwrap(), ["after"]);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(query.runs().runs(), 2);
     assert!(!query.is_marked_for_rerun());
-    assert_eq!(*observed.lock().unwrap(), vec![Vec::<String>::new(), vec!["after".to_string()]]);
     for db in [a, b] {
         db.close().await.unwrap();
     }

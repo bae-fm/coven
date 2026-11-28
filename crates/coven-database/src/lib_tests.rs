@@ -230,6 +230,39 @@ where
     next_result(query).await.unwrap()
 }
 
+/// A place where a test's live query stops as it reads a row, until the test
+/// lets it go on. A test keeps one in a `static`, because a live query's row
+/// reader is a function that captures nothing (`LiveSql`).
+pub(crate) struct Gate(std::sync::Mutex<Option<Stop>>);
+
+/// The channels of one stop at a `Gate`: the query says it stopped on the
+/// first, and goes on when the second answers.
+type Stop = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+impl Gate {
+    pub(crate) const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    /// Make the next row read stop at the gate. The query stops once and
+    /// says so on the receiver, and goes on when the sender sends.
+    pub(crate) fn close(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered, entry) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *self.0.lock().unwrap() = Some((entered, released));
+        (entry, release)
+    }
+
+    /// Stop here if the gate is closed, and open it.
+    pub(crate) fn pass(&self) {
+        let stop = self.0.lock().unwrap().take();
+        if let Some((entered, released)) = stop {
+            entered.send(()).unwrap();
+            released.recv_timeout(HANG_GUARD).unwrap();
+        }
+    }
+}
+
 pub(crate) fn database_error(error: OpenError) -> DbError {
     match error {
         OpenError::Database(error) => error,
