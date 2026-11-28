@@ -24,8 +24,24 @@ struct Recursive {
     inside: Result<BTreeSet<String>, String>,
 }
 
-/// The FROM item that reads `declared`, named `qualifier`, and its columns,
-/// when the CTE's SQL names itself; `inner` are the CTEs that SQL can name
+/// Whether the SQL of `declared` names the CTE, where that SQL can name
+/// `inner` (`Ctes::reading`). It reads only that SQL, with the CTEs it can
+/// name only named: SQLite runs a CTE that names itself only where its own
+/// SELECT names it.
+pub(crate) fn names_itself(
+    planner: &Planner,
+    declared: &Declared<'_>,
+    inner: &Ctes<'_>,
+) -> rusqlite::Result<bool> {
+    let mut walk = Walk::new(planner.schema, planner.views, ());
+    let names = inner.withs().flatten().map(Declared::name);
+    let place = walk.name_ctes(names)[position(declared, inner)];
+    let reads = walk.select(declared.cte.select, false)?;
+    Ok(walk.scope.run(&reads).contains(&Within::Cte(place)))
+}
+
+/// The FROM item that reads `declared`, a CTE whose SQL names itself, named
+/// `qualifier`, and its columns; `inner` are the CTEs that SQL can name
 /// (`Ctes::reading`).
 pub(crate) fn read_recursive_item(
     connection: &Connection,
@@ -33,12 +49,10 @@ pub(crate) fn read_recursive_item(
     declared: &Declared<'_>,
     inner: &Ctes<'_>,
     qualifier: String,
-) -> rusqlite::Result<Option<(Source, Columns)>> {
-    let Some(recursive) = read(planner, declared, inner)? else {
-        return Ok(None);
-    };
+) -> rusqlite::Result<(Source, Columns)> {
+    let recursive = read(planner, declared, inner)?;
     planner.note_read_whole(recursive.inside.clone());
-    let name = crate::sql::name(declared.cte.tbl_name.0).to_ascii_lowercase();
+    let name = declared.name();
     let with = inner.around_every(&format!("SELECT * FROM {}", crate::sql::identifier(&name)));
     let (from, columns) = match with {
         Some(with) => {
@@ -67,31 +81,26 @@ pub(crate) fn read_recursive_item(
         either: Vec::new(),
         memberships: Vec::new(),
     };
-    Ok(Some((source, columns)))
+    Ok((source, columns))
 }
 
-/// What `declared` reads, when its SQL names itself, where that SQL can name
-/// `inner`.
+/// The place of `declared` among `inner`, the CTEs its SQL can name.
+fn position(declared: &Declared<'_>, inner: &Ctes<'_>) -> usize {
+    inner
+        .numbers()
+        .position(|number| number == declared.number)
+        .expect("a CTE's SQL can name the CTE")
+}
+
+/// What `declared`, a CTE whose SQL names itself, reads, where that SQL can
+/// name `inner`: every CTE it can name read, each WITH's SQL where it can
+/// name what SQLite resolves it to.
 fn read(
     planner: &Planner,
     declared: &Declared<'_>,
     inner: &Ctes<'_>,
-) -> rusqlite::Result<Option<Recursive>> {
-    let at = inner
-        .numbers()
-        .position(|number| number == declared.number)
-        .expect("a CTE's SQL can name the CTE");
-    // First its own SQL alone, with the CTEs it can name only named: SQLite
-    // runs a CTE that names itself only where its own SELECT names it.
-    let mut walk = Walk::new(planner.schema, planner.views, ());
-    let names = inner.withs().flatten().map(|declared| declared.name());
-    let place = walk.name_ctes(names)[at];
-    let reads = walk.select(declared.cte.select, false)?;
-    if !walk.scope.run(&reads).contains(&Within::Cte(place)) {
-        return Ok(None);
-    }
-    // Then every CTE it can name, each WITH's SQL where it can name what
-    // SQLite resolves it to.
+) -> rusqlite::Result<Recursive> {
+    let at = position(declared, inner);
     let mut walk = Walk::new(planner.schema, planner.views, ());
     let mut places = Vec::new();
     for with in inner.withs() {
@@ -108,5 +117,5 @@ fn read(
             .map(|within| walk.scope.name_of(within).to_owned())
             .collect()),
     };
-    Ok(Some(Recursive { tables, inside }))
+    Ok(Recursive { tables, inside })
 }

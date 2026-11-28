@@ -234,13 +234,10 @@ pub(crate) fn read_item<'a>(
                     // CTEs.
                     let inner =
                         ctes.reading(&declared).expect("a CTE is read inside its own SQL only");
-                    if let Some((source, columns)) = crate::recursive_cte::read_recursive_item(
-                        connection,
-                        planner,
-                        &declared,
-                        &inner,
-                        qualifier.clone(),
-                    )? {
+                    if crate::recursive_cte::names_itself(planner, &declared, &inner)? {
+                        let (source, columns) = crate::recursive_cte::read_recursive_item(
+                            connection, planner, &declared, &inner, qualifier,
+                        )?;
                         // A lookup that asks it runs every CTE its SQL can
                         // name.
                         return Ok(Ok(FromItem {

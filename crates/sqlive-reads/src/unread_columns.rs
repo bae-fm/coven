@@ -108,25 +108,27 @@ pub(crate) fn unread_reads<T>(sources: &[Source], live: &BTreeMap<String, T>) ->
     }
     let mut found = UnreadReads::default();
     for source in sources.iter().filter(|source| source.unread) {
-        match &source.object {
-            Object::Table { name, .. } if !live.contains_key(name) => {
-                found.sources.insert(name.clone());
-            }
-            Object::View { name, inside, .. } => {
-                let Some(live_inside) = &live_inside else { continue };
-                if !live_views.contains(name.as_str()) && !live_inside.contains(name) {
+        // A view read whole, by its name, or a recursive CTE, which no read
+        // names.
+        let (view, inside) = match &source.object {
+            Object::Table { name, .. } => {
+                if !live.contains_key(name) {
                     found.sources.insert(name.clone());
                 }
-                let inside = inside.iter().flatten().filter(|name| !live_inside.contains(*name));
-                found.inside.extend(inside.cloned());
+                continue;
             }
-            Object::Recursive { inside, .. } => {
-                let Some(live_inside) = &live_inside else { continue };
-                let inside = inside.iter().flatten().filter(|name| !live_inside.contains(*name));
-                found.inside.extend(inside.cloned());
+            Object::View { name, inside, .. } => (Some(name), inside),
+            Object::Recursive { inside, .. } => (None, inside),
+            Object::Function | Object::Derived => continue,
+        };
+        let Some(live_inside) = &live_inside else { continue };
+        if let Some(name) = view {
+            if !live_views.contains(name.as_str()) && !live_inside.contains(name) {
+                found.sources.insert(name.clone());
             }
-            Object::Table { .. } | Object::Function | Object::Derived => {}
         }
+        let inside = inside.iter().flatten().filter(|name| !live_inside.contains(*name));
+        found.inside.extend(inside.cloned());
     }
     found
 }
