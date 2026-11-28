@@ -42,7 +42,10 @@ impl EdgesOfItems {
 
 impl Planner<'_, '_> {
     /// Order the items so each comes after the sources it takes values
-    /// from: core by core, each after the core it sits in; within a core,
+    /// from. An item that waited goes as soon as it stops waiting, even
+    /// before the rest of the core around its own, and of those that stop
+    /// at once, one that takes values from an item placed already goes
+    /// first. Otherwise the items go core by core; within a core,
     /// those an ordered one reaches first, so each takes the values of the
     /// sources the core's narrowing started from, then those whose own
     /// conditions compare a column with a value (`gives_alone`), then views
