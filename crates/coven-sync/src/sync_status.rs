@@ -702,13 +702,9 @@ impl SyncStatus {
     /// `coven_sync_state` as a live query follows it:
     /// `handle.subscribe(SyncStatus::live())`, which `read` reads once.
     pub fn live() -> coven_database::CovenRead<(SyncState, Option<i64>), Self> {
-        coven_database::CovenRead::new(Self::READ, coven_database::unbound, Self::columns).then(
-            |mut rows| {
-                let (state, last_synced) =
-                    rows.pop().ok_or(coven_database::SqliteError::QueryReturnedNoRows)?;
-                Self::from_columns(state, last_synced)
-            },
-        )
+        coven_database::CovenRead::new(Self::READ, coven_database::unbound, Self::columns)
+            .one()
+            .then(|(state, last_synced)| Self::from_columns(state, last_synced))
     }
 
     /// The columns of `READ`'s row.

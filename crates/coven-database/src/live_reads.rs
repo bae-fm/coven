@@ -116,6 +116,13 @@ impl<T: 'static> CovenRead<T, Vec<T>> {
     ) -> Self {
         Self { sql: sql.into(), values: Box::new(values), row: Box::new(row), finish: Box::new(Ok) }
     }
+
+    /// The read of the first row alone, which fails with `QueryReturnedNoRows`
+    /// when there is none, as `query_row` does.
+    #[doc(hidden)]
+    pub fn one(self) -> CovenRead<T, T> {
+        self.then(first)
+    }
 }
 
 impl<T: 'static, U: 'static> CovenRead<T, U> {
@@ -276,8 +283,7 @@ enum TestStatement {
     Compiled(sqlive::CompiledStatement<Writer>),
 }
 
-/// The first of `rows`.
-#[cfg(any(test, feature = "test-utils"))]
+/// The first of `rows`, or `QueryReturnedNoRows` when there is none.
 fn first<T>(rows: Vec<T>) -> Result<T, DbError> {
     Ok(rows.into_iter().next().ok_or(sqlive::rusqlite::Error::QueryReturnedNoRows)?)
 }

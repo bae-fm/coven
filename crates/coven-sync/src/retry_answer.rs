@@ -136,13 +136,9 @@ impl RetryEffect {
     /// `coven_retry_effect` as a live query follows it:
     /// `handle.subscribe(RetryEffect::live())`, which `read` reads once.
     pub fn live() -> coven_database::CovenRead<(String, Option<i64>), Self> {
-        coven_database::CovenRead::new(Self::READ, coven_database::unbound, Self::columns).then(
-            |mut rows| {
-                let (effect, until) =
-                    rows.pop().ok_or(coven_database::SqliteError::QueryReturnedNoRows)?;
-                Self::from_columns(&effect, until)
-            },
-        )
+        coven_database::CovenRead::new(Self::READ, coven_database::unbound, Self::columns)
+            .one()
+            .then(|(effect, until)| Self::from_columns(&effect, until))
     }
 
     /// The columns of `READ`'s row.

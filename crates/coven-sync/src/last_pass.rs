@@ -135,10 +135,8 @@ impl LastPass {
         database: &coven_database::StoreDatabase,
     ) -> coven_database::test_utils::Followed<Option<Self>, coven_database::DbError> {
         let sql = "SELECT last_pass FROM coven_sync_status";
-        let read = coven_database::CovenRead::new(sql, coven_database::unbound, |row| row.get(0))
-            .then(|mut rows| {
-                Ok(rows.pop().ok_or(coven_database::SqliteError::QueryReturnedNoRows)?)
-            });
+        let read =
+            coven_database::CovenRead::new(sql, coven_database::unbound, |row| row.get(0)).one();
         coven_database::test_utils::Followed::new(database.subscribe(read))
     }
 }
