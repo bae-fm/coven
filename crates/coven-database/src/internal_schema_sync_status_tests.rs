@@ -44,7 +44,7 @@ async fn a_new_store_reads_no_storage_set_up() {
     let store = TestStore::new();
     let db =
         store.builder(notes_tables(), crate::test_utils::notes_migrations()).open().await.unwrap();
-    let mut rows = db.follow::<_, _, DbError>(followed_row());
+    let mut rows = db.subscribe::<_, DbError>(followed_row());
     assert_eq!(
         rows.next_inline().await.unwrap().unwrap(),
         SyncStatusRow {
@@ -83,7 +83,7 @@ async fn a_new_label_rewrites_the_location() {
             location: format!("{{\"Dropbox\":{{\"folder\":\"{folder}\"}}}}"),
         })
     };
-    let mut locations = db.follow::<_, _, DbError>(location());
+    let mut locations = db.subscribe::<_, DbError>(location());
     assert_eq!(locations.next_inline().await.unwrap().unwrap(), None);
     db.record_opened(labelled("Household"), None).await.unwrap();
     let household = locations.next_inline().await.unwrap().unwrap();

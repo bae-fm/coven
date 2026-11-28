@@ -49,7 +49,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(crate::members::members_read(self.local_device().ok()))
+        self.subscribe(crate::members::members_read(self.local_device().ok()))
     }
 
     /// The circles this installation's member belongs to (E12).
@@ -63,7 +63,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(crate::members::circles_read(self.local_device().ok()))
+        self.subscribe(crate::members::circles_read(self.local_device().ok()))
     }
 
     /// A circle's members who remain in the store; none for an absent or
@@ -84,7 +84,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(crate::members::circle_members_read(self.local_device().ok(), circle))
+        self.subscribe(crate::members::circle_members_read(self.local_device().ok(), circle))
     }
 
     /// The latest completed replacement of this installation, or None (E5).
@@ -97,7 +97,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(crate::device_reset::reset_read())
+        self.subscribe(crate::device_reset::reset_read())
     }
 }
 

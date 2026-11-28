@@ -152,7 +152,7 @@ impl StoreDatabase {
         E: From<DbError> + CarriesBug + Send + 'static,
     {
         let declared = self.declared_namespaces();
-        self.follow(bytes_read(declared))
+        self.subscribe(bytes_read(declared))
     }
 }
 

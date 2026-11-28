@@ -215,7 +215,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(pin_progress_read(files, self.local_device().ok()))
+        self.subscribe(pin_progress_read(files, self.local_device().ok()))
     }
     /// Whether each file is pinned, one answer per file in order.
     pub async fn files_pinned(&self, files: Vec<FileId>) -> Result<Vec<Option<bool>>, DbError> {
@@ -226,7 +226,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(files_pinned_read(files))
+        self.subscribe(files_pinned_read(files))
     }
 }
 

@@ -219,7 +219,7 @@ impl StoreDatabase {
     /// `rebuild` row: the sizes of its own files together now, then after
     /// each write that changes them, until it closes.
     pub(crate) async fn count_rebuild(&self, rebuild: &StoreDatabase) -> Result<(), DbError> {
-        let (total, first) = next_result(rebuild.follow(library())).await;
+        let (total, first) = next_result(rebuild.subscribe(library())).await;
         let bytes = first.ok_or(DbError::StoreClosed)??;
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {

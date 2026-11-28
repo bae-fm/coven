@@ -2,7 +2,7 @@
 //! when a commit changes what it read (§4).
 
 use super::StoreDatabase;
-use crate::live_reads::{CovenRead, LiveReads, Run};
+use crate::live_reads::{LiveReads, Run};
 use crate::{DbError, LiveQuery, LostValue, ReconfigurableLiveQuery};
 use coven_foundation::task::CarriesBug;
 use std::sync::Arc;
@@ -34,17 +34,6 @@ impl StoreDatabase {
         E: From<DbError> + CarriesBug + Send + 'static,
     {
         self.live(initial_request, move |request, run| Ok(reads(request)?.read(run)?))
-    }
-
-    /// Follow `read`, coven's own SQL on its tables, live: it runs again
-    /// after each commit that changes what it read.
-    pub(crate) fn follow<T, U, E>(&self, read: CovenRead<T, U>) -> LiveQuery<U, E>
-    where
-        T: Send + 'static,
-        U: Send + 'static,
-        E: From<DbError> + CarriesBug + Send + 'static,
-    {
-        self.subscribe(read)
     }
 
     /// A live query that runs `read` on the store's readers for each
@@ -104,7 +93,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(crate::loss_record::lost_values_read())
+        self.subscribe(crate::loss_record::lost_values_read())
     }
 }
 

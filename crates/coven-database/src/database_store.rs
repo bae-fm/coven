@@ -54,7 +54,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(crate::store_state_tables::name_read())
+        self.subscribe(crate::store_state_tables::name_read())
     }
 
     /// The committed name and the slot that set it, including a local

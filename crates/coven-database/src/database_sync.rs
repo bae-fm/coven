@@ -293,7 +293,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.follow(crate::file_queue::unsent_read())
+        self.subscribe(crate::file_queue::unsent_read())
     }
 
     /// The upload queue with what its uploads' phases are computed from
@@ -725,7 +725,7 @@ impl StoreDatabase {
     /// it, such as to apply a raise.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn subscribe_store_state(&self) -> crate::LiveQuery<crate::StoreState, DbError> {
-        self.follow(crate::store_state_tables::state_read())
+        self.subscribe(crate::store_state_tables::state_read())
     }
 
     /// The store prefix whose complete effects have committed.

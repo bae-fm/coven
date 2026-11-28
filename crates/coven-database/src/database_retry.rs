@@ -151,7 +151,7 @@ impl StoreDatabase {
         &self,
         subject: RetrySubject,
     ) -> crate::LiveQuery<Option<RetryWait>, crate::DbError> {
-        self.follow(retry::find_read(subject))
+        self.subscribe(retry::find_read(subject))
     }
 
     /// Persist `T` and `W` before the subject waits. A failure here fails the
