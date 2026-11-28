@@ -27,24 +27,17 @@ impl Narrowing {
     }
 
     /// What of this, the ON of the LEFT JOIN adding `item`, narrows `item`
-    /// while the join is a LEFT JOIN's, and the rest, which waits for the
-    /// join to be an inner join's. An edge from `item` through a derived
-    /// item, and an OR of `item` with a side that holds one, wait with the
-    /// rest: the model proves such an edge only of a binding its core keeps
-    /// (`Narrowing.split` in `crates/sqlive/proofs`).
+    /// while the join is a LEFT JOIN's: its terms on `item`, its edges from
+    /// `item`, through or around a derived item too, and its ORs of `item`;
+    /// and the rest, which waits for the join to be an inner join's. The ON
+    /// names only items before the join's, whose rows are rows of their
+    /// queries, so an edge through or around a derived item among them finds
+    /// its partner's row (`Narrowing.split` and `plan_left_passes` in
+    /// `crates/sqlive/proofs`).
     fn split(self, item: usize) -> (Self, Self) {
         let (own, terms) = self.terms.into_iter().partition(|(narrowed, _)| *narrowed == item);
-        let (own_edges, edges) = self
-            .edges
-            .into_iter()
-            .partition(|edge| edge.member.item == item && edge.nesting.through().is_none());
-        let (own_ors, ors) = self.ors.into_iter().partition(|or| {
-            or.item == item
-                && or
-                    .sides
-                    .iter()
-                    .all(|side| side.edges.iter().all(|edge| edge.nesting.through().is_none()))
-        });
+        let (own_edges, edges) = self.edges.into_iter().partition(|edge| edge.member.item == item);
+        let (own_ors, ors) = self.ors.into_iter().partition(|or| or.item == item);
         (Self { terms: own, edges: own_edges, ors: own_ors }, Self { terms, edges, ors })
     }
 

@@ -75,7 +75,7 @@ that an edge from its partner reads through gives that partner no values, so
 the partner counts as none of its partners. -/
 def starved (st : PState) (waiting : List Nat) (i : Nat) : Bool :=
   let counted := st.edges.filter fun e => e.member == i &&
-    !st.edges.any fun back => back.member == e.partner && back.via.map (·.1) == some i
+    !st.edges.any fun back => back.member == e.partner && back.nested && back.via.map (·.1) == some i
   let partners := counted.map (·.partner)
   !partners.isEmpty && partners.all waiting.contains
 
@@ -111,15 +111,25 @@ def givenValues (s : Statement) (st : PState) (order remaining waiting : List Na
         (e.partner == i && reached.contains e.member))
     remaining.length (remaining.filter gives)
 
+/-- Whether core `j` is one that core `k` sits in, through its parents
+(`Planner::scope_of`). -/
+def coreAround (s : Statement) : Nat → Nat → Nat → Bool
+  | 0, _, _ => false
+  | fuel + 1, k, j => match (s.core k).parent with
+    | none => false
+    | some p => p == j || coreAround s fuel p j
+
 /-- The items of `remaining` that wait (`Planner::waiting`): those taking a
 subquery's value, or a value a derived item's arm passes on, from an item not
-placed yet, or through a derived item not placed yet; those whose every
+placed yet, or through a derived item not placed yet, or a value of an item of
+a core around their own not placed yet; those whose every
 partner waits; those a waiting derived item could pass edges into; and, among
 the items that no giver of values reaches, those that take values from one
 that waits. -/
 def waiting (s : Statement) (st : PState) (order remaining : List Nat) : List Nat :=
   let first := remaining.filter fun i =>
-    st.edges.any (fun e => e.nested && e.member == i && !e.placedIn order) ||
+    st.edges.any (fun e => e.member == i && !e.placedIn order &&
+      (e.nested || coreAround s s.fuel (s.item i).core (s.item e.partner).core)) ||
       (st.items i).ors.any fun sides => sides.any fun side =>
         side.edges.any fun e => e.nested && !e.placedIn order
   let alone := closure remaining (fun w i => starved st w i || received s st w i)
@@ -147,7 +157,9 @@ where
       | r :: _ =>
         let w := waiting s st order remaining
         let waited := waited ++ w.filter fun i => !waited.contains i
-        let released := remaining.find? fun i => waited.contains i && !w.contains i
+        let stopped := remaining.filter fun i => waited.contains i && !w.contains i
+        let released := (stopped.find? fun i =>
+            st.edges.any fun e => e.member == i && e.placedIn order).orElse fun _ => stopped.head?
         let free := remaining.filter fun i => !w.contains i
         let next := match released, free with
           | some i, _ => i

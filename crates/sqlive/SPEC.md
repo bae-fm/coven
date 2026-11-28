@@ -1282,7 +1282,10 @@ from, such as the subquery's table in `a.x IN (SELECT c.y FROM c)`, never waits
 for it: it comes first even with no condition of its own. A table that takes
 its values through a FROM subquery or CTE that a lookup can't read alone
 (section 8) comes after the subquery or CTE and after the table that gives the
-values.
+values, and one that takes its values from a row of the query around its own
+waits for that row's table. Of the tables that stop waiting at the same step,
+one that takes values from a table looked up already goes first, so that the
+others can take values from it.
 
 ### How a lookup compares
 
@@ -1553,10 +1556,28 @@ subquery, with `WITH r AS (SELECT l.list FROM card_list AS l WHERE l.verdict_id 
 v.verdict_id)`, where `v` is the verdict around the subquery, and `c.list =
 (SELECT r.list FROM r)`. `card_list` narrows to the verdict's lists and `cards`
 narrows to those lists, so a card added to another verdict's list doesn't rerun
-the read. A table that takes its values this way waits for the query and for the
+the read. An equality with an expression of such a query's columns narrows the
+same way, by the expression over that table's columns, when every column it
+names comes from the one table, and either the expression is NULL where they
+are or no LEFT JOIN adds the table or the query. The pane joins each card to
+the answer stored for its name with `ON a.name_key = name_key(c.name)`, where
+`name_key` is the app's function, and an answer stored for another verdict's
+card doesn't rerun it. A table that takes its values this way waits for the query and for the
 table the query reads the column from (section 7). In a LEFT JOIN's ON, such an
-equality, or an OR with a side that holds one, narrows nothing until another
-condition makes the join an inner join. A WITH inside a subquery or a CTE can
+equality, or an OR with a side that holds one, narrows the table the join adds,
+as any equality there does.
+
+Such a query whose SELECT reads no table and returns columns of the row around
+it unchanged, as a relation of keys `(SELECT k.key AS key)` inside a subquery
+of each key's row, holds that row's values in its one row. A table joined to it
+by an equality with such a column takes its values from the row around it, as
+if joined to that row, and waits for that row's table (section 7). The table
+narrows so also when the query that joins the relation groups its rows or
+calls an aggregate or window function. An import pane reads each folder of its
+keys through a fragment that takes a relation of keys, and spreads into it a
+fragment that groups each folder's credits by artist, handing it `(SELECT
+keys.path AS path)`. The credits narrow to the listed folders, so a credit of
+another folder doesn't rerun the pane. A WITH inside a subquery or a CTE can
 declare a CTE under the name of an outer one. Where the inner WITH's SQL
 names it, the name means the inner CTE, as SQLite reads it, and an outer CTE
 whose own SQL names it still reads the outer one. A FROM item that names such a
@@ -2365,7 +2386,8 @@ the model and states its assumptions.
 | An OR, true of a binding, makes one side of each OR sqlive reads from it hold, each of its terms and edges as its rule promises | `or_sound` | `proofs/SqliveNarrowing/Rules/Or.lean` | 7 |
 | `IS` between two items, true of a binding, makes the member column hold a value the partner's row gives, or both NULL | `is_edge_sound` | `proofs/SqliveNarrowing/Rules/IsEdge.lean` | 7 |
 | A column equal to or IN a subquery's value holds a value the subquery's source gives in a binding its core keeps that gives a row the subquery returns, whatever columns the subquery returns after its first | `subquery_edge_sound` | `proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | 8 |
-| An equality with a column of a FROM subquery or CTE that a lookup can't read alone, whose one SELECT doesn't aggregate or call a window function and returns a column of one of its own tables there, or a column compared with a subquery's value read from such a query, true of a binding, makes the member hold a value that table's row gives in the binding, or in a binding the SELECT keeps that gives the row the subquery or CTE lists | `orPassed_sound`, `Passed.edge_holds`, `edge_props` | `proofs/SqliveNarrowing/Rules/Edge.lean`; `proofs/SqliveNarrowing/Rules/Passed.lean`; `proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | 8 |
+| An equality with a column of a FROM subquery or CTE that a lookup can't read alone, whose one SELECT doesn't aggregate or call a window function and returns a column of one of its own tables there, or a column compared with a subquery's value read from such a query, true of a binding, makes the member hold a value that table's row gives in the binding, or in a binding the SELECT keeps that gives the row the subquery or CTE lists; an equality with an expression of such a query's columns that all come from one table, strict or of a query and table no LEFT JOIN adds, does the same with the expression over that table's columns | `orPassed_sound`, `Passed.edge_holds`, `Passed.exprEdge_facts`, `Passed.exprEdge_holds`, `edge_props` | `proofs/SqliveNarrowing/Rules/Edge.lean`; `proofs/SqliveNarrowing/Rules/Passed.lean`; `proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | 8 |
+| A FROM subquery or CTE whose one SELECT reads no table, neither aggregates nor calls a window function, and returns a column of an item of a core around it unchanged holds, in its one row, that item's value in the binding around it, so an equality with its column makes the member hold a value that item's row gives | `aroundSource_facts`, `around_row`, `query_row_plain` | `proofs/SqliveNarrowing/Kept.lean`; `proofs/SqliveNarrowing/Rows.lean` | 8 |
 | A partner column of no affinity, which a lookup reads as an expression for a member column of another affinity, gives each row the value it holds | `columnValue_eval` | `proofs/SqliveNarrowing/Plan.lean` | 7 |
 | Each column of a row value equal to or IN a subquery's row holds the value the subquery's source gives in its place, in a binding its core keeps that gives a row the subquery returns | `row_subquery_edge_sound` | `proofs/SqliveNarrowing/Rules/RowSubqueryEdge.lean` | 8 |
 | Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `proofs/SqliveNarrowing/Rules.lean` | 5 to 8 |
@@ -2408,7 +2430,7 @@ the model and states its assumptions.
 | Placing each item, and passing the edges it takes into its arms, leaves the planned state saying only what holds of each binding a core keeps that matters to its query's test, as the planner's scopes give that test; each item's memberships are edges of the planned state | `PState.Sem.pushEdges`, `PState.Sem.placed`, `plan_sem`, `queryTest_good`, `plan_semTests`, `plan_membersEdges` | `proofs/SqliveNarrowing/OrderPhase.lean` | 7 |
 | Every edge of the planned state, every edge of a side of each OR and every narrowing an ON holds back takes values from an item a lookup reads alone; each OR an item keeps is one of its ORs, each edge passed into a derived item's arm has a member its core lists, and the planner places only items a core lists; a derived item a lookup reads alone runs its query under any binding as under the binding of no row; every binding of an arm matters to a query whose every row matters, and the test of the statement's own query keeps every row | `plan_lookups`, `plan_order_listed`, `outerNames_readsAlone`, `evalQuery_readable`, `outer_readable`, `relevant_of_all`, `queryTest_root` | `proofs/SqliveNarrowing/Partners.lean` | 7 |
 | In a binding that matters of a core run before or after the write, each row passes its item's test: its terms hold, its memberships' and kept ORs' partners, which the order places before it, give its values from rows of their lookups in their scopes, a partner that a FROM subquery or CTE takes its column from included, the edges passed into it pass, and its LIMIT bound passes; a row of an item a lookup reads alone is a row of the lookup; so such a binding holds no row only of an item the planned state holds an ON narrowing back for | `partner_found`, `pushed_passes`, `plan_kept_rows`, `plan_restricted` | `proofs/SqliveNarrowing/Kept.lean` | 7 |
-| While the planner holds an ON narrowing back for a LEFT JOIN item, it adds to the item only what the item's ON says of it, and every other step leaves the item as it was; so each term, edge and OR the planned state holds of such an item holds wherever the item's ON holds of a row of it, and a row the ON holds for, in a binding whose rows pass their tests, passes the item's test | `untouched_narrow`, `untouched_pushDown`, `plan_held`, `plan_left_passes` | `proofs/SqliveNarrowing/Held.lean` | 7 |
+| While the planner holds an ON narrowing back for a LEFT JOIN item, it adds to the item only what the item's ON says of it, and every other step leaves the item as it was; so each term, edge and OR the planned state holds of such an item holds wherever the item's ON holds of a row of it, and a row the ON holds for, in a binding whose rows pass their tests, passes the item's test, an edge of the ON through or around a FROM subquery or CTE included | `untouched_narrow`, `untouched_pushDown`, `plan_held`, `plan_left_passes` | `proofs/SqliveNarrowing/Held.lean` | 7 |
 | The planner's scopes keep their promise for every query at every fuel at which two databases return the same rows that matter; a write the judge lets pass, with the scopes the planner gives the run that read the database before it, leaves a well-formed statement's rows unchanged, the statement's own query with a LIMIT bound included, and so does a write sqlive's judge lets pass when a question stopped at the step limit | `plan_kept`, `narrowing_sound`, `narrowing_sound_limited` | `proofs/SqliveNarrowing/Sound.lean` | 5 to 8 |
 | A row a scope passes holds one of its key's values in the key's column, so the index of live queries finds each query for every change that reruns it; the judge through the index reruns each query on exactly the writes the judge of every change reruns it on, and so lets pass only writes that leave a well-formed statement's rows unchanged | `key_passes`, `lookup_complete`, `index_judges_alike`, `indexed_narrowing_sound` | `proofs/SqliveNarrowing/Index.lean` | 7 |
 | A write's net change of each row, from the row before its first change to the row after its last, takes the database before the write to the database after it, and holds exactly the rows that differ between the two; so the judge of the net changes lets pass only writes that leave a well-formed statement's rows unchanged, directly or through the index, its verdict depends only on the databases before and after, a write whose every row ends as it began reruns nothing, and it reruns a statement only where the judge of every change does | `firstOld_eq`, `lastNew_eq`, `net_writes`, `mem_net`, `net_sound`, `indexed_net_sound`, `net_judges_states`, `net_unchanged`, `net_reruns_imp` | `proofs/SqliveNarrowing/Net.lean` | 2 |

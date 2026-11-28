@@ -205,10 +205,13 @@ NULL; the partner is no item a LEFT JOIN adds, so a binding a core keeps
 has its row. Or the partner's value isn't strict, `b` holds no row of the
 partner, and the partner is no item a LEFT JOIN adds, so `b` is no binding a
 core keeps. Or the edge reads through column `pc` of a derived item `d`
-(`Edge.via`): the member's value is `x`, and so is column `pc` of `d`'s row
+(`Edge.via`): the member's value is `x`, and so is the value `pc` of `d`'s row
 in `b`, when `d` sits in the member's core, or else in a binding of `d`'s
 core, another, under `b` that gives a row of the subquery `d`'s core is an
-arm of. -/
+arm of; or `d` sits in the member's core, is no item a LEFT JOIN adds, and
+`b` holds no row of it, so `b` is no binding a core keeps. Or the edge reads
+around the value `pc` of a derived item `d`: the member's value is `x`, and
+so is `pc`'s value of `d`'s row in `b`. -/
 def Edge.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (e : Edge) : Prop :=
   (∃ x, e.memberValue.on (b e.member) = some x ∧
     if e.nested then
@@ -216,15 +219,18 @@ def Edge.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (e : Edge) : Pro
       ∃ f', f = f' + 1 ∧ ∃ b' ∈ coreBindings s db (evalQuery s db f') b (s.item e.partner).core,
         s.GivesRow db f' b (s.item e.partner).core b' ∧ ∃ r, b' e.partner = some r ∧ e.value.eval r = some x
     else ∃ r, b e.partner = some r ∧ e.value.eval r = some x) ∨
-  (e.nulls = true ∧ e.nested = false ∧ s.alwaysBound e.partner = true ∧
+  (e.nulls = true ∧ e.nested = false ∧ e.via = none ∧ s.alwaysBound e.partner = true ∧
     e.memberValue.on (b e.member) = none ∧ ∀ r, b e.partner = some r → e.value.eval r = none) ∨
-  (e.value.strict = false ∧ e.nested = false ∧ s.alwaysBound e.partner = true ∧
+  (e.value.strict = false ∧ e.nested = false ∧ e.via = none ∧ s.alwaysBound e.partner = true ∧
     b e.partner = none) ∨
   (∃ d pc x, e.via = some (d, pc) ∧ e.nested = true ∧ e.memberValue.on (b e.member) = some x ∧
-    (((s.item d).core = (s.item e.member).core ∧ ∃ rd, b d = some rd ∧ rd.cell pc = some x) ∨
-      (s.item d).core ≠ (s.item e.member).core ∧
-      ∃ f', f = f' + 1 ∧ ∃ b' ∈ coreBindings s db (evalQuery s db f') b (s.item d).core,
-        s.GivesRow db f' b (s.item d).core b' ∧ ∃ rd, b' d = some rd ∧ rd.cell pc = some x))
+    (((s.item d).core = (s.item e.member).core ∧ ∃ rd, b d = some rd ∧ pc.eval rd = some x) ∨
+      ((s.item d).core ≠ (s.item e.member).core ∧
+        ∃ f', f = f' + 1 ∧ ∃ b' ∈ coreBindings s db (evalQuery s db f') b (s.item d).core,
+          s.GivesRow db f' b (s.item d).core b' ∧ ∃ rd, b' d = some rd ∧ pc.eval rd = some x) ∨
+      ((s.item d).core = (s.item e.member).core ∧ s.alwaysBound d = true ∧ b d = none))) ∨
+  (∃ d pc x, e.via = some (d, pc) ∧ e.nested = false ∧ e.memberValue.on (b e.member) = some x ∧
+    ∃ rd, b d = some rd ∧ pc.eval rd = some x)
 
 /-- An OR that narrows `d.item` holds of a binding: one of its sides does,
 each of its terms true of the item's row and each of its edges holding. -/
@@ -238,20 +244,59 @@ whose member has no row, unless its partner has none either. -/
 def Edge.memberStrict (s : Statement) (e : Edge) : Prop :=
   e.memberValue.on none = none ∨ s.alwaysBound e.member = true
 
-/-- What an edge through column `pc` of derived item `d` reads: `d`'s arm
-passes the column on from a column `xc` of the edge's partner, whose value
-the edge's value is, and the member waits for the partner. -/
-def Edge.Passed (s : Statement) (e : Edge) (d pc : Nat) : Prop :=
-  e.nested = true ∧ ∃ xc, passedSource s d pc = some (e.partner, xc) ∧ ∀ r, e.value.eval r = r.cell xc
+/-- What an edge through the value `dv` of derived item `d`'s row reads:
+`d`'s arm passes each column `dv` names on from a column of the edge's
+partner (`rename`), so the edge's value of a row of the partner that holds
+those columns' values is `dv`'s value of `d`'s row, NULL where the partner
+has no row unless no LEFT JOIN adds the partner, and the member waits for the
+partner. -/
+def Edge.Passed (s : Statement) (e : Edge) (d : Nat) (dv : PValue) : Prop :=
+  e.nested = true ∧ (e.value.on none = none ∨ s.alwaysBound e.partner = true) ∧ ∃ rename : Nat → Option Nat,
+    (∃ c c', rename c = some c') ∧
+    (∀ c c', rename c = some c' → passedSource s d c = some (e.partner, c')) ∧
+    ∀ (rd : Row) (row : Option Row), (∀ c c', rename c = some c' → rd.cell c = cellOf row c') →
+      e.value.on row = dv.on (some rd)
+
+/-- What an edge around column `pc` of derived item `d` reads: `d`'s one row
+holds the value of column `xc` of the edge's partner in the binding around
+`d`'s core, which the edge's value is, and the partner's row in the binding
+is that row (`aroundSource`). -/
+def Edge.Around (s : Statement) (e : Edge) (d : Nat) (dv : PValue) : Prop :=
+  e.nested = false ∧ ∃ pc xc, dv = .column pc ∧ aroundSource s d pc = some (e.partner, xc) ∧
+    ∀ r, e.value.eval r = r.cell xc
 
 /-- Whether an edge to a subquery's source has its partner in an arm of
 one of the subqueries `queries`, the queries of the condition that gives the
 edge, and an edge through a derived item reads what `Edge.Passed` says,
-from a derived item of the member's core or of an arm of one of `queries`. -/
+from a derived item of the member's core or of an arm of one of `queries`,
+and an edge around a derived item reads what `Edge.Around` says, from a
+derived item of the member's core. -/
 def Edge.NestedIn (s : Statement) (queries : List Nat) (e : Edge) : Prop :=
   (e.nested = true → e.via = none → ∃ q ∈ queries, (s.item e.partner).core ∈ (s.query q).arms) ∧
-  ∀ d pc, e.via = some (d, pc) → e.Passed s d pc ∧
-    ((s.item d).core = (s.item e.member).core ∨ ∃ q ∈ queries, (s.item d).core ∈ (s.query q).arms)
+  ∀ d pc, e.via = some (d, pc) →
+    (e.nested = true → e.Passed s d pc ∧
+      ((s.item d).core = (s.item e.member).core ∨ ∃ q ∈ queries, (s.item d).core ∈ (s.query q).arms)) ∧
+    (e.nested = false → e.Around s d pc ∧ (s.item d).core = (s.item e.member).core)
+
+/-- Whether the items `items` of the condition that gives an edge hold
+what the edge compares in the member's core: the partner, outside a
+subquery, and the derived item an edge reads through, another than the
+member, when it sits in the member's core. -/
+def Edge.Named (s : Statement) (items : List Nat) (e : Edge) : Prop :=
+  (e.nested = false → e.via = none → e.partner ∈ items) ∧
+  ∀ d pc, e.via = some (d, pc) → (s.item d).core = (s.item e.member).core → d ∈ items ∧ d ≠ e.member
+
+/-- An edge through no derived item, whose partner outside a subquery is
+one of `items`, has what it compares among them. -/
+theorem Edge.named_of {s : Statement} {items : List Nat} {e : Edge} (hv : e.via = none)
+    (h : e.nested = false → e.partner ∈ items) : e.Named s items :=
+  ⟨fun hn _ => h hn, fun _ _ hd => by rw [hv] at hd; cases hd⟩
+
+/-- An edge whose items are among `items` has them among any list that
+holds `items`. -/
+theorem Edge.Named.mono {s : Statement} {items items' : List Nat} {e : Edge}
+    (h : e.Named s items) (hi : ∀ j ∈ items, j ∈ items') : e.Named s items' :=
+  ⟨fun hn hv => hi _ (h.1 hn hv), fun d pc hv hc => ⟨hi _ (h.2 d pc hv hc).1, (h.2 d pc hv hc).2⟩⟩
 
 /-- An edge whose subqueries are among `queries` has them among any list
 that holds `queries`. -/
@@ -260,8 +305,9 @@ theorem Edge.NestedIn.mono {s : Statement} {queries queries' : List Nat} {e : Ed
   refine ⟨fun hn hv => ?_, fun d pc hv => ?_⟩
   · obtain ⟨q, hmem, harm⟩ := h.1 hn hv
     exact ⟨q, hq q hmem, harm⟩
-  · obtain ⟨hp, hin⟩ := h.2 d pc hv
-    refine ⟨hp, hin.imp id fun ⟨q, hmem, harm⟩ => ⟨q, hq q hmem, harm⟩⟩
+  · refine ⟨fun hn => ?_, (h.2 d pc hv).2⟩
+    obtain ⟨hp, hin⟩ := (h.2 d pc hv).1 hn
+    exact ⟨hp, hin.imp id fun ⟨q, hmem, harm⟩ => ⟨q, hq q hmem, harm⟩⟩
 
 /-- An edge through no derived item, whose partner sits in an arm of one of
 `queries` when it is a subquery's source. -/
@@ -281,7 +327,7 @@ def ReadCondition.Disjoins (read : ReadCondition) : Prop :=
   ∀ {s k cd n}, read s k cd = some n → n.terms = [] ∧ n.edges = [] ∧
     ∀ d ∈ n.ors, (s.item d.item).core = k ∧ (∀ side ∈ d.sides, side.narrows = true) ∧
       (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
-        (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
+        (e.nested = false → e.partner ≠ e.member) ∧ e.Named s cd.items ∧
         (s.item e.partner).readable ∧ e.memberStrict s ∧ e.NestedIn s cd.queries) ∧
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b
 
@@ -300,7 +346,7 @@ structure ReadCondition.Sound (read : ReadCondition) : Prop where
     ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → t.holds (b i)
   edges : ∀ {s k cd n}, read s k cd = some n → ∀ e ∈ n.edges,
     (s.item e.member).core = k ∧ (e.nested = false → e.partner ≠ e.member) ∧
-    (e.nested = false → e.partner ∈ cd.items) ∧ (s.item e.partner).readable ∧ e.memberStrict s ∧
+    e.Named s cd.items ∧ (s.item e.partner).readable ∧ e.memberStrict s ∧
     e.NestedIn s cd.queries ∧
     ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b
 
@@ -332,15 +378,20 @@ theorem Edge.HoldsIn.bound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : E
     (hh : e.HoldsIn s db f b) (hn : e.nulls = false) (hs : e.memberStrict s)
     (hb : b e.member = none) :
     s.alwaysBound e.member = true ∨
-      (e.nested = false ∧ s.alwaysBound e.partner = true ∧ b e.partner = none) := by
-  rcases hh with ⟨x, hx, _⟩ | ⟨hnulls, _⟩ | ⟨_, hnest, hab, hp⟩ | ⟨_, _, x, _, _, hx, _⟩
+      (e.nested = false ∧ e.via = none ∧ s.alwaysBound e.partner = true ∧ b e.partner = none) := by
+  rcases hh with ⟨x, hx, _⟩ | ⟨hnulls, _⟩ | ⟨_, hnest, hvn, hab, hp⟩ | ⟨_, _, x, _, _, hx, _⟩ |
+    ⟨_, _, x, _, _, hx, _⟩
   · rcases hs with hs | hs
     · rw [hb, hs] at hx
       cases hx
     · exact Or.inl hs
   · rw [hn] at hnulls
     cases hnulls
-  · exact Or.inr ⟨hnest, hab, hp⟩
+  · exact Or.inr ⟨hnest, hvn, hab, hp⟩
+  · rcases hs with hs | hs
+    · rw [hb, hs] at hx
+      cases hx
+    · exact Or.inl hs
   · rcases hs with hs | hs
     · rw [hb, hs] at hx
       cases hx
@@ -358,7 +409,7 @@ theorem Disjunction.HoldsIn.bound {s : Statement} {db : Db} {f : Nat} {b : Bind}
     (hedges : ∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧ e.memberStrict s)
     (hb : b d.item = none) :
     s.alwaysBound d.item = true ∨ ∃ side ∈ d.sides, ∃ e ∈ side.edges,
-      e.nested = false ∧ s.alwaysBound e.partner = true ∧ b e.partner = none := by
+      e.nested = false ∧ e.via = none ∧ s.alwaysBound e.partner = true ∧ b e.partner = none := by
   obtain ⟨side, hside, hterms, hholds⟩ := hh
   have hsn : side.mayHoldOnNulls = false := by
     simp only [Disjunction.mayHoldOnNulls, List.any_eq_false] at hn

@@ -108,11 +108,15 @@ theorem joinStep_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → Li
     (hLeft : ∀ j, Left j → s.alwaysBound j = false)
     (hon : ∀ b, Passes G b → V b → s.BoundIn (S ++ [i]) b →
       onHolds c subsX i b = onHolds c subsY i b)
-    (hleftX : Left i → ∀ b, Passes G b → V b → s.BoundIn S b → ∀ r ∈ rowsX i,
+    (hleftX : Left i → ∀ b, Passes G b → V b → s.BoundIn S b →
+      (∀ j ∈ S, ∀ rj, b j = some rj → rj ∈ rowsX j) → ∀ r ∈ rowsX i,
       onHolds c subsX i (b.set i (some r)) = true → G i r = true)
-    (hleftY : Left i → ∀ b, Passes G b → V b → s.BoundIn S b → ∀ r ∈ rowsY i,
+    (hleftY : Left i → ∀ b, Passes G b → V b → s.BoundIn S b →
+      (∀ j ∈ S, ∀ rj, b j = some rj → rj ∈ rowsY j) → ∀ r ∈ rowsY i,
       onHolds c subsY i (b.set i (some r)) = true → G i r = true)
-    {b : Bind} (hVb : V b) (hVi : ∀ x, V (b.set i x)) (hbi : ∀ r, b i = some r → G i r = true) :
+    {b : Bind} (hVb : V b) (hVi : ∀ x, V (b.set i x)) (hbi : ∀ r, b i = some r → G i r = true)
+    (hbX : ∀ j ∈ S, ∀ rj, b j = some rj → rj ∈ rowsX j)
+    (hbY : ∀ j ∈ S, ∀ rj, b j = some rj → rj ∈ rowsY j) :
     (View.joinStep s c rowsX subsX i b).filter (fun b => decide (Restricted G Left (S ++ [i]) b)) =
       (View.joinStep s c rowsY subsY i b).filter
         (fun b => decide (Restricted G Left (S ++ [i]) b)) := by
@@ -161,8 +165,7 @@ theorem joinStep_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → Li
     by_cases hl : Left i
     · -- Every row its ON holds for passes the test, so both steps are the same.
       have hall : ∀ (rows : List Row) (subs : Bind → Subs),
-          (Left i → ∀ b, Passes G b → V b → s.BoundIn S b → ∀ r ∈ rows,
-            onHolds c subs i (b.set i (some r)) = true → G i r = true) →
+          (∀ r ∈ rows, onHolds c subs i (b.set i (some r)) = true → G i r = true) →
           rows.filterMap (f subs) = (rows.filter (G i)).filterMap (f subs) := by
         intro rows subs hleft
         rw [List.filterMap_filter]
@@ -173,9 +176,10 @@ theorem joinStep_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → Li
         · simp only [hg, Bool.false_eq_true, ↓reduceIte, f]
           split
           · rename_i hon'
-            exact absurd (hleft hl b hb.1 hVb hbound r hr hon') hg
+            exact absurd (hleft r hr hon') hg
           · rfl
-      rw [hstep, hstep, hall _ _ hleftX, hall _ _ hleftY, hsame]
+      rw [hstep, hstep, hall _ _ (hleftX hl b hb.1 hVb hbound hbX),
+        hall _ _ (hleftY hl b hb.1 hVb hbound hbY), hsame]
     · -- A binding that holds no row of the item fails the test.
       have hnone : ¬Restricted G Left (S ++ [i]) (b.set i none) := fun h =>
         hl (((restricted_set hi hbi).mp h).2.2 rfl)
@@ -216,17 +220,21 @@ theorem joinItems_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → L
     (∀ i ∈ is, ∀ b, Passes G b → V b → s.BoundIn (S ++ is.takeWhile (· ≠ i) ++ [i]) b →
       onHolds c subsX i b = onHolds c subsY i b) →
     (∀ i ∈ is, Left i → ∀ b, Passes G b → V b → s.BoundIn (S ++ is.takeWhile (· ≠ i)) b →
+      (∀ j ∈ S ++ is.takeWhile (· ≠ i), ∀ rj, b j = some rj → rj ∈ rowsX j) →
       ∀ r ∈ rowsX i, onHolds c subsX i (b.set i (some r)) = true → G i r = true) →
     (∀ i ∈ is, Left i → ∀ b, Passes G b → V b → s.BoundIn (S ++ is.takeWhile (· ≠ i)) b →
+      (∀ j ∈ S ++ is.takeWhile (· ≠ i), ∀ rj, b j = some rj → rj ∈ rowsY j) →
       ∀ r ∈ rowsY i, onHolds c subsY i (b.set i (some r)) = true → G i r = true) →
     ∀ (bsX bsY : List Bind), (∀ b ∈ bsX ++ bsY, V b) →
     (∀ b ∈ bsX ++ bsY, ∀ j ∈ is, ∀ r, b j = some r → G j r = true) →
+    (∀ b ∈ bsX, ∀ j ∈ S, ∀ r, b j = some r → r ∈ rowsX j) →
+    (∀ b ∈ bsY, ∀ j ∈ S, ∀ r, b j = some r → r ∈ rowsY j) →
     bsX.filter (fun b => decide (Restricted G Left S b)) =
       bsY.filter (fun b => decide (Restricted G Left S b)) →
     (joinItems s c rowsX subsX is bsX).filter (fun b => decide (Restricted G Left (S ++ is) b)) =
       (joinItems s c rowsY subsY is bsY).filter (fun b => decide (Restricted G Left (S ++ is) b))
-  | [], S, _, _, _, _, _, _, bsX, bsY, _, _, h => by simpa [joinItems] using h
-  | i :: is, S, hnd, hV, hrows, hon, hleftX, hleftY, bsX, bsY, hVbs, hgood, h => by
+  | [], S, _, _, _, _, _, _, bsX, bsY, _, _, _, _, h => by simpa [joinItems] using h
+  | i :: is, S, hnd, hV, hrows, hon, hleftX, hleftY, bsX, bsY, hVbs, hgood, hinX, hinY, h => by
     rw [View.joinItems_cons, View.joinItems_cons]
     have hnd' : (S ++ [i] ++ is).Nodup := by simpa using hnd
     have hiS : i ∉ S := by
@@ -246,11 +254,37 @@ theorem joinItems_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → L
       (fun j hj => hrows j (List.mem_cons_of_mem i hj))
       (fun j hj b hb hv hbd => hon j (List.mem_cons_of_mem i hj) b hb hv
         (by rw [htake j hj]; simpa using hbd))
-      (fun j hj hl b hb hv hbd => hleftX j (List.mem_cons_of_mem i hj) hl b hb hv
-        (by rw [htake j hj]; simpa using hbd))
-      (fun j hj hl b hb hv hbd => hleftY j (List.mem_cons_of_mem i hj) hl b hb hv
-        (by rw [htake j hj]; simpa using hbd))
+      (fun j hj hl b hb hv hbd hbr => hleftX j (List.mem_cons_of_mem i hj) hl b hb hv
+        (by rw [htake j hj]; simpa using hbd) (by rw [htake j hj]; simpa using hbr))
+      (fun j hj hl b hb hv hbd hbr => hleftY j (List.mem_cons_of_mem i hj) hl b hb hv
+        (by rw [htake j hj]; simpa using hbd) (by rw [htake j hj]; simpa using hbr))
     rw [List.append_assoc, List.singleton_append] at ih
+    -- A binding a step joins holds a row of `i` the step read, and the rows
+    -- of the binding it joined onto.
+    have hstepIn : ∀ (bs : List Bind) (rows : Nat → List Row) (subs : Bind → Subs),
+        (∀ b ∈ bs, ∀ j ∈ S, ∀ r, b j = some r → r ∈ rows j) →
+        ∀ b' ∈ bs.flatMap (View.joinStep s c rows subs i), ∀ j ∈ S ++ [i], ∀ r, b' j = some r →
+          r ∈ rows j := by
+      intro bs rows subs hbs b' hb' j hj r hr
+      obtain ⟨b, hb, hb'⟩ := List.mem_flatMap.mp hb'
+      by_cases hji : j = i
+      · subst hji
+        unfold View.joinStep at hb'
+        simp only at hb'
+        split at hb'
+        · simp only [List.mem_singleton] at hb'
+          subst hb'
+          simp [Bind.set] at hr
+        · obtain ⟨r0, hr0, hb0⟩ := List.mem_filterMap.mp hb'
+          split at hb0
+          · cases hb0
+            simp only [Bind.set, ↓reduceIte, Option.some.injEq] at hr
+            subst hr
+            exact hr0
+          · cases hb0
+      · obtain ⟨x, rfl⟩ := mem_joinStep hb'
+        have hjS : j ∈ S := by simpa [hji] using hj
+        exact hbs b hb j hjS r (by simpa [Bind.set, hji] using hr)
     apply ih
     · intro b' hb'
       rcases List.mem_append.mp hb' with hb' | hb' <;>
@@ -263,6 +297,8 @@ theorem joinItems_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → L
       · obtain ⟨b, hb, hb'⟩ := List.mem_flatMap.mp hb'
         obtain ⟨x, rfl⟩ := mem_joinStep hb'
         exact hgood b (by simp [hb]) j (List.mem_cons_of_mem i hj) r (by simpa [Bind.set, hji] using hr)
+    · exact hstepIn bsX rowsX subsX hinX
+    · exact hstepIn bsY rowsY subsY hinY
     · rw [List.filter_flatMap, List.filter_flatMap]
       have hbi : ∀ b ∈ bsX ++ bsY, ∀ r, b i = some r → G i r = true :=
         fun b hb => hgood b hb i (by simp)
@@ -286,12 +322,18 @@ theorem joinItems_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → L
       apply flatMap_congr_mem
       intro b hb
       have hbY : b ∈ bsY := (List.mem_filter.mp hb).1
+      have hbX : b ∈ bsX := by
+        have : b ∈ bsX.filter (fun b => decide (Restricted G Left S b)) := by rw [h]; exact hb
+        exact (List.mem_filter.mp this).1
       have hVb := hVbs b (List.mem_append_right _ hbY)
       exact joinStep_restricted hiS (hrows i (by simp)) hLeft
         (fun b hb hv hbd => hon i (by simp) b hb hv (by simpa using hbd))
-        (fun hl b hb hv hbd => hleftX i (by simp) hl b hb hv (by simpa using hbd))
-        (fun hl b hb hv hbd => hleftY i (by simp) hl b hb hv (by simpa using hbd))
+        (fun hl b hb hv hbd hbr => hleftX i (by simp) hl b hb hv (by simpa using hbd)
+          (by simpa using hbr))
+        (fun hl b hb hv hbd hbr => hleftY i (by simp) hl b hb hv (by simpa using hbd)
+          (by simpa using hbr))
         hVb (fun x => hV b i x hVb (by simp)) (hbi b (List.mem_append_right _ hbY))
+        (hinX b hbX) (hinY b hbY)
 
 /-- What every binding a join starts from has, and each item's step keeps,
 every binding the join keeps has. -/
@@ -341,10 +383,14 @@ theorem coreBindings_restricted {s : Statement} {X Y : Db} {EX EY : Bind → Nat
       ∀ q ∈ (s.core k).subqueries, EX b q = EY b q)
     (hleftX : ∀ i ∈ (s.core k).items, Left i → ∀ b, Passes G b → s.Within k o b →
       s.BoundIn ((s.core k).items.takeWhile (· ≠ i)) b →
+      (∀ j ∈ (s.core k).items.takeWhile (· ≠ i), ∀ rj, b j = some rj →
+        rj ∈ s.itemRows X EX (s.outerOf k o) j) →
       ∀ r ∈ s.itemRows X EX (s.outerOf k o) i, onHolds (s.core k) EX i (b.set i (some r)) = true →
         G i r = true)
     (hleftY : ∀ i ∈ (s.core k).items, Left i → ∀ b, Passes G b → s.Within k o b →
       s.BoundIn ((s.core k).items.takeWhile (· ≠ i)) b →
+      (∀ j ∈ (s.core k).items.takeWhile (· ≠ i), ∀ rj, b j = some rj →
+        rj ∈ s.itemRows Y EY (s.outerOf k o) j) →
       ∀ r ∈ s.itemRows Y EY (s.outerOf k o) i, onHolds (s.core k) EY i (b.set i (some r)) = true →
         G i r = true)
     {RX RY : Bind → Bool}
@@ -405,15 +451,17 @@ theorem coreBindings_restricted {s : Statement} {X Y : Db} {EX EY : Bind → Nat
       | table t => exact htables i hi t (by simp [Statement.table?, hkind])
       | derived q v => exact hderived i hi q v hkind)
     (fun i hi b hb hw hbd => hall _ b (hsubsOn i hi b hb hw (by simpa using hbd)))
-    (fun i hi hl b hb hw hbd => hleftX i hi hl b hb hw (by simpa using hbd))
-    (fun i hi hl b hb hw hbd => hleftY i hi hl b hb hw (by simpa using hbd))
+    (fun i hi hl b hb hw hbd hbr => hleftX i hi hl b hb hw (by simpa using hbd)
+      (by simpa using hbr))
+    (fun i hi hl b hb hw hbd hbr => hleftY i hi hl b hb hw (by simpa using hbd)
+      (by simpa using hbr))
     [b0] [b0] (fun b hb => by
       simp only [List.mem_append, List.mem_singleton, or_self] at hb
       subst hb
       exact hV0) (fun b hb j _ r hr => by
       simp only [List.mem_append, List.mem_singleton, or_self] at hb
       subst hb
-      exact hb0 j r hr) rfl
+      exact hb0 j r hr) (fun _ _ j hj => by cases hj) (fun _ _ j hj => by cases hj) rfl
   simp only [List.nil_append] at hJ
   have hbind : ∀ (Z : Db) (E : Bind → Nat → List Row), coreBindings s Z E o k =
       (J Z E).filter fun b => c.innerConds.all fun cd => isTrue (cd.eval b (E b)) := fun _ _ => rfl
@@ -839,7 +887,10 @@ def ArmsKept (s : Statement) (Z : Db) (G : Nat → Row → Bool) (Left : Nat →
   ∀ k ∈ (s.query q).arms,
     (∀ b ∈ coreBindings s Z E o k, R k E b = true → Restricted G Left (s.core k).items b) ∧
     ∀ i ∈ (s.core k).items, Left i → ∀ b, Passes G b → s.Within k o b →
-      s.BoundIn ((s.core k).items.takeWhile (· ≠ i)) b → ∀ r ∈ s.itemRows Z E (s.outerOf k o) i,
+      s.BoundIn ((s.core k).items.takeWhile (· ≠ i)) b →
+      (∀ j ∈ (s.core k).items.takeWhile (· ≠ i), ∀ rj, b j = some rj →
+        rj ∈ s.itemRows Z E (s.outerOf k o) j) →
+      ∀ r ∈ s.itemRows Z E (s.outerOf k o) i,
         onHolds (s.core k) E i (b.set i (some r)) = true → G i r = true
 
 /-- The promise holds for a test of the bindings that matter that passes

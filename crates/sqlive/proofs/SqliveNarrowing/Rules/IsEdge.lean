@@ -52,7 +52,7 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     {v : Value} (hm : member.eval b sub = v) (ho : other.eval b sub = v) :
     e.HoldsIn s db f b := by
   obtain ⟨e', he', rfl, hleft⟩ := edge_facts h
-  obtain ⟨hmem, _, hn, _, hq, hitems, hrefs, hst, _, _, hval, hvs⟩ := Edge.edge_facts he'
+  obtain ⟨hmem, _, hn, hvn, hq, hitems, hrefs, hst, _, _, hval, hvs⟩ := Edge.edge_facts he'
   have hmv : e'.memberValue.on (b e'.member) = v := by
     rw [hmem b sub]
     exact hm
@@ -69,12 +69,12 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
         rw [other.eval_rowBind hitems hq, hb,
           other.eval_null hrefs hq hs (fun _ _ _ => by simp [rowBind, cellOf])] at ho
         cases ho
-      | false => exact Or.inr (Or.inr (Or.inl ⟨by simp [hvs, hs], hn, hleft, hb⟩))
+      | false => exact Or.inr (Or.inr (Or.inl ⟨by simp [hvs, hs], hn, by simpa using hvn, hleft, hb⟩))
     | some r =>
       refine Or.inl ⟨x, hmv, ?_⟩
       simp only [hn, Bool.false_eq_true, ↓reduceIte]
       exact ⟨r, hb, hov r hb⟩
-  | none => exact Or.inr (Or.inl ⟨rfl, hn, hleft, hmv, hov⟩)
+  | none => exact Or.inr (Or.inl ⟨rfl, hn, by simpa using hvn, hleft, hmv, hov⟩)
 
 /-- The theorem: `IS` true of a binding makes each edge sqlive reads from it
 hold, a NULL member matching a partner's NULL. -/
@@ -104,13 +104,15 @@ theorem is_edge_sound : ReadCondition.Sound readCondition where
       rcases he with he | he
       · obtain ⟨e', he', rfl, _⟩ := edge_facts he
         obtain ⟨_, hk, hnest, hvia, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
-        refine ⟨hk, fun _ => hne, fun _ => Edge.items_right _ (show e'.partner ∈ r.items from Edge.edge_partner_mem he'), hread,
+        refine ⟨hk, fun _ => hne, Edge.named_of (by simpa using hvia) fun _ =>
+            Edge.items_right _ (show e'.partner ∈ r.items from Edge.edge_partner_mem he'), hread,
           (Edge.edge_memberStrict he' :), Edge.nestedIn_of (by simpa using hvia) fun h => by simp [hnest] at h,
           fun db f b hc => ?_⟩
         exact edge_holds he rfl (hside hc).symm
       · obtain ⟨e', he', rfl, _⟩ := edge_facts he
         obtain ⟨_, hk, hnest, hvia, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
-        refine ⟨hk, fun _ => hne, fun _ => Edge.items_left _ (show e'.partner ∈ l.items from Edge.edge_partner_mem he'), hread,
+        refine ⟨hk, fun _ => hne, Edge.named_of (by simpa using hvia) fun _ =>
+            Edge.items_left _ (show e'.partner ∈ l.items from Edge.edge_partner_mem he'), hread,
           (Edge.edge_memberStrict he' :), Edge.nestedIn_of (by simpa using hvia) fun h => by simp [hnest] at h,
           fun db f b hc => ?_⟩
         exact edge_holds he rfl (hside hc)

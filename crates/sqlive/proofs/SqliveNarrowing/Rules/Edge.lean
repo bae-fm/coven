@@ -44,15 +44,30 @@ def edge (s : Statement) (k : Nat) (member other : Expr) (first : Bool) : Option
 
 /-- The edge `member = d.pc` gives, written in core `k` with the column
 first when `first`, when `d` is an item of the core a lookup can't read
-alone: through `d`, to the source its arm passes the column on from
-(`Planner::column_edge`). A column written first has an affinity, so the
-equality compares by BINARY. -/
+alone: around `d`, when `d` is a relation of the row around it, the edge
+`member = x.xc` gives for the item `x` and column `xc` whose value `d`'s one
+row holds (`aroundSource`), and otherwise through `d`, to the source its arm
+passes the column on from (`Planner::column_edge`). A column written first
+has an affinity, so the equality compares by BINARY. An expression of `d`'s
+columns gives the edge through `d` to the source its arm passes them on
+from (`Passed.exprEdge`). -/
 def throughEdge (s : Statement) (k : Nat) (member other : Expr) (first : Bool) : Option Edge :=
   match other with
   | .col d pc =>
-    if (s.item d).readable ∨ (s.item d).core ≠ k ∨ (first ∧ s.affinity d pc = none) then none
-    else Passed.edge s k member d pc
-  | _ => none
+    if (s.item d).readable ∨ (s.item d).core ≠ k then none
+    else
+      match aroundSource s d pc with
+      | some (x, xc) =>
+        (edge s k member (.col x xc) first).bind fun e =>
+          if e.member = d then none else some { e with via := some (d, .column pc) }
+      | none => if first ∧ s.affinity d pc = none then none else Passed.edge s k member d pc
+  | other =>
+    if !other.queries.isEmpty then none
+    else
+      match other.items.head? with
+      | some d =>
+        if (s.item d).readable ∨ (s.item d).core ≠ k then none else Passed.exprEdge s k member d other
+      | none => none
 
 /-- The edge `member = other` gives: `edge`'s, or else `throughEdge`'s. -/
 def orPassed (s : Statement) (k : Nat) (member other : Expr) (first : Bool) : Option Edge :=
@@ -188,7 +203,7 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     (h : edge s k member other first = some e) {db : Db} {f : Nat} {b : Bind} {sub : Subs}
     {x : Int} (hm : member.eval b sub = some x) (ho : other.eval b sub = some x) :
     e.HoldsIn s db f b := by
-  obtain ⟨hmem, _, hn, _, hq, hitems, hrefs, hst, _, _, hval, hvs⟩ := edge_facts h
+  obtain ⟨hmem, _, hn, hvn, hq, hitems, hrefs, hst, _, _, hval, hvs⟩ := edge_facts h
   rw [other.eval_rowBind hitems hq] at ho
   cases hb : b e.partner with
   | none =>
@@ -200,7 +215,7 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
       cases ho
     | false =>
       have hab : s.alwaysBound e.partner = true := by simpa [hs] using hst
-      exact Or.inr (Or.inr (Or.inl ⟨by rw [hvs, hs], hn, hab, hb⟩))
+      exact Or.inr (Or.inr (Or.inl ⟨by rw [hvs, hs], hn, hvn, hab, hb⟩))
   | some r =>
     refine Or.inl ⟨x, by rw [hmem b sub]; exact hm, ?_⟩
     · simp only [hn, Bool.false_eq_true, ↓reduceIte]
@@ -223,30 +238,60 @@ theorem nonstrict_holds_without_partner {m c p pc : Nat} {r : Row} (hr : r.cell 
       Op.compare, isTrue]
 
 /-- An edge `throughEdge` reads is `Passed.edge`'s, through an item of the
-member's core that the other side is a column of. -/
+member's core that the other side is a column of, or the edge `edge` reads
+to the item whose column that item, a relation of the row around it, holds,
+around it. -/
 theorem throughEdge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
     (h : throughEdge s k member other first = some e) :
-    ∃ d pc, other = .col d pc ∧ (s.item d).core = k ∧ Passed.edge s k member d pc = some e := by
+    (∃ d pc, other = .col d pc ∧ (s.item d).core = k ∧
+      (Passed.edge s k member d pc = some e ∨
+        ∃ x xc e', aroundSource s d pc = some (x, xc) ∧ edge s k member (.col x xc) first = some e' ∧
+          e'.member ≠ d ∧ e = { e' with via := some (d, .column pc) })) ∨
+    ∃ d, (s.item d).core = k ∧ Passed.exprEdge s k member d other = some e := by
   unfold throughEdge at h
   split at h
   · rename_i d pc
     split at h
     · cases h
     · rename_i hok
-      simp only [not_or, not_and, Bool.not_eq_true, ne_eq, Decidable.not_not] at hok
-      exact ⟨d, pc, rfl, hok.2.1, h⟩
-  · cases h
+      simp only [not_or, ne_eq, Decidable.not_not] at hok
+      split at h
+      · rename_i x xc hps
+        cases he : edge s k member (.col x xc) first with
+        | none => rw [he] at h; cases h
+        | some e' =>
+          rw [he] at h
+          simp only [Option.bind_some] at h
+          split at h
+          · cases h
+          · rename_i hdm
+            cases h
+            exact Or.inl ⟨d, pc, rfl, hok.2, Or.inr ⟨x, xc, e', hps, he, hdm, rfl⟩⟩
+      · split at h
+        · cases h
+        · exact Or.inl ⟨d, pc, rfl, hok.2, Or.inl h⟩
+  · split at h
+    · cases h
+    · split at h
+      · rename_i d _
+        split at h
+        · cases h
+        · rename_i hok
+          simp only [not_or, ne_eq, Decidable.not_not] at hok
+          exact Or.inr ⟨d, hok.2, h⟩
+      · cases h
 
 /-- What an edge `orPassed` reads says of it, where the condition names the
 items the other side names: its member is in the core, its partner is
 readable alone and, outside a subquery, another item the condition names;
-an edge through a derived item reads through one of the member's core; and
-the edge holds of each binding where the member equals the other side. -/
+an edge through or around a derived item reads through or around one of the
+member's core; and the edge holds of each binding where the member equals
+the other side. -/
 theorem orPassed_sound {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
     (h : orPassed s k member other first = some e) {cd : Cond}
     (hnamed : ∀ j ∈ other.items, j ∈ cd.items) :
     (s.item e.member).core = k ∧ (e.nested = false → e.partner ≠ e.member) ∧
-    (e.nested = false → e.partner ∈ cd.items) ∧ (s.item e.partner).readable ∧ e.memberStrict s ∧
+    e.Named s cd.items ∧ (s.item e.partner).readable ∧ e.memberStrict s ∧
     e.NestedIn s cd.queries ∧
     ∀ db f b sub x, member.eval b sub = some x → other.eval b sub = some x → e.HoldsIn s db f b := by
   unfold orPassed at h
@@ -255,25 +300,71 @@ theorem orPassed_sound {s : Statement} {k : Nat} {member other : Expr} {first : 
     rw [he] at h
     cases h
     obtain ⟨_, hk, hnest, hvia, _, _, _, _, hne, hread, _⟩ := edge_facts he
-    exact ⟨hk, fun _ => hne, fun _ => hnamed _ (edge_partner_mem he), hread, edge_memberStrict he,
+    exact ⟨hk, fun _ => hne, Edge.named_of hvia fun _ => hnamed _ (edge_partner_mem he), hread,
+      edge_memberStrict he,
       Edge.nestedIn_of hvia fun h => by simp [hnest] at h,
       fun db f b sub x hm ho => edge_holds he hm ho⟩
   | none =>
     rw [he] at h
-    obtain ⟨d, pc, rfl, hd, hp⟩ := throughEdge_facts h
-    obtain ⟨_, hk, hvia, hpassed, hread, hstrict, _⟩ := Passed.edge_facts hp
-    refine ⟨hk, fun hn => by simp [hpassed.1] at hn, fun hn => by simp [hpassed.1] at hn, hread,
-      hstrict, ⟨fun _ hv => (by rw [hvia] at hv; cases hv), fun d' pc' hv => ?_⟩,
-      fun db f b sub x hm ho => ?_⟩
-    · rw [hvia] at hv
-      obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
-      exact ⟨hpassed, Or.inl (by rw [hd, hk])⟩
-    · simp only [Expr.eval, cellOf] at ho
-      cases hbd : b d with
-      | none => rw [hbd] at ho; cases ho
-      | some rd =>
-        rw [hbd] at ho
-        exact Passed.edge_holds hp hm (Or.inl ⟨hd, rd, hbd, ho⟩)
+    obtain ⟨d, pc, rfl, hd, hp | ⟨x, xc, e', hps, he', hdm, rfl⟩⟩ | ⟨d, hd, hp⟩ := throughEdge_facts h
+    · obtain ⟨_, hk, hvia, hpassed, hread, hstrict, hdm, _⟩ := Passed.edge_facts hp
+      refine ⟨hk, fun hn => by simp [hpassed.1] at hn, ⟨fun hn => by simp [hpassed.1] at hn,
+        fun d' pc' hv _ => ?_⟩, hread, hstrict, ⟨fun _ hv => (by rw [hvia] at hv; cases hv),
+        fun d' pc' hv => ⟨fun _ => ?_, fun hn => by simp [hpassed.1] at hn⟩⟩,
+        fun db f b sub x hm ho => ?_⟩
+      · rw [hvia] at hv
+        obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
+        exact ⟨hnamed d (by simp [Expr.items, Expr.refs]), hdm⟩
+      · rw [hvia] at hv
+        obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
+        exact ⟨hpassed, Or.inl (by rw [hd, hk])⟩
+      · simp only [Expr.eval, cellOf] at ho
+        cases hbd : b d with
+        | none => rw [hbd] at ho; cases ho
+        | some rd =>
+          rw [hbd] at ho
+          exact Passed.edge_holds hp hm (Or.inl ⟨hd, rd, hbd, ho⟩)
+    · -- An edge around a relation of the row around it: `edge`'s edge to the
+      -- item whose column the relation's one row holds.
+      obtain ⟨hmv, hk, hn, _, _, hitems, _, _, hne, hread, hval, _⟩ := edge_facts he'
+      have hx : e'.partner = x := (hitems x (by simp [Expr.items, Expr.refs])).symm
+      have hstrict : Edge.memberStrict s { e' with via := some (d, .column pc) } := by
+        simpa [Edge.memberStrict] using edge_memberStrict he'
+      refine ⟨hk, fun _ => hne, ⟨fun _ hv => (by simp at hv), fun d' pc' hv _ => ?_⟩, hread,
+        hstrict, ⟨fun hn' => (by simp [hn] at hn'), fun d' pc' hv => ⟨fun hn' => (by
+          simp [hn] at hn'), fun _ => ?_⟩⟩, fun db f b sub v hm ho => ?_⟩
+      · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
+        exact ⟨hnamed d (by simp [Expr.items, Expr.refs]), fun h => hdm h.symm⟩
+      · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
+        refine ⟨⟨hn, pc, xc, rfl, by rw [hx]; exact hps, fun r => ?_⟩, by rw [hd, hk]⟩
+        rw [hval r]
+        simp [Expr.eval, rowBind, cellOf]
+      · simp only [Expr.eval, cellOf] at ho
+        cases hbd : b d with
+        | none => rw [hbd] at ho; cases ho
+        | some rd =>
+          rw [hbd] at ho
+          exact Or.inr (Or.inr (Or.inr (Or.inr ⟨d, .column pc, v, rfl, hn, by rw [hmv b sub]; exact hm,
+            rd, hbd, ho⟩)))
+    · -- An expression of a derived item's columns: the edge through it to the
+      -- source its arm passes them on from.
+      obtain ⟨_, hk, hvia, hpassed, hread, hstrict, hdm, _, hrefs, _, hitems⟩ :=
+        Passed.exprEdge_facts hp
+      have hdin : d ∈ cd.items := by
+        obtain ⟨⟨j, c⟩, hjc⟩ := List.exists_mem_of_ne_nil _ hrefs
+        have hj : j ∈ other.items := List.mem_map.mpr ⟨(j, c), hjc, rfl⟩
+        rw [← hitems j hj]
+        exact hnamed j hj
+      refine ⟨hk, fun hn => by simp [hpassed.1] at hn, ⟨fun hn => by simp [hpassed.1] at hn,
+        fun d' pc' hv _ => ?_⟩, hread, hstrict, ⟨fun _ hv => (by rw [hvia] at hv; cases hv),
+        fun d' pc' hv => ⟨fun _ => ?_, fun hn => by simp [hpassed.1] at hn⟩⟩,
+        fun db f b sub x hm ho => Passed.exprEdge_holds hp hd hm ho⟩
+      · rw [hvia] at hv
+        obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
+        exact ⟨hdin, hdm⟩
+      · rw [hvia] at hv
+        obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
+        exact ⟨hpassed, Or.inl (by rw [hd, hk])⟩
 
 /-- Rule 2's theorem: an equality true of a binding makes each edge sqlive
 reads from it hold. -/

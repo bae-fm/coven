@@ -203,4 +203,26 @@ theorem query_row_at {s : Statement} {db : Db} {f : Nat} {b : Bind} {q k i : Nat
     exact ⟨b', List.fst_mem_of_mem_zipIdx hb', by simp [List.getElem?_map, ho, OutCol.plain],
       fun _ hw => Core.plain_outRow hw _ _ _ _⟩
 
+/-- A row of a one-arm query whose arm neither aggregates nor calls a window
+function is the row of a binding the arm keeps. -/
+theorem query_row_plain {s : Statement} {db : Db} {f : Nat} {b : Bind} {q k : Nat}
+    (ha : (s.query q).arms = [k]) (hagg : (s.core k).aggregated = false)
+    (hwin : (s.core k).windowed = false) {r : Row} (hr : r ∈ evalQuery s db (f + 1) b q) :
+    ∃ b' ∈ coreBindings s db (evalQuery s db f) b k, r = (s.core k).outRow (evalQuery s db f) b' := by
+  simp only [evalQuery, queryRows, ha, List.map_cons, List.map_nil, combineAll_single] at hr
+  have hr := mem_result (mem_post hr)
+  unfold Core.rows at hr
+  split at hr
+  · rename_i hagg'
+    simp [hagg] at hagg'
+  · simp only [List.mem_map] at hr
+    obtain ⟨⟨b', j⟩, hb', rfl⟩ := hr
+    exact ⟨b', List.fst_mem_of_mem_zipIdx hb', Core.plain_outRow hwin _ _ _ _⟩
+
+/-- A result column that holds `e` holds `e`'s value in a core's row of a
+binding. -/
+theorem Core.outRow_cell {c : Core} {p : Nat} {e : Expr} (h : c.output[p]? = some (.expr e))
+    (E : Bind → Nat → List Row) (b : Bind) : (c.outRow E b).cell p = e.eval b (E b) := by
+  simp [Core.outRow, Row.cell, List.getElem?_map, h]
+
 end SqliveNarrowing

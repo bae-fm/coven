@@ -4,8 +4,11 @@
 //! there, and one joined inside another CTE that the statement reads only
 //! in a subquery; and the same correlated with the row around them, which
 //! no lookup reads alone: a table joined to one, by an inner join or a LEFT
-//! JOIN, or a column compared with the value a subquery over one returns,
-//! takes values from the table its arm passes the column on from. Beside
+//! JOIN, on its column or an expression of it, or a column compared with the
+//! value a subquery over one returns, takes values from the table its arm
+//! passes the column on from. A relation of the row around it, which reads
+//! no FROM item and returns that row's columns, gives a table joined to it
+//! the values of that row. Beside
 //! them sometimes stands a CTE that no query reads, whose rows SQLite would
 //! pick or whose USING join would compare columns: SQLite never runs it,
 //! and the model reads none.
@@ -18,13 +21,30 @@ use super::{
 use crate::random_scopes::Rng;
 
 /// A query of a derived item's shape, sometimes correlated with the item
-/// `outer` around the subquery that reads it.
+/// `outer` around the subquery that reads it, and sometimes a relation of
+/// that item's row.
 fn inner(rng: &mut Rng, outer: &str) -> Query {
-    if rng.chance(30) {
-        correlated(rng, outer)
-    } else {
-        derived(rng)
+    match rng.below(10) {
+        0..=2 => correlated(rng, outer),
+        3 | 4 => around(outer),
+        _ => derived(rng),
     }
+}
+
+/// A relation of the row of the item `outer` around the subquery that reads
+/// it: one SELECT of no FROM item that returns that row's columns, each
+/// named for its column.
+fn around(outer: &str) -> Query {
+    select(Core {
+        from: Vec::new(),
+        conditions: Vec::new(),
+        select: DERIVED
+            .iter()
+            .map(|column| Out::Expr(col(outer, column), Some((*column).to_owned())))
+            .collect(),
+        group: Vec::new(),
+        distinct: false,
+    })
 }
 
 /// A query of a derived item's shape whose first arm names the item
@@ -41,10 +61,13 @@ fn correlated(rng: &mut Rng, outer: &str) -> Query {
 /// values to, or that takes values from it.
 pub(super) fn reading(rng: &mut Rng, source: Source, outer: &str) -> Query {
     let table_ = pick(rng, &TABLES);
-    let on = vec![if rng.chance(50) {
-        eq(col("y", "a"), col("d", "c"))
-    } else {
-        eq(col("d", "a"), col("y", "c"))
+    let on = vec![match rng.below(4) {
+        0 => eq(col("y", "a"), col("d", "c")),
+        1 => eq(col("d", "a"), col("y", "c")),
+        // An expression of the derived item's column.
+        2 => eq(col("y", "a"), Expr::Add(Box::new(col("d", "c")), Box::new(lit(1)))),
+        // One the app's function makes no NULL where the column is.
+        _ => eq(col("y", "a"), Expr::App(Box::new(col("d", "c")))),
     }];
     let mut conditions = Vec::new();
     if rng.chance(50) {

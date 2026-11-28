@@ -145,7 +145,7 @@ theorem row_subquery_edge_sound : ReadCondition.Sound readCondition where
       | some member =>
       simp only [hm, bind, Option.bind] at hpos
       obtain ⟨sub, pc, mc, harms, hout, hval, hpcore, hread, hmem, hmv, hk, hnest, hvia⟩ := edge_facts hpos
-      refine ⟨hk, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread,
+      refine ⟨hk, fun h => by simp [hnest] at h, Edge.named_of hvia fun h => by simp [hnest] at h, hread,
       Or.inl (by rw [hmv]; rfl),
       Edge.nestedIn_of hvia fun _ => ⟨q, by simp [Cond.queries], by rw [hpcore, harms]; simp⟩,
       fun db f b hc => ?_⟩

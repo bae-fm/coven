@@ -976,11 +976,15 @@ holds, when the partner's row in the binding is among `rowsOf` the partner's
 rows and passes the lookup's scope. -/
 theorem joined_passes {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
     (hnested : e.nested = false) (hholds : e.HoldsIn s db f b) {r r' : Row}
-    (hm : b e.member = some r) (hp : b e.partner = some r') (rowsOf : Nat → List Row)
+    (hm : b e.member = some r) (hp : b e.partner = some r')
+    (haround : ∀ d pc x, e.via = some (d, pc) → e.nested = false → e.memberValue.on (b e.member) = some x →
+      (∃ rd, b d = some rd ∧ pc.eval rd = some x) → e.value.eval r' = some x)
+    (rowsOf : Nat → List Row)
     (hr' : r' ∈ rowsOf e.partner) {scope : RScope} (hs : scope.passes rowsOf r') :
     (RScope.joined e.memberValue e.partner e.value scope e.nulls).passes rowsOf r := by
   simp only [RScope.passes, Bool.and_eq_true, Bool.or_eq_true, List.any_eq_true]
-  rcases hholds with ⟨x, hx, hrow⟩ | ⟨hn, _, _, hx, hnone⟩ | ⟨_, _, _, hnone⟩ | ⟨_, _, _, _, hnt, _⟩
+  rcases hholds with ⟨x, hx, hrow⟩ | ⟨hn, _, _, _, hx, hnone⟩ | ⟨_, _, _, _, hnone⟩ |
+    ⟨_, _, _, _, hnt, _⟩ | ⟨d, pc, x, hv, hnf, hx, hrow⟩
   · rw [hnested] at hrow
     simp only [Bool.false_eq_true, ↓reduceIte] at hrow
     obtain ⟨r'', hr'', hv⟩ := hrow
@@ -996,5 +1000,9 @@ theorem joined_passes {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
     cases hnone
   · rw [hnested] at hnt
     cases hnt
+  · have hval := haround d pc x hv hnf hx hrow
+    rw [hm, PValue.on_some] at hx
+    refine ⟨Or.inl (by simp [hx]), r', hr', ?_, hs⟩
+    simp [hval, hx]
 
 end SqliveNarrowing.Limit

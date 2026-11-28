@@ -206,6 +206,7 @@ theorem edge_props {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge
     ∃ c, member = .col e.member c ∧ e.memberValue = .column c ∧ (s.item e.member).core = k ∧
       e.nested = true ∧ (s.item e.partner).readable ∧ e.memberStrict s ∧
       (∀ queries, q ∈ queries → e.NestedIn s queries) ∧
+      (∀ d pc, e.via = some (d, pc) → (s.item d).core ≠ (s.item e.member).core) ∧
       ∀ db f b x row, cellOf (b e.member) c = some x → row ∈ evalQuery s db f b q →
         row.cell 0 = some x → e.HoldsIn s db f b := by
   unfold edge at h
@@ -217,7 +218,7 @@ theorem edge_props {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge
       sourceEdge_facts hse
     refine ⟨mc, hmem, hmv, hk, hnest, hread, Or.inl (by rw [hmv]; rfl),
       fun queries hq => Edge.nestedIn_of hvia fun _ => ⟨q, hq, by rw [hpcore, harms]; simp⟩,
-      fun db f b x row hm hrowq hcell => ?_⟩
+      fun _ _ hv => (by rw [hvia] at hv; cases hv), fun db f b x row hm hrowq hcell => ?_⟩
     refine Or.inl ⟨x, by simpa [hmv, PValue.on] using hm, ?_⟩
     simp only [hnest, ↓reduceIte]
     cases f with
@@ -243,10 +244,15 @@ theorem edge_props {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge
     obtain ⟨rfl, hmvc⟩ := hcol m c rfl
     refine ⟨c, rfl, hmvc, hk, hpassed.1, hread, hstrict,
       fun queries hq => ⟨fun _ hv => (by rw [hvia] at hv; cases hv), fun d' pc' hv => ?_⟩,
-      fun db f b x row hm hrowq hcell => ?_⟩
+      fun d' pc' hv => ?_, fun db f b x row hm hrowq hcell => ?_⟩
     · rw [hvia] at hv
       obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
-      exact ⟨hpassed, Or.inr ⟨q, hq, by rw [hdcore, harms]; simp⟩⟩
+      exact ⟨fun _ => ⟨hpassed, Or.inr ⟨q, hq, by rw [hdcore, harms]; simp⟩⟩,
+        fun hn => by simp [hpassed.1] at hn⟩
+    · rw [hvia] at hv
+      obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
+      rw [hdcore, hk]
+      exact hsk
     · cases f with
       | zero => simp [evalQuery] at hrowq
       | succ f' =>
@@ -293,8 +299,9 @@ theorem subquery_edge_sound : ReadCondition.Sound readCondition where
     subst h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨c, hmem, hmv, hk, hnest, hread, hstrict, hin, hh⟩ := edge_props hedge
-    refine ⟨hk, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread, hstrict,
+    obtain ⟨c, hmem, hmv, hk, hnest, hread, hstrict, hin, hcore, hh⟩ := edge_props hedge
+    refine ⟨hk, fun h => by simp [hnest] at h,
+      ⟨fun h => by simp [hnest] at h, fun d pc hv hc => absurd hc (hcore d pc hv)⟩, hread, hstrict,
       hin _ (compared_queries hcmp), fun db f b hc => ?_⟩
     -- The condition gives the member's value and a row of the subquery with it.
     obtain ⟨x, row, hmx, hrowq, hcell⟩ := compared_sound hcmp hc

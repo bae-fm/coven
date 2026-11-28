@@ -640,6 +640,21 @@ def ordered.placed (s : Statement) (st : PState) (order : List Nat) (next : Nat)
   let st := st.update next fun p => { p with memberships := p.memberships ++ taken, either }
   PushDown.pushOrs s (PushDown.pushDown s s.fuel s.fuel st next none taken) next either
 
+/-- The first item of `l` that `p` takes, or else `l`'s first, is one of
+`l`'s. -/
+theorem find_orElse_head_mem {l : List Nat} {p : Nat → Bool} {x : Nat}
+    (h : (l.find? p).orElse (fun _ => l.head?) = some x) : x ∈ l := by
+  cases hf : l.find? p with
+  | some y =>
+    rw [hf] at h
+    simp only [Option.orElse_some, Option.some.injEq] at h
+    subst h
+    exact List.mem_of_find?_eq_some hf
+  | none =>
+    rw [hf] at h
+    simp only [Option.orElse_none] at h
+    exact List.mem_of_mem_head? h
+
 /-- A step of placing items finds none left, or places one of those left. -/
 theorem ordered_go_place (s : Statement) (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat) :
     (all.filter (fun i => !order.contains i) = [] ∧ ordered.go s (fuel + 1) all st order waited = (st, order)) ∨
@@ -654,7 +669,7 @@ theorem ordered_go_place (s : Statement) (fuel : Nat) (all : List Nat) (st : PSt
     refine Or.inr ⟨_, _, ?_, rfl⟩
     split
     · rename_i i _ hfind
-      exact List.mem_of_find?_eq_some hfind
+      exact (List.mem_filter.mp (find_orElse_head_mem hfind)).1
     · rename_i first tail' _ hfree
       have hsub : ∀ x ∈ List.filter (fun i => !(waiting s st order (r :: tail)).contains i) (r :: tail),
           x ∈ r :: tail := fun x hx => (List.mem_filter.mp hx).1
@@ -949,7 +964,8 @@ theorem PState.NestedOK.readCore {s : Statement} {st : PState} (h : st.NestedOK 
       obtain ⟨q, hq, harm⟩ := hin.1 hnest hv
       exact ⟨k, q, List.mem_append_right _ (Core.cond_queries hcd hq), harm⟩
     | some dp =>
-      obtain ⟨⟨_, xc, hps, _⟩, _⟩ := hin.2 dp.1 dp.2 hv
+      obtain ⟨⟨_, _, _, ⟨c, c', hc⟩, hrename, _⟩, _⟩ := (hin.2 dp.1 dp.2 hv).1 hnest
+      have hps := hrename c c' hc
       obtain ⟨qd, v, a, hkind, harms, _, _, _, hd, _, hxa, _⟩ := Passed.passedSource_facts hps
       exact ⟨(s.item dp.1).core, qd,
         List.mem_append_left _ (List.mem_filterMap.mpr ⟨dp.1, hd, by simp [hkind]⟩),
@@ -1134,16 +1150,16 @@ theorem sameLinks_readCore (s : Statement) (st : PState) (k : Nat) :
 /-- Whether `pre` holds an edge's partner and the derived item it reads
 through, if any. -/
 def Edge.Before (pre : List Nat) (e : Edge) : Prop :=
-  e.partner ∈ pre ∧ ∀ d pc, e.via = some (d, pc) → d ∈ pre
+  e.partner ∈ pre ∧ ∀ d pc, e.via = some (d, pc) → e.nested = true → d ∈ pre
 
 theorem Edge.before_of_placedIn {order : List Nat} {e : Edge} (h : e.placedIn order = true) :
     e.Before order := by
   unfold Edge.placedIn at h
   simp only [Bool.and_eq_true, List.contains_iff_mem] at h
-  refine ⟨h.1, fun d pc hv => ?_⟩
+  refine ⟨h.1, fun d pc hv hn => ?_⟩
   have := h.2
   rw [hv] at this
-  simpa using this
+  simpa [hn] using this
 
 /-- Whether each item placed in `order` takes its memberships' values and
 its kept ORs' sides' values from items placed before it, through derived

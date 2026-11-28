@@ -556,6 +556,55 @@ fn from_names<'a>(from: &'a FromClause<'a>, names: &mut Vec<&'a str>) {
     }
 }
 
+/// A parsed node written back as SQL, with each name whose text `renamed`
+/// holds, by the address of that text, written as the SQL it gives instead.
+pub(crate) fn text_renamed(
+    node: &impl sqlite3_parser::ast::fmt::ToTokens,
+    renamed: &[(usize, String)],
+) -> String {
+    use sqlite3_parser::dialect::TokenType;
+    struct Renaming<'a> {
+        written: String,
+        renamed: &'a [(usize, String)],
+    }
+    impl sqlite3_parser::ast::fmt::TokenStream for Renaming<'_> {
+        type Error = std::convert::Infallible;
+
+        fn append(&mut self, ty: TokenType, value: Option<&str>) -> Result<(), Self::Error> {
+            let value = value.map(|value| {
+                let address = value.as_ptr() as usize;
+                match self.renamed.iter().find(|(at, _)| *at == address) {
+                    Some((_, sql)) => sql.as_str(),
+                    None => value,
+                }
+            });
+            // Each token goes as SQLite's own printer writes it, apart from
+            // its neighbours by a space, so that no two run together.
+            if !self.written.is_empty() {
+                self.written.push(' ');
+            }
+            if ty == TokenType::TK_BLOB {
+                self.written.push_str("X'");
+                self.written.push_str(value.unwrap_or_default());
+                self.written.push('\'');
+                return Ok(());
+            }
+            if let Some(keyword) = ty.as_str() {
+                self.written.push_str(keyword);
+            }
+            if let Some(value) = value {
+                self.written.push_str(value);
+            }
+            Ok(())
+        }
+    }
+    let mut stream = Renaming { written: String::new(), renamed };
+    match node.to_tokens(&mut stream) {
+        Ok(()) => stream.written,
+        Err(never) => match never {},
+    }
+}
+
 /// A parsed node written back as SQL.
 pub(crate) fn text(node: &impl sqlite3_parser::ast::fmt::ToTokens) -> String {
     struct Text<'a, T>(&'a T);

@@ -143,6 +143,17 @@ theorem columnValue_eval {affinity pa : Affinity} {p pc : Nat} {v : PValue}
     · cases h; simp [PValue.eval, Expr.eval, rowBind, cellOf]
     · cases h
 
+/-- A partner's column read either way gives a binding's row of the partner,
+or a missing row, the value it holds there. -/
+theorem columnValue_on {affinity pa : Affinity} {p pc : Nat} {v : PValue}
+    (h : columnValue affinity pa p pc = some v) (row : Option Row) : v.on row = cellOf row pc := by
+  unfold columnValue at h
+  split at h
+  · cases h; rfl
+  · split at h
+    · cases h; simp [PValue.on, Expr.eval, rowBind]
+    · cases h
+
 /-- The columns of its item, `i`, that the value reads. -/
 def PValue.columns : PValue → List Nat
   | .column c => [c]
@@ -179,10 +190,12 @@ structure Edge where
   subquery's value, or the item a derived item's arm passes the compared
   column on from (`via`). -/
   nested : Bool
-  /-- The derived item, which a lookup can't read alone, and its column that
-  the equality compares, when its one arm passes that column on unchanged
-  from the partner (`Passed`). -/
-  via : Option (Nat × Nat) := none
+  /-- The derived item, which a lookup can't read alone, and its value that
+  the equality compares: through it, a column or an expression of columns
+  its one arm passes on unchanged from the partner (`Passed`, `nested`), or
+  around it, a column of its one row when its one arm reads no FROM item and
+  returns the partner's column of the row around it (`Around`). -/
+  via : Option (Nat × PValue) := none
   /-- Whether the edge compares by `IS`, which matches a NULL with a NULL. -/
   nulls : Bool := false
   /-- Whether the planner passed the edge into a derived item's arm from an
@@ -229,22 +242,19 @@ def Narrowing.mayHoldOnNulls (n : Narrowing) : Bool :=
     n.ors.any (·.mayHoldOnNulls)
 
 /-- Whether an edge narrows a LEFT JOIN's item `i` from the join's ON while
-the join is a LEFT JOIN's: an edge from `i` that reads through no derived
-item. -/
-def Edge.ownOn (i : Nat) (e : Edge) : Bool := e.member == i && e.via.isNone
+the join is a LEFT JOIN's: an edge from `i`. -/
+def Edge.ownOn (i : Nat) (e : Edge) : Bool := e.member == i
 
 /-- Whether an OR narrows a LEFT JOIN's item `i` from the join's ON while the
-join is a LEFT JOIN's: an OR of `i` none of whose sides' edges reads through
-a derived item. -/
-def Disjunction.ownOn (i : Nat) (d : Disjunction) : Bool :=
-  d.item == i && d.sides.all fun side => side.edges.all (·.via.isNone)
+join is a LEFT JOIN's: an OR of `i`. -/
+def Disjunction.ownOn (i : Nat) (d : Disjunction) : Bool := d.item == i
 
 /-- What of `n`, the ON of the LEFT JOIN adding `i`, narrows `i` while the
 join is a LEFT JOIN's, and the rest, which waits for the join to be an inner
-join's. An edge from `i` through a derived item, and an OR of `i` with a side
-that holds one, wait with the rest: the proofs find such an edge's partner
-row only in a binding its core keeps, and the ON holds of bindings of the
-items before the join's, which the core may not keep (`plan_left_passes`). -/
+join's. An edge from `i` through or around a derived item narrows `i` too:
+the ON names only items before `i`, and the rows of those in a binding the
+join reads are rows of their queries, so the derived item's row gives the
+partner's (`plan_left_passes`). -/
 def Narrowing.split (n : Narrowing) (i : Nat) : Narrowing × Narrowing :=
   (⟨n.terms.filter (·.1 == i), n.edges.filter (Edge.ownOn i), n.ors.filter (Disjunction.ownOn i)⟩,
    ⟨n.terms.filter (·.1 != i), n.edges.filter (!Edge.ownOn i ·), n.ors.filter (!Disjunction.ownOn i ·)⟩)
@@ -398,12 +408,37 @@ def passedSource (s : Statement) (d pc : Nat) : Option (Nat × Nat) :=
         | _ => none
     | _ => none
 
+/-- The item of a core around derived item `d`, and its column, that `d`'s
+column `pc` passes on, when a lookup can't read `d` alone and can read that
+item: `d`'s query is one SELECT that reads no FROM item and neither
+aggregates nor calls a window function, whose result column `pc` is a bare
+column of an item of a core around `d`'s own, as a relation of the row
+around it (`derived::passed_source`, `Derived::around`). Its one row holds
+that item's value in the binding around `d`'s core. -/
+def aroundSource (s : Statement) (d pc : Nat) : Option (Nat × Nat) :=
+  match (s.item d).kind with
+  | .table _ => none
+  | .derived q _ =>
+    match (s.query q).arms with
+    | [a] =>
+      if (s.item d).readable || (s.core a).aggregated || (s.core a).windowed ||
+        !(s.core a).items.isEmpty || !(s.core (s.item d).core).items.contains d then none
+      else
+        match (s.core a).output[pc]? with
+        | some (.expr (.col x xc)) =>
+          if (s.item x).core ≠ a ∧ (s.item x).core ≠ (s.item d).core ∧ (s.item x).readable then
+            some (x, xc)
+          else none
+        | _ => none
+    | _ => none
+
 /-- Whether the items `placed` hold an edge's partner, and the derived item
 it reads through, if any: then its member can take the partner's values
-(`Edge::placed`). -/
+(`Edge::placed`). An edge around a derived item takes the values of the
+partner's row in the binding, and waits only for the partner. -/
 def Edge.placedIn (placed : List Nat) (e : Edge) : Bool :=
   placed.contains e.partner && match e.via with
-    | some (d, _) => placed.contains d
+    | some (d, _) => !e.nested || placed.contains d
     | none => true
 
 /-! The state sqlive narrows a statement's items in (`Planner`). -/

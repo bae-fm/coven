@@ -244,12 +244,12 @@ async fn a_with_inside_a_subquery_gives_values_when_it_names_nothing_around_it()
 }
 
 /// A CTE that names the row around it lists rows only beside that row, so
-/// a lookup can't ask it alone, and one whose column is the outer row's, not
-/// a column of a table of its own, passes on no table's values: the tables
-/// joined to it narrow by their own conditions only, and every lookup a
-/// write runs still prepares.
+/// a lookup can't ask it alone. One that reads no table and returns the
+/// outer row's column holds that row's value: the tables joined to it take
+/// their values from the outer row, and every lookup a write runs still
+/// prepares.
 #[tokio::test]
-async fn a_correlated_cte_gives_no_values() {
+async fn a_correlated_cte_of_the_outer_row_s_column_gives_that_row_s_values() {
     let db = TestDatabase::open(SCANS);
     follows(
         &db,
@@ -257,7 +257,7 @@ async fn a_correlated_cte_gives_no_values() {
         path("/m/a"),
         &[
             ("UPDATE scan SET root = '/n' WHERE id = 2", false),
-            ("INSERT INTO covers VALUES (3,'h2','three')", true),
+            ("INSERT INTO covers VALUES (3,'h2','three')", false),
             ("INSERT INTO covers VALUES (4,'h1','four')", true),
         ],
     )

@@ -63,7 +63,16 @@ impl Planner<'_, '_> {
             for &item in &remaining {
                 waited[item] |= waiting[item];
             }
-            let released = remaining.iter().copied().find(|item| waited[*item] && !waiting[*item]);
+            // Of the items that waited and stopped, one that takes values
+            // from an item placed already goes first: placed before it, the
+            // others would take none of them.
+            let stopped =
+                || remaining.iter().copied().filter(|item| waited[*item] && !waiting[*item]);
+            let released = stopped()
+                .find(|item| {
+                    edges.by_member[*item].iter().any(|edge| self.edges[*edge].placed(&placed))
+                })
+                .or_else(|| stopped().next());
             let free = remaining.iter().copied().find(|item| !waiting[*item]);
             let next = match (released, free) {
                 (Some(released), _) => released,
@@ -167,7 +176,8 @@ impl Planner<'_, '_> {
     /// a subquery's source not placed yet, which a column compared with a
     /// subquery's value takes (`scope_subquery.rs`), alone or in a side of
     /// an OR, or from a source a derived item's arm passes on, while it or
-    /// the derived item isn't placed (`Planner::passed_edge`), those whose
+    /// the derived item isn't placed (`Planner::passed_edge`), or from an
+    /// item of a core around its own not placed yet, those whose
     /// every partner waits, which couldn't take their values from a partner
     /// that is placed after them, and those a waiting derived item could
     /// pass edges into (`receiving`).
@@ -177,10 +187,15 @@ impl Planner<'_, '_> {
         // yet.
         let mut uncounted: Vec<usize> = Vec::new();
         for &item in remaining {
-            let nested = edges.by_member[item]
-                .iter()
-                .map(|edge| &self.edges[*edge])
-                .any(|edge| edge.nesting.nested() && !edge.placed(placed));
+            let core = self.items[item].core;
+            let nested = edges.by_member[item].iter().map(|edge| &self.edges[*edge]).any(|edge| {
+                !edge.placed(placed)
+                    && (edge.nesting.nested()
+                        || self
+                            .scope_of(core)
+                            .skip(1)
+                            .any(|around| around == self.items[edge.partner].core))
+            });
             if nested || self.waits_for_or(item, placed) {
                 waiting[item] = true;
                 uncounted.push(item);

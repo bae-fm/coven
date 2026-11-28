@@ -128,6 +128,12 @@ pub(crate) struct Derived {
     /// a LIMIT or not; `None` when an arm groups or aggregates, whose rows
     /// pass on no row's own value.
     rows: Option<Vec<Passed>>,
+    /// For a query of one SELECT that reads no FROM item and neither
+    /// aggregates nor calls a window function, as a relation of the row
+    /// around it (`SELECT k.key AS key`), the item of a core around it, and
+    /// its column, that each of its columns passes on unchanged: its one row
+    /// holds that item's value in the binding around it.
+    around: Passed,
 }
 
 impl Derived {
@@ -306,7 +312,13 @@ fn read_derived<'a>(
             // A `*` over a table function's columns: no column is known.
             return Ok(Ok((
                 Columns::Unknown { volatile: planner.select_volatile(select) },
-                Derived { cores, arms: Vec::new(), prunable: Vec::new(), rows: None },
+                Derived {
+                    cores,
+                    arms: Vec::new(),
+                    prunable: Vec::new(),
+                    rows: None,
+                    around: Vec::new(),
+                },
             )));
         };
         arms.push((core, columns, arm_rows(planner, select, core, body)));
@@ -367,6 +379,22 @@ fn read_derived<'a>(
         };
         columns.push(Column { name, value });
     }
+    let around = match &arms[..] {
+        [(core, columns, rows)]
+            if planner.cores[*core].items.is_empty() && !rows.aggregated && !rows.windowed =>
+        {
+            columns
+                .iter()
+                .map(|output| {
+                    let written = output.written().filter(|written| is_name(written))?;
+                    planner
+                        .resolve(*core, written)
+                        .filter(|(item, _)| planner.items[*item].core != *core)
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     let rows = (!arms.iter().any(|(_, _, rows)| rows.aggregated || rows.windowed)).then(|| {
         arms.iter()
             .map(|(_, columns, _)| columns.iter().map(|output| output.passed()).collect())
@@ -395,7 +423,7 @@ fn read_derived<'a>(
     };
     Ok(Ok((
         Columns::Listed(columns),
-        Derived { prunable: prunable_arms(select, &cores), cores, arms, rows },
+        Derived { prunable: prunable_arms(select, &cores), cores, arms, rows, around },
     )))
 }
 
@@ -642,6 +670,31 @@ pub(crate) fn pulled(planner: &Planner, item: usize, column: &str) -> Option<Sco
         term = ScopeTerm::Or(Box::new(before), Box::new(term));
     }
     Some(term)
+}
+
+/// The item of a core around `item`, and its column, that `item`'s column
+/// `column` passes on, when `item` is a subquery or CTE that can't be read
+/// alone, of one SELECT that reads no FROM item, neither aggregates nor calls
+/// a window function, and returns the column as a bare column of that item
+/// (`Derived::around`). Its one row holds the item's value in the binding
+/// around it, so an equality with the column is one with the item's column.
+/// The model states the rule as `aroundSource` in `crates/sqlive/proofs`.
+pub(crate) fn passed_around(
+    planner: &Planner,
+    item: usize,
+    column: &str,
+) -> Option<(usize, String)> {
+    let found = &planner.items[item];
+    if found.source.from.is_some() {
+        return None;
+    }
+    let derived = found.derived.as_ref()?;
+    let [Some(passed)] =
+        passed_on(&found.columns, std::slice::from_ref(&derived.around), column)[..]
+    else {
+        return None;
+    };
+    Some(passed.clone())
 }
 
 /// The source, and its column, that `item`'s column `column` passes on

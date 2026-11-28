@@ -127,9 +127,9 @@ subqueries (`Edge.NestedIn`), and a partner outside a subquery is an item
 its own core lists. -/
 def Edge.Fact (s : Statement) (Z : Db) (f k : Nat) (b : Bind) (e : Edge) : Prop :=
   e.HoldsIn s Z f b ∧ e.memberStrict s ∧
-    (e.nested = false → s.alwaysBound e.partner = true → b e.partner ≠ none) ∧
+    (e.nested = false → e.via = none → s.alwaysBound e.partner = true → b e.partner ≠ none) ∧
     e.NestedIn s (s.core k).subqueries ∧
-    (e.nested = false → e.partner ∈ (s.core (s.item e.partner).core).items)
+    (e.nested = false → e.via = none → e.partner ∈ (s.core (s.item e.partner).core).items)
 
 /-- An OR's fact at binding `b` of core `k`: it holds of `b`, each side
 narrows its item, and each side's edges are from its item with the
@@ -137,7 +137,7 @@ properties `Edge.Fact` states beside holding. -/
 def Disjunction.Fact (s : Statement) (Z : Db) (f k : Nat) (b : Bind) (d : Disjunction) : Prop :=
   d.HoldsIn s Z f b ∧ (∀ side ∈ d.sides, side.narrows = true) ∧
     ∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧ e.memberStrict s ∧
-      (e.nested = false → s.alwaysBound e.partner = true → b e.partner ≠ none) ∧
+      (e.nested = false → e.via = none → s.alwaysBound e.partner = true → b e.partner ≠ none) ∧
       e.NestedIn s (s.core k).subqueries
 
 /-- Every term, edge and OR of `n` is on an item of core `k`. -/
@@ -187,12 +187,12 @@ theorem readCondition_facts {s : Statement} (h : s.wellFormed = true) {k : Nat} 
     fun e hn => hn.mono fun q hq => Core.cond_queries hcd hq
   refine ⟨fun p hp => (hterms p.1 p.2 hp).2 Z f b hholds, fun e he => ?_, fun d hd => ?_⟩
   · obtain ⟨_, _, hpart, _, hstrict, hn, hh⟩ := hedges e he
-    exact ⟨hh Z f b hholds, hstrict, fun hnf hab => hbound _ (hpart hnf) hab, hnest e hn,
-      fun hnf => hlisted _ (hpart hnf)⟩
+    exact ⟨hh Z f b hholds, hstrict, fun hnf hvn hab => hbound _ (hpart.1 hnf hvn) hab, hnest e hn,
+      fun hnf hvn => hlisted _ (hpart.1 hnf hvn)⟩
   · obtain ⟨_, hnar, hsides, hh⟩ := hors d hd
     refine ⟨hh Z f b hholds, hnar, fun side hside e he => ?_⟩
     obtain ⟨hmem, _, hpart, _, hstrict, hn⟩ := hsides side hside e he
-    exact ⟨hmem, hstrict, fun hnf hab => hbound _ (hpart hnf) hab, hnest e hn⟩
+    exact ⟨hmem, hstrict, fun hnf hvn hab => hbound _ (hpart.1 hnf hvn) hab, hnest e hn⟩
 
 /-! The invariant. -/
 
@@ -376,15 +376,15 @@ theorem PState.Sem.row_of_fact {s : Statement} {P : Cls} {st : PState} (hs : st.
     cases this
   · simp only [hsome, Bool.and_true, Bool.not_eq_true'] at hkeep
     obtain ⟨hh, hstrict, hpart, _⟩ := hfacts.2.1 e he
-    rcases hh.bound hkeep hstrict hbi with hab' | ⟨hnf, habp, hbp⟩
+    rcases hh.bound hkeep hstrict hbi with hab' | ⟨hnf, hvn, habp, hbp⟩
     · rw [hab] at hab'; cases hab'
-    · exact hpart hnf habp hbp
+    · exact hpart hnf hvn habp hbp
   · simp only [hsome, Bool.and_true, Bool.not_eq_true'] at hkeep
     obtain ⟨hh, hnar, hsides⟩ := hfacts.2.2 d hd
     rcases hh.bound hkeep hnar (fun side hside e he => ⟨(hsides side hside e he).1,
-        (hsides side hside e he).2.1⟩) hbi with hab' | ⟨side, hside, e, he, hnf, habp, hbp⟩
+        (hsides side hside e he).2.1⟩) hbi with hab' | ⟨side, hside, e, he, hnf, hvn, habp, hbp⟩
     · rw [hab] at hab'; cases hab'
-    · exact (hsides side hside e he).2.2.1 hnf habp hbp
+    · exact (hsides side hside e he).2.2.1 hnf hvn habp hbp
 
 /-- Making an item inner, when every binding of its core holds its row, is
 releasing it and narrowing by what its ON held back. -/
@@ -475,13 +475,13 @@ theorem PState.Sem.narrowOn {s : Statement} (h : s.wellFormed = true) {P : Cls}
       have := (hon Z f b hb (by rw [← hpi, hr]; simp)).1 p hp'
       rwa [hr] at this
     · obtain ⟨he', hei⟩ := List.mem_filter.mp he
-      simp only [Edge.ownOn, Bool.and_eq_true, beq_iff_eq] at hei
-      rw [hei.1, hcore] at hb ⊢
-      exact (hon Z f b hb (hei.1 ▸ hm)).2.1 e he'
+      simp only [Edge.ownOn, beq_iff_eq] at hei
+      rw [hei, hcore] at hb ⊢
+      exact (hon Z f b hb (hei ▸ hm)).2.1 e he'
     · obtain ⟨hd', hdi⟩ := List.mem_filter.mp hd
-      simp only [Disjunction.ownOn, Bool.and_eq_true, beq_iff_eq] at hdi
-      rw [hdi.1, hcore] at hb ⊢
-      exact (hon Z f b hb (hdi.1 ▸ hm)).2.2 d hd'
+      simp only [Disjunction.ownOn, beq_iff_eq] at hdi
+      rw [hdi, hcore] at hb ⊢
+      exact (hon Z f b hb (hdi ▸ hm)).2.2 d hd'
   have hothersIn : (n.split i).2.In s k :=
     ⟨fun p hp => hin.1 p (List.mem_filter.mp hp).1, fun e he => hin.2.1 e (List.mem_filter.mp he).1,
       fun d hd => hin.2.2 d (List.mem_filter.mp hd).1⟩
@@ -562,17 +562,17 @@ partner's arms say of `y`. -/
 theorem Transfer.mem_carried {s : Statement} {st : PState} {k : Nat} {x : Nat × STerm}
     (hx : x ∈ Transfer.carried s st k) :
     ∃ e ∈ st.edges, (s.item e.member).core = k ∧ (s.item e.partner).core = k ∧ e.nested = false ∧
-      ∃ y mc, e.value = .column y ∧ e.memberValue = .column mc ∧ x.1 = e.member ∧
+      e.via = none ∧ ∃ y mc, e.value = .column y ∧ e.memberValue = .column mc ∧ x.1 = e.member ∧
         ∃ u, u.renamed (fun c => if c = y then some mc else none) (fun _ _ => none) = some x.2 ∧
           ((st.items e.partner).term = some u ∨
             (e.nulls = false ∧ Transfer.pulled s st e.partner y = some u)) := by
   obtain ⟨e, he, hx⟩ := List.mem_flatMap.mp hx
   split at hx
   · rename_i hc
-    obtain ⟨hcm, hcp, hn⟩ := hc
+    obtain ⟨hcm, hcp, hn, hvn⟩ := hc
     split at hx
     · rename_i y mc hv hm
-      refine ⟨e, he, hcm, hcp, hn, y, mc, hv, hm, ?_⟩
+      refine ⟨e, he, hcm, hcp, hn, hvn, y, mc, hv, hm, ?_⟩
       rcases List.mem_append.mp hx with hx | hx
       · obtain ⟨t', ht', rfl⟩ := List.mem_map.mp hx
         simp only [Option.mem_toList, Option.bind_eq_some_iff] at ht'
@@ -616,7 +616,7 @@ theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s 
     (Transfer.carry s st k).Sem s P := by
   unfold Transfer.carry
   refine foldl_invariant (P := PState.Sem s P) _ (fun x c hc hx => hx.addCarried ?_) st hs
-  obtain ⟨e, he, hcm, hcp, hn, y, mc, hv, hm, hi, u, hr, hu⟩ := Transfer.mem_carried hc
+  obtain ⟨e, he, hcm, hcp, hn, hvn, y, mc, hv, hm, hi, u, hr, hu⟩ := Transfer.mem_carried hc
   intro Z f b r hb hbr
   rw [hi] at hb hbr
   have hmem : b e.member ≠ none := by rw [hbr]; simp
@@ -626,7 +626,8 @@ theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s 
   have hpk : P Z f (s.item e.partner).core b := by rw [hcp, ← hcm]; exact hb
   have hh' := hh
   obtain ⟨rp, hrp, hcell⟩ : ∃ rp, b e.partner = some rp ∧ (e.nulls = false → rp.cell y ≠ none) := by
-    rcases hh' with ⟨x, _, hx⟩ | ⟨hnul, _, hab, _, _⟩ | ⟨hst, _, _, _⟩ | ⟨_, _, _, _, hnt, _⟩
+    rcases hh' with ⟨x, _, hx⟩ | ⟨hnul, _, _, hab, _, _⟩ | ⟨hst, _, _, _⟩ | ⟨_, _, _, _, hnt, _⟩ |
+      ⟨_, _, _, hv', _⟩
     · simp only [hn, Bool.false_eq_true, ↓reduceIte] at hx
       obtain ⟨rp, hrp, hval⟩ := hx
       refine ⟨rp, hrp, fun _ => ?_⟩
@@ -634,19 +635,21 @@ theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s 
       simp only [PValue.eval] at hval
       rw [hval]
       simp
-    · obtain ⟨rp, hrp⟩ := Option.ne_none_iff_exists'.mp (hpart hn hab)
+    · obtain ⟨rp, hrp⟩ := Option.ne_none_iff_exists'.mp (hpart hn hvn hab)
       exact ⟨rp, hrp, fun hnf => by rw [hnf] at hnul; cases hnul⟩
     · simp [hv, PValue.strict] at hst
     · rw [hn] at hnt
       cases hnt
+    · rw [hvn] at hv'
+      cases hv'
   have hut : u.holds (b e.partner) = true := by
     rw [hrp]
     rcases hu with hu | ⟨hnf, hu⟩
     · exact hs.terms Z f b e.partner rp hpk hrp u hu
-    · have hlist' := hlist hn
+    · have hlist' := hlist hn hvn
       rw [hcp] at hlist'
       exact hpull Z f b e.partner rp y u hcp hlist' (by rw [← hcm]; exact hb) hrp (hcell hnf) hu
-  have := Transfer.transfer_sound hv hm hn hh hut hr
+  have := Transfer.transfer_sound hv hm hn hvn hh hut hr
   rwa [hbr] at this
 
 /-- Passing a derived item's ORs into its arms keeps the invariant: each OR it

@@ -223,10 +223,28 @@ JOIN adds, so where such a part holds, its item has a row.
   subquery returns. The derived item's row is the row of a binding its one
   arm keeps, whose source row holds the column's value
   (`derived_source_passes`). The planner places the member after the derived
-  item and the source (`Edge.placedIn`, `plan_before`). A LEFT JOIN's ON
-  holds back each such edge, and each OR with a side that holds one, until
-  the join is an inner join's: the bindings before the join's item hold the
-  derived item's row, but not the binding of its arm that gives the row.
+  item and the source (`Edge.placedIn`, `plan_before`). An equality with an
+  expression of the derived item's columns, each passed on from the one
+  source, gives an edge to that source whose value is the expression over
+  the source's columns (`Passed.renameFrom`), when the expression is strict
+  or no LEFT JOIN adds the derived item or the source: `Passed.exprEdge_facts`
+  and `Passed.exprEdge_holds` prove that it holds the value the expression
+  gives the derived row, and that the source row gives that value. A
+  binding with no row of the derived item, which a strict expression can't
+  match, is no binding a core keeps when no LEFT JOIN adds the item
+  (`Edge.HoldsIn`), and a binding of the arm holds a row of each item no
+  LEFT JOIN adds (`derived_row_source_passes`).
+- **A relation of the row around it.** A FROM subquery or CTE whose one
+  SELECT reads no item, neither aggregates nor calls a window function, and
+  returns a column of an item of a core around it unchanged, as `(SELECT k.key
+  AS key)`, returns one row, which holds that item's value in the binding
+  around it (`aroundSource`, `aroundSource_facts`, `around_row`,
+  `query_row_plain`). An equality of a member of the derived item's core with
+  such a column gives an edge to the item around it (`Edge.via` with
+  `nested` false, `Edge.Around`), which the reader's promise proves as one
+  with that item's column, in a core that groups or calls an aggregate or
+  window function too. The planner places such a member only after the item
+  around it, which the cores around place first.
 - **A row value compared with a subquery's row.** `row_subquery_edge_sound`
   proves the same of each pair of `(x.a, x.b) = (SELECT y.c, y.d ...)`, the
   subquery on either side, and of `(x.a, x.b) IN (SELECT y.c, y.d ...)`, since
@@ -823,7 +841,11 @@ compared column of a row its lookup reads (`PState.Held.carry`,
 ON holds for passes the item's test. Each partner the item's ON gives sits
 before the item in the order, so its row in the binding, or in a binding of
 the ON's subquery under it, passes its test, and no edge passes into the
-item.
+item. An edge of the ON through a derived item placed before the join's item
+finds its source's row too: the derived item's row in the binding is a row of
+its query, which a binding its arm keeps gives (`derived_source_passes`), and
+an edge around a relation of the row around it finds that row in the binding
+(`around_row`).
 
 [Sound.lean](SqliveNarrowing/Sound.lean) puts the
 steps together. `plan_kept` proves that the planner's scopes keep the promise

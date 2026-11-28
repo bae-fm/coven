@@ -390,12 +390,6 @@ theorem Limit.sortedLimit_facts {s : Statement} {st : PState} {sorted : Limit.So
         · cases hmatch
       · cases hx'
 
-/-- A result column that holds `e` holds `e`'s value in a core's row of a
-binding. -/
-theorem Core.outRow_cell {c : Core} {p : Nat} {e : Expr} (h : c.output[p]? = some (.expr e))
-    (E : Bind → Nat → List Row) (b : Bind) : (c.outRow E b).cell p = e.eval b (E b) := by
-  simp [Core.outRow, Row.cell, List.getElem?_map, h]
-
 /-- The planned state's `sorted` is what `sortedLimit` reads of the state the
 statement's conditions leave. -/
 theorem plan_sorted (s : Statement) :
@@ -405,9 +399,10 @@ theorem plan_sorted (s : Statement) :
 statement's own core whose ORDER BY values sort at or before those of the
 core's row of `b'`, the LIMIT bound of each item the ORDER BY sorts passes
 the item's row, when `b` holds a row of each item the ORDER BY sorts, and
-each membership of the item to another such item holds of `b` and has its
-partner's row among `rowsOf` and passing its scope among `bound`: the order
-places those partners before the item. -/
+each membership of the item to another such item holds of `b`, has its
+partner's row among `rowsOf` and passing its scope among `bound`, and, around
+a derived item, takes the value of the derived item's row from the partner's:
+the order places those partners before the item. -/
 theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
     {sorted : Limit.SortedLimit} (hs : (plan s).sorted = some sorted) {k : Nat}
     (hk : k ∈ (s.query s.root).arms) {E E' : Bind → Nat → List Row} {b b' : Bind}
@@ -419,7 +414,9 @@ theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
     {Z : Db} {f : Nat} {i : Nat}
     (hmembers : ∀ m ∈ ((plan s).state.items i).memberships, (∃ run ∈ sorted.runs, run.item = m.partner) →
       m.HoldsIn s Z f b ∧ row m.partner ∈ rowsOf m.partner ∧
-        (bound m.partner).passes rowsOf (row m.partner) = true)
+        (bound m.partner).passes rowsOf (row m.partner) = true ∧
+        ∀ d pc x, m.via = some (d, pc) → m.nested = false → m.memberValue.on (b m.member) = some x →
+          (∃ rd, b d = some rd ∧ pc.eval rd = some x) → m.value.eval (row m.partner) = some x)
     {found : RScope}
     (h : Limit.runBound i ((plan s).lookupOf bound i) (sorted.runs.zip (sorted.runs.map fun run =>
       run.terms.map fun (_, _, p) => ((s.core k).outRow E' b').cell p)) = some found) :
@@ -472,13 +469,13 @@ theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
         rw [hpart, hcore run_j hrun_j] at harm
         obtain rfl := s.wellFormed_armOf hwf harm (by rw [harms]; simp)
         exact absurd hq (s.wellFormed_root hwf k')
-    obtain ⟨hholds, hrj, hboundj⟩ := hmembers m hm ⟨run_j, hrun_j, hpart.symm⟩
+    obtain ⟨hholds, hrj, hboundj, haround⟩ := hmembers m hm ⟨run_j, hrun_j, hpart.symm⟩
     have hbi := hrows run_i' hrun_i
     have hbj := hrows run_j hrun_j
     rw [hii] at hbi
     rw [← hpart] at hbj
     have hscope' : scope.passes rowsOf (row m.partner) = true := by rw [hpart]; exact hscope
-    exact Limit.joined_passes hnested hholds (by rw [hmember]; exact hbi) hbj rowsOf hrj
+    exact Limit.joined_passes hnested hholds (by rw [hmember]; exact hbi) hbj haround rowsOf hrj
       (by rw [Limit.passes_both, hboundj, hscope']; rfl)
   · intro p hp
     obtain ⟨run, _, rfl⟩ := List.mem_map.mp hp

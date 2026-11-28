@@ -190,3 +190,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.references_sound
 #print axioms SqliveNarrowing.references_net_sound
 #print axioms SqliveNarrowing.references_indexed_sound
+#print axioms SqliveNarrowing.Passed.exprEdge_facts
+#print axioms SqliveNarrowing.Passed.exprEdge_holds
+#print axioms SqliveNarrowing.derived_row_source_passes
+#print axioms SqliveNarrowing.aroundSource_facts
+#print axioms SqliveNarrowing.around_row
+#print axioms SqliveNarrowing.query_row_plain

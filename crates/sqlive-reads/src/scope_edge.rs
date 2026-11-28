@@ -52,20 +52,25 @@ pub(crate) enum Nesting {
     /// (`derived::passed_source`). The member waits for the source and the
     /// derived item.
     Through(usize),
+    /// The item of a core around the member's whose value this derived
+    /// item of the member's core, a relation of the row around it, holds in
+    /// its one row (`derived::passed_around`): the binding's row of that
+    /// item gives the compared value.
+    Around(usize),
 }
 
 impl Nesting {
     /// Whether the partner sits in a core inside the member's, which the
     /// member waits for.
     pub(crate) fn nested(self) -> bool {
-        self != Self::Named
+        matches!(self, Self::Subquery | Self::Through(_))
     }
 
     /// The derived item the edge reads its partner through, if any.
     pub(crate) fn through(self) -> Option<usize> {
         match self {
             Self::Through(derived) => Some(derived),
-            Self::Named | Self::Subquery => None,
+            Self::Named | Self::Subquery | Self::Around(_) => None,
         }
     }
 }
@@ -152,8 +157,77 @@ impl Planner<'_, '_> {
             // A cast or COLLATE gives the expression an affinity or a
             // collation of its own, which SQLite's comparison would use.
             Expr::Cast { .. } | Expr::Collate(..) => None,
+            _ if self.items[partner].source.from.is_none() => {
+                self.passed_expression_edge(core, member, partner, other)
+            }
             _ => self.edge_to(member, partner, PartnerValue::Expression(other.to_string())),
         }
+    }
+
+    /// The edge from `member` to the source whose columns the derived item
+    /// `derived`, of the member's core, passes on as every column the
+    /// expression `other`, written in `core`, names, when sqlive can't read
+    /// `derived` alone (`derived::passed_source`): the expression over the
+    /// source's own columns. Each row of `derived` is a row of its arm, so
+    /// the expression's value in it is the value the rewritten expression
+    /// gives for the source's row of a binding of the arm. The expression is
+    /// strict, NULL where its columns are, so a binding with no row of the
+    /// source or of `derived` gives no value; or no LEFT JOIN adds either,
+    /// so every binding a core keeps holds a row of each. The model states
+    /// the rule as `Passed.exprEdge` in `crates/sqlive/proofs`.
+    fn passed_expression_edge(
+        &self,
+        core: usize,
+        member: Member,
+        derived: usize,
+        other: &Expr<'_>,
+    ) -> Option<Edge> {
+        if self.items[derived].core != self.items[member.item].core {
+            return None;
+        }
+        let mut found = Vec::new();
+        parts(other, &mut found);
+        let mut source = None;
+        let mut renamed = Vec::new();
+        for part in &found {
+            let Part::Name(name) = part else { continue };
+            let (item, column) = self.resolve(core, name)?;
+            if item != derived {
+                return None;
+            }
+            let (from, passed) = crate::derived::passed_source(self, derived, &column)?;
+            if source.is_some_and(|source| source != from) {
+                return None;
+            }
+            source = Some(from);
+            let qualifier = crate::sql::identifier(&self.items[from].source.qualifier);
+            let passed = crate::sql::identifier(&passed);
+            match unparenthesized(name) {
+                Expr::Qualified(written, column) => {
+                    renamed.push((written.0.as_ptr() as usize, qualifier));
+                    renamed.push((column.0.as_ptr() as usize, passed));
+                }
+                Expr::Id(column) => {
+                    renamed.push((column.0.as_ptr() as usize, format!("{qualifier}.{passed}")));
+                }
+                _ => return None,
+            }
+        }
+        let source = source?;
+        if !strict(other, self.functions)
+            && !(self.items[derived].always_bound() && self.items[source].always_bound())
+        {
+            return None;
+        }
+        let text = crate::select_syntax::text_renamed(other, &renamed);
+        Some(Edge {
+            member,
+            partner: source,
+            value: PartnerValue::Expression(text),
+            nesting: Nesting::Through(derived),
+            nulls: false,
+            pushed: false,
+        })
     }
 
     /// The one source other than `member` whose columns `other`, written in
@@ -244,6 +318,19 @@ impl Planner<'_, '_> {
         (partner, partner_column): (usize, String),
         first: bool,
     ) -> Option<Edge> {
+        // A relation of the row around it, of the member's core, gives that
+        // row's value, as the model's `Edge.throughEdge` reads it.
+        if let Some(around) = crate::derived::passed_around(self, partner, &partner_column) {
+            if self.items[partner].core != self.items[member.item].core
+                || member.item == partner
+                || self.items[around.0].core == self.items[partner].core
+            {
+                return None;
+            }
+            let edge = self.column_edge(member, around, first)?;
+            return (edge.nesting == Nesting::Named)
+                .then_some(Edge { nesting: Nesting::Around(partner), ..edge });
+        }
         // A USING join reaches here without `source_of`.
         if self.items[partner].columns.volatile(&partner_column) {
             return None;
@@ -366,8 +453,9 @@ impl Planner<'_, '_> {
     ) -> Option<Edge> {
         let edge = self.edge(core, member_expr, other, first)?;
         // A derived item's NULL says nothing of the source its arm passes
-        // the column on from.
-        if edge.nesting.through().is_some() {
+        // the column on from, nor of the row around a relation of that row,
+        // which a LEFT JOIN of the relation leaves NULL.
+        if matches!(edge.nesting, Nesting::Through(_) | Nesting::Around(_)) {
             return None;
         }
         self.items[edge.partner].always_bound().then_some(Edge { nulls: true, ..edge })

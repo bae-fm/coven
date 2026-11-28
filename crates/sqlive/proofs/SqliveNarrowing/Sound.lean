@@ -31,10 +31,10 @@ theorem plan_armsKept {s : Statement} {X Y : Db} {last : Option (List (List Valu
           (plan s).windowPasses s Y k b = true) :
     ArmsKept s Z (planTest s Y last) (planLeft s) R q o (evalQuery s Z f) := by
   intro k hk
-  refine ⟨fun b hb hRb => ?_, fun i hi hl b hb hw hbd r hr hon => ?_⟩
+  refine ⟨fun b hb hRb => ?_, fun i hi hl b hb hw hbd hbr r hr hon => ?_⟩
   · obtain ⟨hrel, hroot, hwin⟩ := hR k hk b hb hRb
     exact plan_restricted base hZ (Nat.le_refl f) hq ho hoG hk hb hrel hroot hwin
-  · exact plan_left_passes base hZ hq ho hk hi hl hb hw hbd hr hon
+  · exact plan_left_passes base hZ hq ho hoG hk hi hl hb hw hbd hbr hr hon
 
 /-- The planner's scopes keep their promise at fuel `f` on `X` and `Y`, when
 the two databases return the same rows that matter at every fuel up to `f`. -/

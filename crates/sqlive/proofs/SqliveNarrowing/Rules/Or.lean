@@ -205,7 +205,7 @@ theorem or_sound {read : ReadCondition} (h : read.Sound) : (readCondition read).
         obtain ⟨side', hside', rfl⟩ := List.mem_map.mp hfound
         obtain ⟨c, hc, n', hr, he'⟩ := mem_side_edges he
         obtain ⟨_, hne, hnamed, hread, hstrict, hnested, _⟩ := h.edges hr e he'
-        exact ⟨hmem, hne, fun hn => sides_items hside' _ (conjuncts_items hc _ (hnamed hn)), hread,
+        exact ⟨hmem, hne, hnamed.mono fun j hj => sides_items hside' _ (conjuncts_items hc _ hj), hread,
           hstrict, hnested.mono fun q hq => sides_queries hside' _ (conjuncts_queries hc _ hq)⟩
       · intro db f b hc
         obtain ⟨side, hside, htrue⟩ := sides_true hc

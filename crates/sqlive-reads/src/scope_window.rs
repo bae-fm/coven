@@ -35,7 +35,7 @@
 use std::sync::Arc;
 
 use crate::row_scope::{RowImage, RowScope};
-use crate::scope_edge::MemberValue;
+use crate::scope_edge::{MemberValue, Nesting};
 use crate::scope_order::{ordered_limit, OrderedLimit, RunLimit};
 use crate::scope_plan::{is_name, Planner};
 use crate::scope_row::{item_row_term, typed, RowTerm};
@@ -179,7 +179,7 @@ fn partition_column(
         match &edge.member.value {
             MemberValue::Column(column)
                 if edge.member.item == item
-                    && edge.nesting.through().is_none()
+                    && !matches!(edge.nesting, Nesting::Through(_) | Nesting::Around(_))
                     && planner.items[edge.partner].core != core =>
             {
                 Some(column.clone())

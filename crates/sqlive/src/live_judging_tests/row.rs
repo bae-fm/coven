@@ -304,7 +304,7 @@ async fn a_partner_narrowed_by_a_judged_condition_is_looked_up_with_it() {
 /// Register `fold`, which lowercases its text, on each of `db`'s
 /// connections, flagged deterministic when `deterministic` says so, as a
 /// host registers an app's function.
-fn fold_on_every_connection(db: &TestDatabase, deterministic: bool) {
+pub(super) fn fold_on_every_connection(db: &TestDatabase, deterministic: bool) {
     let flags = if deterministic {
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC
     } else {

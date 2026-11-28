@@ -24,14 +24,24 @@ def OnNames (s : Statement) (i j : Nat) : Prop :=
   ∃ cd ∈ (s.core (s.item i).core).onOf i, j ∈ cd.items
 
 /-- What an edge from `i` that `i`'s ON gives says of its partner: a lookup
-reads it alone; the edge reads through no derived item (`Narrowing.split`);
-outside a subquery, the partner is another item the ON names; inside one, it
-sits in an arm of a subquery of one of the ON's conditions. -/
+reads it alone; outside a subquery and every derived item, the partner is
+another item the ON names; inside a subquery, it sits in an arm of a
+subquery of one of the ON's conditions. An edge through a derived item reads
+what `Edge.Passed` says, through another item the ON names, of `i`'s core,
+or through an item of an arm of a subquery of one of the ON's conditions; an
+edge around a derived item reads what `Edge.Around` says, around another
+item the ON names, of `i`'s core. -/
 def Edge.OnPartner (s : Statement) (i : Nat) (e : Edge) : Prop :=
-  (s.item e.partner).readable = true ∧ e.via = none ∧
-  (e.nested = false → e.partner ≠ i ∧ OnNames s i e.partner) ∧
-  (e.nested = true → ∃ cd ∈ (s.core (s.item i).core).onOf i, ∃ q ∈ cd.queries,
-    (s.item e.partner).core ∈ (s.query q).arms)
+  (s.item e.partner).readable = true ∧
+  (e.nested = false → e.via = none → e.partner ≠ i ∧ OnNames s i e.partner) ∧
+  (e.nested = true → e.via = none → ∃ cd ∈ (s.core (s.item i).core).onOf i, ∃ q ∈ cd.queries,
+    (s.item e.partner).core ∈ (s.query q).arms) ∧
+  ∀ d pc, e.via = some (d, pc) →
+    (e.nested = true → e.Passed s d pc ∧
+      ((s.item d).core = (s.item i).core → d ≠ i ∧ OnNames s i d) ∧
+      ((s.item d).core ≠ (s.item i).core → ∃ cd ∈ (s.core (s.item i).core).onOf i, ∃ q ∈ cd.queries,
+        (s.item d).core ∈ (s.query q).arms)) ∧
+    (e.nested = false → e.Around s d pc ∧ (s.item d).core = (s.item i).core ∧ d ≠ i ∧ OnNames s i d)
 
 /-- What a row `r` of item `j` holds that the planned state `Fin` asks of it:
 `j`'s term, and, for an item a lookup reads alone, a place among the rows a
@@ -452,13 +462,25 @@ theorem PState.Held.narrowOn {s : Statement} (hwf : s.wellFormed = true) {st Fin
     rw [hcore]
     exact List.mem_filterMap.mpr ⟨(cd, .leftOn i), hcd, by simp⟩
   obtain ⟨hterms, hedges, hors⟩ := readCondition_sound s k cd
-  have hpartner : ∀ e : Edge, e.member = i → e.via = none → (e.nested = false → e.partner ≠ e.member) →
-      (e.nested = false → e.partner ∈ cd.items) → (s.item e.partner).readable = true →
+  have hpartner : ∀ e : Edge, e.member = i → (e.nested = false → e.partner ≠ e.member) →
+      e.Named s cd.items → (s.item e.partner).readable = true →
       e.NestedIn s cd.queries → e.OnPartner s i := by
-    intro e hm hvn hne hin hread hnest
-    refine ⟨hread, hvn, fun hn => ⟨hm ▸ hne hn, cd, hon, hin hn⟩, fun hn => ?_⟩
-    obtain ⟨q, hq, harm⟩ := hnest.1 hn hvn
-    exact ⟨cd, hon, q, hq, harm⟩
+    intro e hm hne hin hread hnest
+    refine ⟨hread, fun hn hvn => ⟨hm ▸ hne hn, cd, hon, hin.1 hn hvn⟩, fun hn hvn => ?_,
+      fun d pc hv => ⟨fun hn => ?_, fun hn => ?_⟩⟩
+    · obtain ⟨q, hq, harm⟩ := hnest.1 hn hvn
+      exact ⟨cd, hon, q, hq, harm⟩
+    · obtain ⟨hpassed, hloc⟩ := (hnest.2 d pc hv).1 hn
+      rw [hm] at hloc
+      refine ⟨hpassed, fun hc => ?_, fun hc => ?_⟩
+      · obtain ⟨hdin, hdm⟩ := hin.2 d pc hv (by rw [hc, hm])
+        exact ⟨hm ▸ hdm, cd, hon, hdin⟩
+      · obtain ⟨q, hq, harm⟩ := hloc.resolve_left hc
+        exact ⟨cd, hon, q, hq, harm⟩
+    · obtain ⟨haround, hdc⟩ := (hnest.2 d pc hv).2 hn
+      obtain ⟨hdin, hdm⟩ := hin.2 d pc hv hdc
+      rw [hm] at hdc hdm
+      exact ⟨haround, hdc, hdm, cd, hon, hdin⟩
   unfold PState.narrowOn
   simp only [Narrowing.split]
   have hown := h.add (n := ⟨(readCondition s k cd).terms.filter (·.1 == i),
@@ -472,20 +494,19 @@ theorem PState.Held.narrowOn {s : Statement} (hwf : s.wellFormed = true) {st Fin
       rwa [hpi, show (b.set i (some r)) i = some r by simp [Bind.set]] at this)
     (fun e he _ => by
       obtain ⟨he', hei⟩ := List.mem_filter.mp he
-      simp only [Edge.ownOn, Bool.and_eq_true, beq_iff_eq, Option.isNone_iff_eq_none] at hei
+      simp only [Edge.ownOn, beq_iff_eq] at hei
       obtain ⟨_, hne, hin, hread, _, hnest, hh⟩ := hedges e he'
-      rw [hei.1]
-      exact ⟨hpartner e hei.1 hei.2 hne hin hread hnest, fun Z f b r honAt => hh Z f _ (honAt.cond hon)⟩)
+      rw [hei]
+      exact ⟨hpartner e hei hne hin hread hnest, fun Z f b r honAt => hh Z f _ (honAt.cond hon)⟩)
     (fun d hd _ => by
       obtain ⟨hd', hdi⟩ := List.mem_filter.mp hd
-      simp only [Disjunction.ownOn, Bool.and_eq_true, beq_iff_eq, List.all_eq_true,
-        Option.isNone_iff_eq_none] at hdi
+      simp only [Disjunction.ownOn, beq_iff_eq] at hdi
       obtain ⟨_, _, hsides, hh⟩ := hors d hd'
-      rw [hdi.1]
+      rw [hdi]
       refine ⟨fun side hside e he => ?_, fun Z f b r honAt => hh Z f _ (honAt.cond hon)⟩
       obtain ⟨hm, hne, hin, hread, _, hnest⟩ := hsides side hside e he
-      rw [hdi.1] at hm
-      exact ⟨hm, hpartner e hm (hdi.2 side hside e he) hne hin hread hnest⟩)
+      rw [hdi] at hm
+      exact ⟨hm, hpartner e hm hne hin hread hnest⟩)
   split
   · rename_i held hheld
     exact hown.update_same rfl rfl rfl (fun _ => by rw [hheld]; rfl)
@@ -524,14 +545,15 @@ theorem PState.Held.carry {s : Statement} (hwf : s.wellFormed = true) {st Fin : 
   have hfact : ∀ x ∈ Transfer.carried s st k, (st.items x.1).leftOn.isSome = true →
       ∀ Z f b r, OnAt s Z f x.1 b r → HeldAround s Fin x.1 b → x.2.holds (some r) = true := by
     intro x hx hl Z f b r hon har
-    obtain ⟨e, he, hcm, hcp, hn, y, mc, hv, hm, hi, u, hr, hu⟩ := Transfer.mem_carried hx
+    obtain ⟨e, he, hcm, hcp, hn, hvn, y, mc, hv, hm, hi, u, hr, hu⟩ := Transfer.mem_carried hx
     rw [hi] at hl hon har
-    obtain ⟨⟨hread, _, hpart, _⟩, hholds⟩ := h.edges e.member hl e he rfl
-    obtain ⟨hne, hnames⟩ := hpart hn
+    obtain ⟨⟨hread, hpart, _, _⟩, hholds⟩ := h.edges e.member hl e he rfl
+    obtain ⟨hne, hnames⟩ := hpart hn hvn
     have hh := hholds Z f b r hon
     have hset : (b.set e.member (some r)) e.partner = b e.partner := by simp [Bind.set, hne]
     obtain ⟨rp, hrp, hcell⟩ : ∃ rp, b e.partner = some rp ∧ (e.nulls = false → rp.cell y ≠ none) := by
-      rcases hh with ⟨x0, _, hx0⟩ | ⟨hnul, _, hab, _, _⟩ | ⟨hst, _, _, _⟩ | ⟨_, _, _, _, hnt, _⟩
+      rcases hh with ⟨x0, _, hx0⟩ | ⟨hnul, _, _, hab, _, _⟩ | ⟨hst, _, _, _⟩ | ⟨_, _, _, _, hnt, _⟩ |
+        ⟨_, _, _, hv', _⟩
       · simp only [hn, Bool.false_eq_true, ↓reduceIte] at hx0
         obtain ⟨rp, hrp, hval⟩ := hx0
         rw [hset] at hrp
@@ -545,6 +567,8 @@ theorem PState.Held.carry {s : Statement} (hwf : s.wellFormed = true) {st Fin : 
       · simp [hv, PValue.strict] at hst
       · rw [hn] at hnt
         cases hnt
+      · rw [hvn] at hv'
+        cases hv'
     have hgood := har.1 e.partner rp hne hnames hrp
     have hut : u.holds ((b.set e.member (some r)) e.partner) = true := by
       rw [hset, hrp]
@@ -555,7 +579,7 @@ theorem PState.Held.carry {s : Statement} (hwf : s.wellFormed = true) {st Fin : 
         rw [hcp] at hlisted
         obtain ⟨Z', hZ'⟩ := hgood.2 hread
         exact hpull e.partner y u hcp hlisted hread hu Z' rp hZ' (hcell hnf)
-    have := Transfer.transfer_sound hv hm hn hh hut hr
+    have := Transfer.transfer_sound hv hm hn hvn hh hut hr
     simpa [Bind.set] using this
   unfold Transfer.carry
   refine (foldl_invariant (P := fun x : PState => x.Held s Fin ∧ ∀ i, (x.items i).leftOn = (st.items i).leftOn)
@@ -725,9 +749,11 @@ binding or in a binding of the ON's subquery under it, which passes its test,
 and no edge passes into the item. -/
 theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List Value))} {f : Nat}
     (base : KeptBase s X Y last f) {Z : Db} (hZ : Z = X ∨ Z = Y) {q k : Nat} {o : Bind}
-    (hq : q ≤ f) (ho : s.Outer q o) (hk : k ∈ (s.query q).arms) {i : Nat}
-    (hi : i ∈ (s.core k).items) (hl : planLeft s i) {b : Bind} (hb : Passes (planTest s Y last) b)
+    (hq : q ≤ f) (ho : s.Outer q o) (hoG : Passes (planTest s Y last) o) (hk : k ∈ (s.query q).arms)
+    {i : Nat} (hi : i ∈ (s.core k).items) (hl : planLeft s i) {b : Bind} (hb : Passes (planTest s Y last) b)
     (hw : s.Within k o b) (hbd : s.BoundIn ((s.core k).items.takeWhile (· ≠ i)) b)
+    (hbr : ∀ j ∈ (s.core k).items.takeWhile (· ≠ i), ∀ rj, b j = some rj →
+      rj ∈ s.itemRows Z (evalQuery s Z f) (s.outerOf k o) j)
     {r : Row} (hr : r ∈ s.itemRows Z (evalQuery s Z f) (s.outerOf k o) i)
     (hon : onHolds (s.core k) (evalQuery s Z f) i (b.set i (some r)) = true) :
     planTest s Y last i r = true := by
@@ -781,15 +807,49 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
     have hlisted := OnNames.listed hwf hnames
     have hjo := (plan_order s).2 _ (s.core_lt hlisted) j hlisted
     exact ⟨(scopes_parts last _ hjo h1).1, fun hread => ⟨Y, h2 hread⟩⟩
+  have hw' : s.Within k o (b.set i (some r)) := fun j hj => by
+    have hji : j ≠ i := fun e => hj (e ▸ hi)
+    rw [hset j hji]
+    exact hw j hj
+  have hbd' : s.BoundIn ((s.core k).items.takeWhile (· ≠ i) ++ [i]) (b.set i (some r)) := by
+    intro j hj hab
+    by_cases hji : j = i
+    · subst hji; rw [hbi]; simp
+    · rw [hset j hji]
+      rcases List.mem_append.mp hj with hj | hj
+      · exact hbd j hj hab
+      · exact absurd (List.mem_singleton.mp hj) hji
+  have hpreTake : (plan s).order.take pre.length = pre := by rw [horder, List.take_append_length]
+  -- The rows of the items placed before `i` pass their tests in a binding
+  -- that matters of an arm of a subquery of `i`'s ON.
+  have hallq : ∀ cd ∈ (s.core k).onOf i, ∀ q' ∈ cd.queries, ∀ k' ∈ (s.query q').arms, ∀ g', f = g' + 1 →
+      ∀ Z', (Z' = X ∨ Z' = Y) →
+      ∀ b'' ∈ coreBindings s Z' (evalQuery s Z' g') (b.set i (some r)) k',
+      (plan s).windowPasses s Y k' b'' = true →
+      ∀ j r', j ∈ pre → b'' j = some r' → planTest s Y last j r' = true := by
+    intro cd hcd q' hq' k' harm g' hg' Z' hZ' b'' hb'' hwin j r' hj hr'
+    have hsub := Core.onOf_queries hcd hq'
+    have hqq := s.wellFormed_nested hwf (s.query_lt hk) hk (List.mem_append_right _ hsub)
+    refine plan_kept_rows base pre.length Z' hZ' g' (by omega) q' (by omega) (b.set i (some r))
+      (s.outer_subOn hwf hk ho hw' hbd' hcd hq')
+      (fun j rj hj hrj => by
+        rw [hpreTake] at hj
+        have hji : j ≠ i := fun e => hipre (e ▸ hj)
+        rw [hset j hji] at hrj
+        exact hb j rj hrj) k' harm b'' hb''
+      (relevant_of_all (queryTest_sub hwf (plan s) ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) hsub) _ _)
+      (fun he => absurd (he ▸ List.mem_append_right _ hsub) (s.wellFormed_root hwf k)) hwin j r'
+      (by rw [hpreTake]; exact hj) hr'
   -- A partner `i`'s ON gives, placed before `i`, finds its row.
-  have hpartner : ∀ e : Edge, e.member = i → e.partner ∈ pre → e.OnPartner s i →
-      e.HoldsIn s Z f (b.set i (some r)) →
+  have hpartner : ∀ e : Edge, e.member = i → e.partner ∈ pre →
+      (∀ d pc, e.via = some (d, pc) → e.nested = true → d ∈ pre) →
+      e.OnPartner s i → e.HoldsIn s Z f (b.set i (some r)) →
       ∃ r', r' ∈ lookupRows s Y e.partner ∧
         ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
         e.value.eval r' = e.memberValue.eval r ∧
         ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) ∧
         (e.nested = false → b e.partner = some r') := by
-    intro e hm hp ⟨hread, hvn, hplain, hnest⟩ hh
+    intro e hm hp hvp ⟨hread, hplain, hnest, hvia⟩ hh
     have hpi : e.partner ≠ i := fun he => hipre (he ▸ hp)
     suffices h : ∃ r', r' ∈ lookupRows s Y e.partner ∧
         ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
@@ -798,43 +858,114 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
         (e.nested = false → (b.set i (some r)) e.partner = some r') by
       obtain ⟨r', h1, h2, h3, h4, h5⟩ := h
       exact ⟨r', h1, h2, h3, h4, fun hn => by rw [← hset _ hpi]; exact h5 hn⟩
-    refine partner_found hm hbi hh (fun hn hab => by rw [hset _ hpi]; exact hnamed _ hpi (hplain hn).2 hab)
-      (fun r' hr' => by rw [hset _ hpi] at hr'; exact hb _ r' hr') (fun hn _ g' hg' b' hb' hgr r' hr' => ?_)
-      (fun d pc _ hv => by rw [hvn] at hv; cases hv) hread
-    obtain ⟨cd, hcd, q', hq', harm⟩ := hnest hn
-    rw [hcorei] at hcd
-    have hsub := Core.onOf_queries hcd hq'
-    have hqq := s.wellFormed_nested hwf (s.query_lt hk) hk (List.mem_append_right _ hsub)
-    have hw' : s.Within k o (b.set i (some r)) := fun j hj => by
-      have hji : j ≠ i := fun e => hj (e ▸ hi)
-      rw [hset j hji]
-      exact hw j hj
-    have hbd' : s.BoundIn ((s.core k).items.takeWhile (· ≠ i) ++ [i]) (b.set i (some r)) := by
-      intro j hj hab
-      by_cases hji : j = i
-      · subst hji; rw [hbi]; simp
-      · rw [hset j hji]
-        rcases List.mem_append.mp hj with hj | hj
-        · exact hbd j hj hab
-        · exact absurd (List.mem_singleton.mp hj) hji
-    have hall : ∀ Z', (Z' = X ∨ Z' = Y) →
-        ∀ b'' ∈ coreBindings s Z' (evalQuery s Z' g') (b.set i (some r)) (s.item e.partner).core,
-        (plan s).windowPasses s Y (s.item e.partner).core b'' = true →
-        ∀ j r', j ∈ pre → b'' j = some r' → planTest s Y last j r' = true := by
-      intro Z' hZ' b'' hb'' hwin j r' hj hr'
-      refine plan_kept_rows base pre.length Z' hZ' g' (by omega) q' (by omega) (b.set i (some r))
-        (s.outer_subOn hwf hk ho hw' hbd' hcd hq')
-        (fun j rj hj hrj => by
-          rw [horder, List.take_append_length] at hj
-          have hji : j ≠ i := fun e => hipre (e ▸ hj)
-          rw [hset j hji] at hrj
-          exact hb j rj hrj) _ harm b'' hb''
-        (relevant_of_all (queryTest_sub hwf (plan s) ((plan s).scopes last) ((plan s).innerScope last) (lookupRows s Y) hsub) _ _)
-        (fun he => absurd (he ▸ List.mem_append_right _ hsub) (s.wellFormed_root hwf k)) hwin j r'
-        (by rw [horder, List.take_append_length]; exact hj) hr'
-    exact hall Z hZ b' hb'
-      (nested_windowPasses base hZ hp (by rw [horder]; exact List.mem_append_left _ hp) rfl hall hb' hgr)
-      _ r' hp hr'
+    refine partner_found hm hbi hh
+      (fun hn hvn hab => by rw [hset _ hpi]; exact hnamed _ hpi (hplain hn hvn).2 hab)
+      (fun r' hr' => by rw [hset _ hpi] at hr'; exact hb _ r' hr') (fun hn hvn g' hg' b' hb' hgr r' hr' => ?_)
+      (fun d pc x hv hnt _ hrow => ?_) (fun d pc hv hnt hdc hab => ?_)
+      (fun d pc x hv hnf _ hrow => ?_) hread
+    · obtain ⟨cd, hcd, q', hq', harm⟩ := hnest hn hvn
+      rw [hcorei] at hcd
+      exact hallq cd hcd q' hq' _ harm g' hg' Z hZ b' hb'
+        (nested_windowPasses base hZ hp (by rw [horder]; exact List.mem_append_left _ hp) rfl
+          (hallq cd hcd q' hq' _ harm g' hg') hb' hgr)
+        _ r' hp hr'
+    · -- An edge through a derived item finds the row of the source its arm
+      -- passes the column on from.
+      obtain ⟨hps, hsame, hother⟩ := (hvia d pc hv).1 hnt
+      have hdp := hvp d pc hv hnt
+      have hpTake : e.partner ∈ (plan s).order.take pre.length := by rw [hpreTake]; exact hp
+      have hdl := hps.listed
+      rw [hm] at hrow
+      rcases hrow with ⟨hdk, rd, hrd, hcell⟩ | ⟨hdk, g', hg', b', hb', hgr, rd, hrd, hcell⟩
+      · -- The derived item sits in `i`'s core, before `i`: its row is one
+        -- its query returns under the binding around the core.
+        obtain ⟨hdi, cd, hcd, hdc⟩ := hsame hdk
+        rw [hset d hdi] at hrd
+        rw [hdk, hcorei] at hdl
+        rw [hcorei] at hcd
+        have htake : d ∈ (s.core k).items.takeWhile (· ≠ i) := by
+          rcases s.wellFormed_onNamesEarlier hwf hklt (Core.mem_onOf hcd) hdc with h1 | h1 | h1
+          · exact absurd h1 hdi
+          · exact h1
+          · exact absurd hdl h1
+        have hrin := hbr d htake rd hrd
+        exact derived_row_source_passes hwf hdl
+          (fun qd v hkind => by simpa only [Statement.itemRows, hkind] using hrin)
+          hcell hps (hb d rd hrd) fun qd v a hkind ha g'' hg'' b'' hb'' hrel'' rp hrp => by
+            have hqd : qd ∈ s.nestedQueries k :=
+              List.mem_append_left _ (List.mem_filterMap.mpr ⟨d, hdl, by simp [hkind]⟩)
+            have hqq := s.wellFormed_nested hwf (s.query_lt hk) hk hqd
+            refine plan_kept_rows base pre.length Z hZ g'' (by omega) qd (by omega) (s.outerOf k o)
+              (s.outer_derived hwf hk ho hdl hkind) (fun j rj _ hrj => ?_) a ha b'' hb'' hrel''
+              (fun he => absurd (he ▸ hqd) (s.wellFormed_root hwf k))
+              (windowPasses_derived hwf hdl hkind ha Y b'') _ rp hpTake hrp
+            unfold Statement.outerOf at hrj
+            split at hrj
+            · simp [Bind.empty] at hrj
+            · exact hoG j rj hrj
+      · -- The derived item sits in an arm of a subquery of `i`'s ON.
+        obtain ⟨cd, hcd, q', hq', harm⟩ := hother hdk
+        rw [hcorei] at hcd
+        have hdo : d ∈ (plan s).order := by rw [horder]; exact List.mem_append_left _ hdp
+        have hwd := nested_windowPasses base hZ hdp hdo rfl (hallq cd hcd q' hq' _ harm g' hg') hb' hgr
+        have htd := hallq cd hcd q' hq' _ harm g' hg' Z hZ b' hb' hwd d rd hdp hrd
+        have hsub := Core.onOf_queries hcd hq'
+        have hqq := s.wellFormed_nested hwf (s.query_lt hk) hk (List.mem_append_right _ hsub)
+        exact derived_source_passes hwf hb' hdl hrd hcell hps htd
+          fun qd v a hkind ha g'' hg'' b'' hb'' hrel'' rp hrp => by
+            have hqd : qd ∈ s.nestedQueries (s.item d).core :=
+              List.mem_append_left _ (List.mem_filterMap.mpr ⟨d, hdl, by simp [hkind]⟩)
+            have hqq' := s.wellFormed_nested hwf (s.query_lt harm) harm hqd
+            refine plan_kept_rows base pre.length Z hZ g'' (by omega) qd (by omega)
+              (s.outerOf (s.item d).core (b.set i (some r)))
+              (s.outer_derived hwf harm (s.outer_subOn hwf hk ho hw' hbd' hcd hq') hdl hkind)
+              (fun j rj hj hrj => ?_) a ha b'' hb'' hrel''
+              (fun he => absurd (he ▸ hqd) (s.wellFormed_root hwf _))
+              (windowPasses_derived hwf hdl hkind ha Y b'') _ rp hpTake hrp
+            rw [hpreTake] at hj
+            have hji : j ≠ i := fun e => hipre (e ▸ hj)
+            unfold Statement.outerOf at hrj
+            split at hrj
+            · simp [Bind.empty] at hrj
+            · rw [hset j hji] at hrj
+              exact hb j rj hrj
+    · -- A derived item `i`'s ON names, of `i`'s core, has its row where no
+      -- LEFT JOIN adds it.
+      obtain ⟨_, hsame, _⟩ := (hvia d pc hv).1 hnt
+      rw [hm] at hdc
+      obtain ⟨hdi, cd, hcd, hdcd⟩ := hsame hdc
+      rw [hset d hdi]
+      exact hnamed d hdi ⟨cd, hcd, hdcd⟩ hab
+    · -- An edge around a relation of the row around it, of `i`'s core before
+      -- `i`, finds the row of the item around it that the binding holds.
+      obtain ⟨⟨_, pc', xc, rfl, hps, hval⟩, hdc, hdi, cd, hcd, hdcd⟩ := (hvia d pc hv).2 hnf
+      obtain ⟨rd, hrd, hcell⟩ := hrow
+      rw [hset d hdi] at hrd
+      obtain ⟨_, _, _, _, _, _, _, _, hdl, _, _, _⟩ := aroundSource_facts hps
+      have hdk : (s.item d).core = k := by rw [hdc, hcorei]
+      rw [hdk] at hdl
+      rw [hcorei] at hcd
+      have htake : d ∈ (s.core k).items.takeWhile (· ≠ i) := by
+        rcases s.wellFormed_onNamesEarlier hwf hklt (Core.mem_onOf hcd) hdcd with h1 | h1 | h1
+        · exact absurd h1 hdi
+        · exact h1
+        · exact absurd hdl h1
+      have hrin := hbr d htake rd hrd
+      obtain ⟨rp, hrp, hcp⟩ := around_row hwf hps hdk
+        (fun qd w hkind => by simpa only [Statement.itemRows, hkind] using hrin) hw hcell
+      exact ⟨rp, by rw [hset _ hpi]; exact hrp, by rw [hval, hcp]⟩
+  -- Each membership and each side of a kept OR reads through derived items
+  -- placed before the item.
+  have hvm : ∀ m ∈ ((plan s).state.items i).memberships, ∀ d pc, m.via = some (d, pc) →
+      m.nested = true → d ∈ pre :=
+    fun m hmm d pc hv hn => by
+      obtain ⟨pre', post', h', hb'⟩ := (plan_before s i).1 m hmm
+      exact hinpre d ⟨pre', post', h', hb'.2 d pc hv hn⟩
+  have hvs : ∀ sides ∈ ((plan s).state.items i).either, ∀ side ∈ sides, ∀ e ∈ side.edges,
+      ∀ d pc, e.via = some (d, pc) → e.nested = true → d ∈ pre :=
+    fun sides hs side hside e he d pc hv hn => by
+      obtain ⟨pre', post', h', hb'⟩ := (plan_before s i).2 sides hs side hside e he
+      exact hinpre d ⟨pre', post', h', hb'.2 d pc hv hn⟩
   have hscope : ((plan s).scopes last i).passes (lookupRows s Y) r = true := by
     rw [hbound]
     refine scopeAt_passes (fun t ht => hH.term i t hl ht Z f b r honAt)
@@ -846,21 +977,21 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
       have hp := hinpre _ ((plan_placedBefore s i).1 m hmm)
       rw [membershipScope_congr (hbefore' _ hp)]
       obtain ⟨hpart, hholds⟩ := hH.edges i hl m hme hmi
-      obtain ⟨r', hr', hsc, hv, hn, _⟩ := hpartner m hmi hp hpart (hholds Z f b r honAt)
+      obtain ⟨r', hr', hsc, hv, hn, _⟩ := hpartner m hmi hp (hvm m hmm) hpart (hholds Z f b r honAt)
       exact membershipScope_passes hr' hsc hv hn
     · subst hq
       have hme := plan_membersEdges s i e0 he0
       have hmi := ((plan_nestedOK s).2.1 i e0 he0).1
       have hp := hinpre _ ((plan_placedBefore s i).1 e0 he0)
       obtain ⟨hpart, hholds⟩ := hH.edges i hl e0 hme hmi
-      obtain ⟨r0, hr0, hsc0, _, _, hb0⟩ := hpartner e0 hmi hp hpart (hholds Z f b r honAt)
+      obtain ⟨r0, hr0, hsc0, _, _, hb0⟩ := hpartner e0 hmi hp (hvm e0 he0) hpart (hholds Z f b r honAt)
       have hbq := hb0 hn0
       refine ⟨r0, hr0, by rw [hbefore' _ hp]; exact hsc0, fun e he hqe hne hpe _ => ?_⟩
       have hme' := plan_membersEdges s i e he
       have hmi' := ((plan_nestedOK s).2.1 i e he).1
       have hp' := hinpre _ ((plan_placedBefore s i).1 e he)
       obtain ⟨hpart', hholds'⟩ := hH.edges i hl e hme' hmi'
-      obtain ⟨r1, _, _, hv1, hn1, hb1⟩ := hpartner e hmi' hp' hpart' (hholds' Z f b r honAt)
+      obtain ⟨r1, _, _, hv1, hn1, hb1⟩ := hpartner e hmi' hp' (hvm e he) hpart' (hholds' Z f b r honAt)
       have := hb1 hne
       rw [hqe, hbq] at this
       obtain rfl := Option.some.inj this
@@ -873,7 +1004,8 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
       obtain ⟨hmem, hpart⟩ := hsd side hside e he
       have hp := hinpre _ ((plan_placedBefore s i).2 sides hsides side hside e he)
       rw [hbefore' _ hp]
-      obtain ⟨r', hr', hsc, hv, hn, _⟩ := hpartner e hmem hp hpart (hedges e he)
+      obtain ⟨r', hr', hsc, hv, hn, _⟩ := hpartner e hmem hp (hvs sides hsides side hside e he) hpart
+        (hedges e he)
       exact joined_passes_of hr' hsc hv hn
     · obtain ⟨⟨run, _⟩, hpr, hri⟩ := Limit.runBound_item hf
       obtain ⟨_, _, _, hleft⟩ := Limit.run_facts hwf hs (List.of_mem_zip hpr).1

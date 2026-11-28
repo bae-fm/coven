@@ -54,7 +54,7 @@ arm's term: a derived row whose column is NULL says nothing of its arm's
 items. -/
 def carried (s : Statement) (st : PState) (k : Nat) : List (Nat × STerm) :=
   st.edges.flatMap fun e =>
-    if (s.item e.member).core = k ∧ (s.item e.partner).core = k ∧ e.nested = false then
+    if (s.item e.member).core = k ∧ (s.item e.partner).core = k ∧ e.nested = false ∧ e.via = none then
       match e.value, e.memberValue with
       | .column y, .column mc =>
         let rename (c : Nat) : Option Nat := if c = y then some mc else none
@@ -153,11 +153,11 @@ theorem renamed_none {t t' : STerm} {rename : Nat → Option Nat}
 from `y` to the member's column, of the member's row. -/
 theorem transfer_sound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge} {y : Nat}
     {mc : Nat} {t t' : STerm} (hv : e.value = .column y) (hm : e.memberValue = .column mc)
-    (hn : e.nested = false)
+    (hn : e.nested = false) (hvn : e.via = none)
     (hh : e.HoldsIn s db f b) (ht : t.holds (b e.partner))
     (hr : t.renamed (fun c => if c = y then some mc else none) (fun _ _ => none) = some t') :
     t'.holds (b e.member) := by
-  rcases hh with ⟨x, hx, hp⟩ | ⟨_, _, _, hx, hnull⟩ | ⟨hvs, _⟩ | ⟨_, _, _, _, hnt, _⟩
+  rcases hh with ⟨x, hx, hp⟩ | ⟨_, _, _, _, hx, hnull⟩ | ⟨hvs, _⟩ | ⟨_, _, _, _, hnt, _⟩ | ⟨_, _, _, hv', _⟩
   · simp only [hm, PValue.on] at hx
     simp only [hn, Bool.false_eq_true, ite_false] at hp
     obtain ⟨r, hb, hval⟩ := hp
@@ -201,6 +201,8 @@ theorem transfer_sound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
     simp [hv, PValue.strict] at hvs
   · rw [hn] at hnt
     cases hnt
+  · rw [hvn] at hv'
+    cases hv'
 
 theorem orAll_isSome {l : List (Option STerm)} {t : STerm} (h : orAll l = some t) :
     ∀ o ∈ l, o.isSome := by
