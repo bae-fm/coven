@@ -77,10 +77,10 @@ impl Read for Counted {
 
 /// The read a request picks, its rows read as text whichever it is.
 fn picked(titled: &Option<String>) -> Result<ReadAs<String>, DbError> {
-    match titled {
-        Some(title) => ReadAs::new(&Titled { title: title.clone() }, |id| id),
-        None => ReadAs::new(&Counted, |count| count.to_string()),
-    }
+    Ok(match titled {
+        Some(title) => ReadAs::new(Titled { title: title.clone() }, |id| id),
+        None => ReadAs::new(Counted, |count| count.to_string()),
+    })
 }
 
 /// A live query whose request picks one of two compiled reads, each with its

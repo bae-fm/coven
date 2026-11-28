@@ -174,27 +174,25 @@ impl<T: Send + 'static, U: Send + 'static> LiveReads for CovenRead<T, U> {
 /// several statements reads, as its sort picks, each with its own row type,
 /// reads its rows as one type whichever statement the request picks.
 pub struct ReadAs<R> {
-    statement: LiveStatement<'static>,
-    read: RowReader<R>,
+    read: ReadsOf<Vec<R>>,
 }
 
+/// Reads that return `R`, as `LiveReads::read` runs them.
+type ReadsOf<R> = Box<dyn Fn(Run<'_>) -> Result<R, DbError> + Send + Sync>;
+
 impl<R: 'static> ReadAs<R> {
-    /// `read`'s rows, each made an `R` by `row`.
-    ///
-    /// # Errors
-    ///
-    /// Fails when one of `read`'s values doesn't bind.
-    pub fn new<Q>(
-        read: &Q,
-        row: impl Fn(Q::Row) -> R + Send + Sync + 'static,
-    ) -> Result<Self, DbError>
+    /// `read`'s rows, each made an `R` by `row`. A value of `read`'s that
+    /// doesn't bind fails the run, as it does for `read` alone.
+    pub fn new<Q>(read: Q, row: impl Fn(Q::Row) -> R + Send + Sync + 'static) -> Self
     where
-        Q: Read<Handle = Writer> + 'static,
+        Q: Read<Handle = Writer> + Send + Sync + 'static,
+        Q::Row: Send + 'static,
     {
-        Ok(Self {
-            statement: statement(read)?,
-            read: Box::new(move |found| Ok(row(Q::read(found)?))),
-        })
+        Self {
+            read: Box::new(move |run| {
+                Ok(LiveReads::read(&read, run)?.into_iter().map(&row).collect())
+            }),
+        }
     }
 }
 
@@ -202,12 +200,7 @@ impl<R: Send + 'static> LiveReads for ReadAs<R> {
     type Rows = Vec<R>;
 
     fn read(&self, run: Run<'_>) -> Result<Self::Rows, DbError> {
-        let mut rows = Vec::new();
-        run(std::slice::from_ref(&self.statement), &mut |_, row| {
-            rows.push((self.read)(row)?);
-            Ok(())
-        })?;
-        Ok(rows)
+        (self.read)(run)
     }
 }
 
