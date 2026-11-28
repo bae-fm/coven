@@ -1,6 +1,7 @@
 //! The read rule's lints run by the driver, as cargo runs it, over the
 //! fixture package `fixtures/reads/`: each lint finds its shape of work on a
-//! read's rows in read code, and nothing on text, a constant table, one
+//! read's rows in read code, the rows of a generated statement and the type
+//! read code makes of each among them, and nothing on text, a constant table, one
 //! optional value, values no read returned or a workspace method of the
 //! same name, nothing in code no read reaches, and nothing in what only a
 //! live query's `process` runs; and the fixture's mark holds. A helper of

@@ -38,6 +38,21 @@ impl SqlReadContext {
     }
 }
 
+/// A statement a statement macro generates, with its row type and the
+/// mapper that makes a row of it.
+pub trait Returning {
+    type Row;
+
+    fn read(row: &Row) -> Result<Self::Row, ()>;
+}
+
+impl SqlReadContext {
+    /// Runs the generated statement `_statement`.
+    pub fn statement<S: Returning>(&self, _statement: &S) -> Vec<S::Row> {
+        self.rows.iter().filter_map(|row| S::read(row).ok()).collect()
+    }
+}
+
 /// What a read receives, as a trait.
 pub trait SqlRead {
     fn query<T, F: FnMut(&Row) -> Result<T, ()>>(&self, sql: &str, map: F) -> Vec<T>;

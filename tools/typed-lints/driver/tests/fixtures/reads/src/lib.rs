@@ -5,7 +5,9 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use reads_base::{FromColumn, LiveQuery, LiveRequest, Row, SqlRead, SqlReadContext, ValueStream};
+use reads_base::{
+    FromColumn, LiveQuery, LiveRequest, Returning, Row, SqlRead, SqlReadContext, ValueStream,
+};
 
 #[derive(Clone)]
 pub struct Album {
@@ -275,4 +277,39 @@ impl Pulled {
             Shown(albums)
         })(self.query.latest().clone())
     }
+}
+
+/// What a statement macro generates for a statement of singles: its request,
+/// its row type and the row's mapper.
+pub struct SinglesParams;
+
+/// A row of the singles statement.
+pub struct SinglesRow {
+    pub id: i64,
+    pub year: i64,
+}
+
+impl Returning for SinglesParams {
+    type Row = SinglesRow;
+
+    fn read(row: &Row) -> Result<SinglesRow, ()> {
+        Ok(SinglesRow { id: row.get(0), year: row.get(1) })
+    }
+}
+
+/// A single, which read code makes of each row of the singles statement.
+pub struct Single {
+    pub id: i64,
+    pub year: i64,
+}
+
+/// Reads the singles through their generated statement: its rows, and the
+/// singles made of them, are a read's rows.
+pub fn read_singles(read: &SqlReadContext) -> Vec<Single> {
+    let mut rows = read.statement(&SinglesParams);
+    rows.retain(|row| row.year > 0); // read_filter
+    let mut singles: Vec<Single> =
+        rows.into_iter().map(|row| Single { id: row.id, year: row.year }).collect();
+    singles.retain(|single| single.id > 0); // read_filter
+    singles
 }

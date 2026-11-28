@@ -5,7 +5,11 @@
 //! `read_shapes.column_values` reads one column's value, such as a number, a
 //! text or a key: the rows of its read are the collections that flow from
 //! what the read returns (`flow.rs`), so a count or a flag elsewhere in read
-//! code is none. Any other mapper's result is a row type, and a value holds
+//! code is none. Any other mapper's result is a row type. A function or
+//! closure of the workspace that takes a row type, through references, and
+//! makes a struct of the workspace or a tuple that is no column's value maps
+//! rows too, so what it makes is a row type: read code that turns a
+//! generated statement's rows into its own type works on rows. A value holds
 //! rows when its type is a slice, collection or iterator whose items are or
 //! hold a row type. Neither one row, one optional value, a range, a text
 //! nor bytes holds rows.
@@ -19,6 +23,7 @@ use rustc_middle::ty::{self, Ty, TyCtxt, TypingEnv};
 use rustc_span::sym;
 
 use super::names_adt;
+use crate::workspace_policy::WorkspaceCrates;
 
 /// What a row mapper makes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -52,12 +57,20 @@ impl<'tcx> Mappers<'_, 'tcx> {
         if made.is_unit() || matches!(made.kind(), ty::Param(_) | ty::Never) {
             return None;
         }
-        let typing_env = TypingEnv::post_analysis(tcx, tcx.typeck_root_def_id(id));
-        let column = self
-            .column_values
+        Some(if self.is_column(tcx.typeck_root_def_id(id), made) {
+            Made::Column
+        } else {
+            Made::Row(made)
+        })
+    }
+
+    /// Whether `made`, in the item `root`, is one column's value: it
+    /// implements one of the policy's `column_values`.
+    fn is_column(&self, root: DefId, made: Ty<'tcx>) -> bool {
+        let typing_env = TypingEnv::post_analysis(self.tcx, root);
+        self.column_values
             .iter()
-            .any(|&column| implements_trait_with_env(tcx, typing_env, made, column, None, &[]));
-        Some(if column { Made::Column } else { Made::Row(made) })
+            .any(|&column| implements_trait_with_env(self.tcx, typing_env, made, column, None, &[]))
     }
 }
 
@@ -71,27 +84,49 @@ pub(super) struct RowTypes<'tcx> {
 }
 
 impl<'tcx> RowTypes<'tcx> {
-    /// The row types the mappers among `definitions` make.
+    /// The row types the mappers among `definitions` make: those of a
+    /// statement's row, and then, until no more turn up, those of a row type,
+    /// among the structs `workspace` declares and tuples.
     pub(super) fn of(
         mappers: &Mappers<'_, 'tcx>,
+        workspace: &WorkspaceCrates<'_>,
         definitions: impl Iterator<Item = DefId>,
     ) -> Self {
-        let mut rows =
-            Self { tcx: mappers.tcx, adts: FxHashSet::default(), others: FxHashSet::default() };
+        let tcx = mappers.tcx;
+        let mut rows = Self { tcx, adts: FxHashSet::default(), others: FxHashSet::default() };
+        let mut conversions = Vec::new();
         for id in definitions {
             match mappers.made(id) {
-                Some(Made::Row(made)) => match made.kind() {
-                    ty::Adt(adt, _) => {
-                        rows.adts.insert(adt.did());
-                    }
-                    _ => {
-                        rows.others.insert(made);
-                    }
-                },
-                Some(Made::Column) | None => {}
+                Some(Made::Row(made)) => rows.insert(made),
+                Some(Made::Column) => {}
+                None => conversions.extend(conversion(mappers, workspace, id)),
             }
         }
-        rows
+        loop {
+            let (found, rest): (Vec<_>, Vec<_>) =
+                conversions.into_iter().partition(|(inputs, _): &(Vec<Ty<'tcx>>, Ty<'tcx>)| {
+                    inputs.iter().any(|input| rows.is_row(input.peel_refs()))
+                });
+            conversions = rest;
+            if found.is_empty() {
+                return rows;
+            }
+            for (_, made) in found {
+                rows.insert(made);
+            }
+        }
+    }
+
+    /// Count `made` as a row type.
+    fn insert(&mut self, made: Ty<'tcx>) {
+        match made.kind() {
+            ty::Adt(adt, _) => {
+                self.adts.insert(adt.did());
+            }
+            _ => {
+                self.others.insert(made);
+            }
+        }
     }
 
     /// Whether `ty` is a row type.
@@ -165,6 +200,38 @@ fn is_single<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
         ]
         .into_iter()
         .any(|item| tcx.lang_items().get(item) == Some(adt.did()))
+}
+
+/// The inputs of the function or closure `id` and what it makes, with regions
+/// erased and `Result` and `Option` taken off, when it would map a row it
+/// took: what it makes is a struct `workspace` declares or a tuple, and no
+/// column's value.
+fn conversion<'tcx>(
+    mappers: &Mappers<'_, 'tcx>,
+    workspace: &WorkspaceCrates<'_>,
+    id: DefId,
+) -> Option<(Vec<Ty<'tcx>>, Ty<'tcx>)> {
+    let tcx = mappers.tcx;
+    let signature = tcx.instantiate_bound_regions_with_erased(signature(tcx, id)?);
+    let made = tcx.erase_and_anonymize_regions(peel_result(tcx, signature.output()));
+    let shaped = match made.kind() {
+        ty::Adt(adt, _) => adt.is_struct() && workspace.declares(tcx, adt.did()),
+        ty::Tuple(items) => !items.is_empty(),
+        _ => false,
+    };
+    if !shaped || mappers.is_column(tcx.typeck_root_def_id(id), made) {
+        return None;
+    }
+    // A closure's signature takes its arguments as one tuple.
+    let inputs = match (tcx.def_kind(id), signature.inputs()) {
+        (DefKind::Closure, [arguments]) => match arguments.kind() {
+            ty::Tuple(items) => items.to_vec(),
+            _ => vec![*arguments],
+        },
+        (_, inputs) => inputs.to_vec(),
+    };
+    let inputs = inputs.into_iter().map(|input| tcx.erase_and_anonymize_regions(input)).collect();
+    Some((inputs, made))
 }
 
 /// The signature of a function or closure, none for anything else.

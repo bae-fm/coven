@@ -297,6 +297,7 @@ impl<'tcx> LateLintPass<'tcx> for ReadRule {
         };
         let rows = RowTypes::of(
             &mappers,
+            &WorkspaceCrates::new(setup.workspace),
             tcx.hir_body_owners()
                 .map(LocalDefId::to_def_id)
                 .chain(earlier_definitions(setup.workspace, tcx, "clippy::read_sort"))

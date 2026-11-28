@@ -14398,7 +14398,11 @@ the same on any platform.
     `column_values`, such as rusqlite's `FromSql`, the mapper reads one
     column, and the rows of its read are the collections that flow in the
     same body from what the read returns. Any other mapper's result is a row
-    type, and a slice, collection or iterator of a row type holds rows. One
+    type. A function or closure that takes a row type and makes a struct of
+    the workspace or a tuple, and no column's value, maps rows too, so what
+    it makes is a row type: read code that turns a generated statement's
+    rows into a type of its own still works on rows. A slice, collection or
+    iterator of a row type holds rows. One
     row, one optional value, a range, text and bytes hold no rows. Code that
     only a live query's `process` runs, and no other read code reaches, may
     sort, filter, group, count and pick among the one result `process`
