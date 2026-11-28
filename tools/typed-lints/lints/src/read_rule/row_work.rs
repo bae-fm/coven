@@ -503,9 +503,6 @@ impl<'tcx> Passed<'_, 'tcx> {
     /// Notes each parameter of `callee`, a function of the crate, given an
     /// argument that is made of a read's rows.
     fn call(&mut self, callee: LocalDefId, arguments: impl Iterator<Item = &'tcx Expr<'tcx>>) {
-        if !matches!(self.tcx.def_kind(callee), DefKind::Fn | DefKind::AssocFn) {
-            return;
-        }
         // A trait's method that declares no default has no body.
         let Some(body) = self.tcx.hir_maybe_body_owned_by(callee) else { return };
         let parameters = body.params;

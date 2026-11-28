@@ -68,8 +68,8 @@ impl<'s, 'tcx> Flow<'s, 'tcx> {
     /// Whether the expression's value carries what flows from a source.
     pub(super) fn carries(&self, expr: &'tcx Expr<'tcx>) -> bool {
         match self.spread {
-            Spread::Value => self.carries_value(expr),
-            Spread::Made => self.carries_made(expr),
+            Spread::Value => self.carries_through(expr, false),
+            Spread::Made => self.carries_through(expr, true),
             Spread::Mention => {
                 let mut mention = Mention { flow: self, found: false };
                 mention.visit_expr(expr);
@@ -86,13 +86,17 @@ impl<'s, 'tcx> Flow<'s, 'tcx> {
                 if matches!(path.res, Res::Local(local) if self.locals.contains(&local)))
     }
 
-    fn carries_value(&self, expr: &Expr<'tcx>) -> bool {
+    /// Whether the expression's value carries a source's, as `Spread::Value`
+    /// says, and as `Spread::Made` adds when `made`.
+    fn carries_through(&self, expr: &Expr<'tcx>, made: bool) -> bool {
         if self.names(expr) {
             return true;
         }
-        let carries = |inner| self.carries_value(inner);
+        let carries = |inner| self.carries_through(inner, made);
         match expr.kind {
-            ExprKind::MethodCall(_, receiver, ..) => carries(receiver),
+            ExprKind::MethodCall(_, receiver, arguments, _) => {
+                carries(receiver) || made && arguments.iter().any(carries)
+            }
             ExprKind::Call(function, arguments) => {
                 let library = match function.kind {
                     ExprKind::Path(ref qpath) => self
@@ -102,37 +106,12 @@ impl<'s, 'tcx> Flow<'s, 'tcx> {
                         .is_some_and(|callee| is_library(self.tcx, callee)),
                     _ => false,
                 };
-                library && arguments.iter().any(carries)
+                (made || library) && arguments.iter().any(carries)
             }
-            ExprKind::Match(_, arms, _) => arms.iter().any(|arm| carries(arm.body)),
-            ExprKind::If(_, then, otherwise) => carries(then) || otherwise.is_some_and(carries),
-            ExprKind::Block(block, _) => block.expr.is_some_and(carries),
-            ExprKind::AddrOf(_, _, inner)
-            | ExprKind::DropTemps(inner)
-            | ExprKind::Field(inner, _)
-            | ExprKind::Index(inner, _, _)
-            | ExprKind::Unary(_, inner)
-            | ExprKind::Cast(inner, _)
-            | ExprKind::Type(inner, _) => carries(inner),
-            _ => false,
-        }
-    }
-
-    fn carries_made(&self, expr: &Expr<'tcx>) -> bool {
-        if self.names(expr) {
-            return true;
-        }
-        let carries = |inner| self.carries_made(inner);
-        match expr.kind {
-            ExprKind::MethodCall(_, receiver, arguments, _) => {
-                carries(receiver) || arguments.iter().any(carries)
-            }
-            ExprKind::Call(_, arguments)
-            | ExprKind::Tup(arguments)
-            | ExprKind::Array(arguments) => arguments.iter().any(carries),
+            ExprKind::Tup(items) | ExprKind::Array(items) => made && items.iter().any(carries),
             ExprKind::Struct(_, fields, tail) => {
-                fields.iter().any(|field| carries(field.expr))
-                    || matches!(tail, StructTailExpr::Base(base) if carries(base))
+                made && (fields.iter().any(|field| carries(field.expr))
+                    || matches!(tail, StructTailExpr::Base(base) if carries(base)))
             }
             ExprKind::Match(_, arms, _) => arms.iter().any(|arm| carries(arm.body)),
             ExprKind::If(_, then, otherwise) => carries(then) || otherwise.is_some_and(carries),

@@ -305,13 +305,12 @@ impl<'tcx> LateLintPass<'tcx> for ReadRule {
         );
         let search = Search::new(setup, tcx);
         let code = search.read_code();
-        let mut functions = search
+        let functions = search
             .candidates
             .iter()
             .copied()
             .filter(|&body| matches!(tcx.def_kind(body), DefKind::Fn | DefKind::AssocFn))
             .collect::<Vec<_>>();
-        functions.sort_by_key(|body| tcx.def_span(*body));
         let row_parameters = row_work::row_parameters(tcx, &rows, &functions);
         let kept_types =
             TypeSet::resolve(tcx, "read_shapes.kept_state_types", &setup.rows.kept_state_types);
