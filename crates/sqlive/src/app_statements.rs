@@ -1,22 +1,26 @@
-//! The statements each connection keeps prepared, the app's and the host's.
+//! The statements each connection keeps prepared, the app's and the host's,
+//! and what the database keeps of each.
 //!
 //! SQLite compiles into each statement every trigger it can fire, and the
 //! views those read, so preparing an app write can cost far more than running
 //! it. The authorizer judges a statement and learns what it reads only as
-//! SQLite prepares it, so the connection keeps that judgment beside the
-//! prepared statement: a later run from the cache, in a one-shot read, a
-//! live query's run or a write that the judgment allows, records the same
-//! reads. The app's statements and the host's are judged by different rules,
-//! so each keeps judgments of its own.
+//! SQLite prepares it, so sqlive keeps that judgment for each later run of the
+//! prepared statement: a run from the cache, in a one-shot read, a live
+//! query's run or a write that the judgment allows, records the same reads.
+//! The app's statements and the host's are judged by different rules, so each
+//! keeps judgments of its own.
 //!
-//! What a kept statement lets a live query narrow depends on its SQL, the
-//! schema, and the SQL functions and whole views its connection was set up
-//! with. A database sets each of its connections up alike, so they share one
-//! map of those plans, and one of them builds each plan for all. The plans of
-//! one schema look their names up in one read of it (`MainSchema`), which the
-//! map keeps beside them. A compiled statement brings the plan its compiler
-//! built, which the map keeps once a connection has checked it against that
-//! read.
+//! A statement's judgment, and what it lets a live query narrow (its plan),
+//! depend on its SQL, the schema, and the SQL functions and whole views its
+//! connection was set up with. A database sets each of its connections up
+//! alike, so they share one map of statements, with one entry for each
+//! statement against each schema that holds both: a judgment one connection
+//! learned holds on each, and one connection builds each plan for all. Each
+//! connection keeps only its prepared statements, in SQLite's cache. The
+//! plans of one schema look their names up in one read of it (`MainSchema`),
+//! which the map keeps beside them. A compiled statement brings the plan its
+//! compiler built, which the map keeps once a connection has checked it
+//! against that read.
 
 use super::HostSql;
 use crate::authorization::{Judgment, Policy, PolicyError};
@@ -26,21 +30,21 @@ use crate::ScopePlanSize;
 use crate::{CompiledPlan, ScopePlan};
 use panic_as_error::locks::{lock_unpoisoned, wait_unpoisoned};
 use rusqlite::{CachedStatement, Statement};
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-/// How many judgments a connection keeps, and how many statements' plans a
-/// database keeps: more than an app and its host run, but bounded for SQL
-/// built with values in its text.
+/// How many statements a database keeps judgments and plans of: more than an
+/// app and its host run, but bounded for SQL built with values in its text.
 const RECORDED: usize = 512;
 
-/// What each kept statement lets a live query narrow, by its SQL and the
-/// schema it was built against. A database's connections share one; a
-/// connection opened outside a database keeps its own.
-pub(crate) struct ScopePlans {
-    kept: Mutex<KeptPlans>,
+/// What the database keeps of each statement, by the schema and its SQL: how
+/// the authorizer judged it, and what it lets a live query narrow. A
+/// database's connections share one; a connection opened outside a database
+/// keeps its own.
+pub(crate) struct KeptStatements {
+    kept: Mutex<Kept>,
     /// Held by the one caller reading a schema, apart from `kept`, so that
     /// the callers of plans already built don't wait for the read.
     reading: Mutex<()>,
@@ -52,15 +56,15 @@ pub(crate) struct ScopePlans {
 }
 
 /// What the map keeps for each schema cookie.
-struct KeptPlans(BTreeMap<i64, SchemaPlans>);
+struct Kept(BTreeMap<i64, SchemaStatements>);
 
 /// What the map keeps for one schema.
 #[derive(Default)]
-struct SchemaPlans {
+struct SchemaStatements {
     /// The schema, once a build has read it.
     schema: Option<Arc<MainSchema>>,
-    /// Each statement's plan, by its SQL.
-    plans: HashMap<String, Kept>,
+    /// Each statement, by its SQL.
+    statements: HashMap<String, KeptStatement>,
     /// The plans of the compiled statements, each checked against the
     /// schema, by the address of the plan's text: two builds of one SQL
     /// against two schemas give two plans, and equal texts at two addresses
@@ -69,13 +73,23 @@ struct SchemaPlans {
     compiled: HashMap<usize, Arc<ScopePlan>>,
 }
 
-enum Kept {
+/// What the map keeps of one statement against one schema.
+#[derive(Default)]
+struct KeptStatement {
+    /// What the authorizer learned of it as SQLite prepared it, by whom it
+    /// judged it as.
+    judgments: HashMap<JudgedAs, Judgment>,
+    /// Its plan, once a live query's run has asked for it.
+    plan: Option<Plan>,
+}
+
+enum Plan {
     /// A connection builds the plan now.
     Building,
     Built(Arc<ScopePlan>),
 }
 
-impl KeptPlans {
+impl Kept {
     /// Make way for the first plan of `schema`, when the map keeps none:
     /// drop what every earlier schema kept, whose last readers are ending,
     /// and leave a later schema's kept.
@@ -85,38 +99,38 @@ impl KeptPlans {
         }
     }
 
-    /// Say that `sql`'s plan against `schema` is being built, after `enter`.
-    /// Once the map holds [`RECORDED`] statements, every built plan goes.
-    fn begin(&mut self, schema: i64, sql: &str) {
+    /// The entry of `sql` against `schema`, made after `enter`. Once the
+    /// map holds [`RECORDED`] statements, every one goes but those whose plan
+    /// is being built, which their builds end.
+    fn entry(&mut self, schema: i64, sql: &str) -> &mut KeptStatement {
         self.enter(schema);
-        if self.0.values().map(|of| of.plans.len()).sum::<usize>() >= RECORDED {
+        if self.0.values().map(|of| of.statements.len()).sum::<usize>() >= RECORDED {
             for of in self.0.values_mut() {
-                of.plans.retain(|_, kept| matches!(kept, Kept::Building));
+                of.statements.retain(|_, kept| matches!(kept.plan, Some(Plan::Building)));
             }
         }
-        self.0.entry(schema).or_default().plans.insert(sql.to_owned(), Kept::Building);
+        self.0.entry(schema).or_default().statements.entry(sql.to_owned()).or_default()
+    }
+
+    /// The statement `sql` against `schema`, when the map keeps it.
+    fn statement(&self, schema: i64, sql: &str) -> Option<&KeptStatement> {
+        self.0.get(&schema).and_then(|of| of.statements.get(sql))
     }
 
     /// End a build of `sql`'s plan against `schema`, keeping what it built,
     /// unless a later schema dropped that one meanwhile.
     fn end(&mut self, schema: i64, sql: &str, built: Option<Arc<ScopePlan>>) {
-        let Some(SchemaPlans { plans, .. }) = self.0.get_mut(&schema) else { return };
-        match built {
-            Some(plan) => {
-                plans.insert(sql.to_owned(), Kept::Built(plan));
-            }
-            None => {
-                plans.remove(sql);
-            }
-        }
+        let Some(of) = self.0.get_mut(&schema) else { return };
+        let Some(statement) = of.statements.get_mut(sql) else { return };
+        statement.plan = built.map(Plan::Built);
     }
 }
 
-impl ScopePlans {
-    /// A map that holds no plan yet.
+impl KeptStatements {
+    /// A map that holds no statement yet.
     pub(crate) fn new() -> Self {
         Self {
-            kept: Mutex::new(KeptPlans(BTreeMap::new())),
+            kept: Mutex::new(Kept(BTreeMap::new())),
             reading: Mutex::new(()),
             ended: Condvar::new(),
             #[cfg(test)]
@@ -136,9 +150,9 @@ impl ScopePlans {
     ) -> rusqlite::Result<Arc<ScopePlan>> {
         let mut kept = lock_unpoisoned(&self.kept);
         loop {
-            match kept.0.get(&schema).and_then(|of| of.plans.get(sql)) {
-                Some(Kept::Built(plan)) => return Ok(Arc::clone(plan)),
-                Some(Kept::Building) => {
+            match kept.statement(schema, sql).and_then(|statement| statement.plan.as_ref()) {
+                Some(Plan::Built(plan)) => return Ok(Arc::clone(plan)),
+                Some(Plan::Building) => {
                     #[cfg(test)]
                     if let Some(run) = lock_unpoisoned(&self.next_wait).take() {
                         run();
@@ -148,9 +162,9 @@ impl ScopePlans {
                 None => break,
             }
         }
-        kept.begin(schema, sql);
+        kept.entry(schema, sql).plan = Some(Plan::Building);
         drop(kept);
-        let mut building = PlanBuild { plans: self, schema, sql, built: None };
+        let mut building = PlanBuild { statements: self, schema, sql, built: None };
         let plan = build()?;
         building.built = Some(Arc::clone(&plan));
         Ok(plan)
@@ -207,6 +221,43 @@ impl ScopePlans {
         Ok(plan)
     }
 
+    /// Replay into `authorization` the reads of `sql`'s judgment as
+    /// `judged_as` against `schema`, when the map keeps one that `allows`.
+    /// Whether it kept one.
+    fn replay(
+        &self,
+        schema: i64,
+        judged_as: JudgedAs,
+        sql: &str,
+        allows: impl Fn(&Judgment) -> bool,
+        authorization: &crate::authorization::SqlAuthorization<impl Policy>,
+    ) -> bool {
+        let kept = lock_unpoisoned(&self.kept);
+        let judgment = kept.statement(schema, sql).and_then(|of| of.judgments.get(&judged_as));
+        match judgment.filter(|judgment| allows(judgment)) {
+            Some(judgment) => {
+                authorization.replay_reads(&judgment.reads);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Keep `judgment`, which the authorizer learned of `sql` as `judged_as`
+    /// as SQLite prepared it against `schema`.
+    fn judged(&self, schema: i64, judged_as: JudgedAs, sql: &str, judgment: Judgment) {
+        lock_unpoisoned(&self.kept).entry(schema, sql).judgments.insert(judged_as, judgment);
+    }
+
+    /// How many judgments and whether a plan the map keeps of `sql` against
+    /// `schema`, for tests of what the database keeps.
+    #[cfg(test)]
+    fn kept_of(&self, schema: i64, sql: &str) -> Option<(usize, bool)> {
+        let kept = lock_unpoisoned(&self.kept);
+        let statement = kept.statement(schema, sql)?;
+        Some((statement.judgments.len(), matches!(statement.plan, Some(Plan::Built(_)))))
+    }
+
     /// Run `run` as the next caller waits for a plan being built.
     #[cfg(test)]
     fn on_next_wait(&self, run: impl FnOnce() + Send + 'static) {
@@ -217,7 +268,7 @@ impl ScopePlans {
 /// One plan's build, which ends as it drops, whether it built the plan,
 /// failed or panicked, and wakes the callers waiting for it.
 struct PlanBuild<'a> {
-    plans: &'a ScopePlans,
+    statements: &'a KeptStatements,
     schema: i64,
     sql: &'a str,
     built: Option<Arc<ScopePlan>>,
@@ -225,20 +276,17 @@ struct PlanBuild<'a> {
 
 impl Drop for PlanBuild<'_> {
     fn drop(&mut self) {
-        lock_unpoisoned(&self.plans.kept).end(self.schema, self.sql, self.built.take());
-        self.plans.ended.notify_all();
+        lock_unpoisoned(&self.statements.kept).end(self.schema, self.sql, self.built.take());
+        self.statements.ended.notify_all();
     }
 }
 
 pub(super) struct AppStatements {
-    /// The schema the kept statements were prepared against.
+    /// The schema the statements in SQLite's cache were prepared against.
     schema: Cell<Option<i64>>,
-    /// What the authorizer learned of each statement as SQLite prepared it,
-    /// by whom it judged it as and the statement's SQL.
-    judgments: RefCell<HashMap<JudgedAs, HashMap<String, Judgment>>>,
-    /// What each kept statement lets a live query narrow, shared with the
-    /// database's other connections.
-    plans: Arc<ScopePlans>,
+    /// What the database keeps of each statement, shared with its other
+    /// connections.
+    kept: Arc<KeptStatements>,
     /// App statements SQLite prepared, for tests of the cache.
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fresh: Cell<usize>,
@@ -249,12 +297,11 @@ pub(super) struct AppStatements {
 }
 
 impl AppStatements {
-    /// No statement kept yet, with the plans of `plans`.
-    pub(super) fn new(plans: Arc<ScopePlans>) -> Self {
+    /// No statement prepared yet, keeping what it learns of each in `kept`.
+    pub(super) fn new(kept: Arc<KeptStatements>) -> Self {
         Self {
             schema: Cell::new(None),
-            judgments: RefCell::new(HashMap::new()),
-            plans,
+            kept,
             #[cfg(any(test, feature = "test-utils"))]
             fresh: Cell::new(0),
             #[cfg(any(test, feature = "test-utils"))]
@@ -280,7 +327,8 @@ impl<P: Policy> HostSql<P> {
         let schema = self.app_schema_cookie()?;
         self.keep_for_schema(schema);
         let judged_as = JudgedAs::App { policy: context.policy };
-        let statement = self.kept_statement(judged_as, sql, |judgment| judgment.allows(context))?;
+        let allows = |judgment: &Judgment| judgment.allows(context);
+        let statement = self.kept_statement(schema, judged_as, sql, allows)?;
         Ok(AppStatement::Cached { statement, schema })
     }
 
@@ -290,30 +338,38 @@ impl<P: Policy> HostSql<P> {
     pub(super) fn host_statement(&self, sql: &str) -> Result<CachedStatement<'_>, PolicyError<P>> {
         // Outside a live query's run nothing uses what a statement reads, so
         // only the first one needs a schema to keep its judgment for: a later
-        // run that finds another drops it.
-        if self.authorization.capturing_reads() || self.app_statements.schema.get().is_none() {
-            self.keep_for_schema(self.app_schema_cookie()?);
-        }
-        let statement = self.kept_statement(JudgedAs::Host, sql, |_| true);
+        // run that finds another drops the statements prepared against the
+        // schema before.
+        let schema = match self.app_statements.schema.get() {
+            Some(schema) if !self.authorization.capturing_reads() => schema,
+            _ => {
+                let schema = self.app_schema_cookie()?;
+                self.keep_for_schema(schema);
+                schema
+            }
+        };
+        let statement = self.kept_statement(schema, JudgedAs::Host, sql, |_| true);
         Ok(self.authorization.app_result(statement)?)
     }
 
-    /// Drop every kept statement and judgment unless they are of `schema`: a
-    /// statement prepared against another schema is no longer judged as it
-    /// would be now.
+    /// Drop every statement in SQLite's cache unless it was prepared against
+    /// `schema`: a statement prepared against another schema is no longer
+    /// judged as it would be now. The database drops the judgments of a
+    /// schema as the first statement of a later one is kept.
     fn keep_for_schema(&self, schema: i64) {
         if self.app_statements.schema.get() != Some(schema) {
             self.connection.flush_prepared_statement_cache();
-            self.app_statements.judgments.borrow_mut().clear();
             self.app_statements.schema.set(Some(schema));
         }
     }
 
-    /// The cached statement `sql`, judged as `judged_as`: SQLite prepares it
-    /// unless the cache holds it with a judgment that `allows`, whose reads
-    /// are then recorded as preparing it would record them.
+    /// The cached statement `sql`, judged as `judged_as` against `schema`:
+    /// SQLite prepares it unless the cache holds it and the database keeps a
+    /// judgment of it that `allows`, whose reads are then recorded as
+    /// preparing it would record them.
     fn kept_statement(
         &self,
+        schema: i64,
         judged_as: JudgedAs,
         sql: &str,
         allows: impl Fn(&Judgment) -> bool,
@@ -324,13 +380,10 @@ impl<P: Policy> HostSql<P> {
         let judgment = match judgment {
             Some(judgment) => judgment,
             None => {
-                let judgments = self.app_statements.judgments.borrow();
-                let kept = judgments.get(&judged_as).and_then(|of| of.get(sql));
-                if let Some(kept) = kept.filter(|kept| allows(kept)) {
-                    self.authorization.replay_reads(&kept.reads);
+                let kept = &self.app_statements.kept;
+                if kept.replay(schema, judged_as, sql, &allows, &self.authorization) {
                     return Ok(statement);
                 }
-                drop(judgments);
                 // The cache holds a statement SQLite prepared to be judged
                 // another way, or one whose judgment is gone.
                 statement.discard();
@@ -355,11 +408,7 @@ impl<P: Policy> HostSql<P> {
             };
             count.set(count.get() + 1);
         }
-        let mut judgments = self.app_statements.judgments.borrow_mut();
-        if judgments.values().map(HashMap::len).sum::<usize>() >= RECORDED {
-            judgments.clear();
-        }
-        judgments.entry(judged_as).or_default().insert(sql.to_owned(), judgment);
+        self.app_statements.kept.judged(schema, judged_as, sql, judgment);
         Ok(statement)
     }
 
@@ -439,7 +488,7 @@ impl<P: Policy> HostSql<P> {
             return self.build_scope_plan(None, sql, statement);
         };
         self.app_statements
-            .plans
+            .kept
             .plan(cookie, sql, || self.build_scope_plan(Some(cookie), sql, statement))
     }
 
@@ -470,7 +519,7 @@ impl<P: Policy> HostSql<P> {
         };
         let read = || self.authorization.unrecorded(|| self.read_schema());
         match cookie {
-            Some(cookie) => self.app_statements.plans.compiled(cookie, encoded, check, read),
+            Some(cookie) => self.app_statements.kept.compiled(cookie, encoded, check, read),
             None => check(&read()?),
         }
     }
@@ -496,7 +545,7 @@ impl<P: Policy> HostSql<P> {
         let started = Instant::now();
         let plan = self.authorization.unrecorded(|| {
             let schema = match cookie {
-                Some(cookie) => self.app_statements.plans.schema(cookie, || self.read_schema())?,
+                Some(cookie) => self.app_statements.kept.schema(cookie, || self.read_schema())?,
                 None => Arc::new(self.read_schema()?),
             };
             ScopePlan::build(&self.connection, &schema, sql, statement)

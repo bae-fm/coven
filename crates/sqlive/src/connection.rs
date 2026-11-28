@@ -39,7 +39,7 @@ pub use statement_profiles::ProfiledStatement;
 #[cfg(any(test, feature = "test-utils"))]
 #[path = "test_hooks.rs"]
 mod test_hooks;
-pub(crate) use app_statements::ScopePlans;
+pub(crate) use app_statements::KeptStatements;
 use app_statements::StepsOf;
 pub use event_capture::Operation;
 pub use live_statement::LiveStatement;
@@ -168,8 +168,8 @@ impl<P: Policy> HostSql<P> {
     /// A connection to the database at `path`, for reading only when
     /// `read_only`, whose authorizer asks `policy` after its own rules.
     /// `setup` registers what the connection needs, given its policy, before
-    /// any SQL runs. The connection keeps its statements' scope plans for
-    /// itself.
+    /// any SQL runs. The connection keeps what it learns of its statements,
+    /// their judgments and scope plans, for itself.
     pub fn open(
         path: &Path,
         read_only: bool,
@@ -177,19 +177,19 @@ impl<P: Policy> HostSql<P> {
         settings: &crate::SqliteSettings,
         setup: &dyn Fn(&Setup<'_, P>, &P) -> rusqlite::Result<()>,
     ) -> Result<Self, PolicyError<P>> {
-        let plans = Arc::new(ScopePlans::new());
-        Self::open_sharing(path, read_only, policy, settings, setup, plans)
+        let kept = Arc::new(KeptStatements::new());
+        Self::open_sharing(path, read_only, policy, settings, setup, kept)
     }
 
-    /// [`Self::open`], keeping its statements' scope plans in `plans`, which
-    /// the database's other connections share.
+    /// [`Self::open`], keeping what it learns of its statements in `kept`,
+    /// which the database's other connections share.
     pub(crate) fn open_sharing(
         path: &Path,
         read_only: bool,
         policy: P,
         settings: &crate::SqliteSettings,
         setup: &dyn Fn(&Setup<'_, P>, &P) -> rusqlite::Result<()>,
-        plans: Arc<ScopePlans>,
+        kept: Arc<KeptStatements>,
     ) -> Result<Self, PolicyError<P>> {
         let policy = Arc::new(policy);
         let authorization = SqlAuthorization::new(Arc::clone(&policy));
@@ -235,7 +235,7 @@ impl<P: Policy> HostSql<P> {
             authorization,
             policy,
             lookups,
-            app_statements: app_statements::AppStatements::new(plans),
+            app_statements: app_statements::AppStatements::new(kept),
             cookie: schema_cookie::SchemaCookie::default(),
             handle: None,
             observation: None,

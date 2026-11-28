@@ -1,4 +1,4 @@
-use super::ScopePlans;
+use super::KeptStatements;
 use crate::tests::{
     compiled_read, next, no_values, QueryError, TestDatabase, TestError, TestOptions, TestRead,
 };
@@ -298,6 +298,27 @@ fn readers_share_a_statements_scope_plan() {
     db.close();
 }
 
+/// A database keeps one entry for each statement against its schema, which
+/// every connection shares: the writer's run of `TITLES` in a write and two
+/// readers' live runs leave one judgment of it and its one plan.
+#[test]
+fn a_statement_is_kept_once_for_every_connection() {
+    let (db, counter) = note_of_title();
+    let title = db
+        .write_app(|sql| {
+            sql.app_query(crate::Recorded::No, TITLES, ["1"], |row| row.get::<_, String>(0))
+        })
+        .unwrap();
+    assert_eq!(title, ["title".to_owned()]);
+    assert_eq!(plans_built_on_each_reader(&db, &counter), 1);
+    let kept = db.host(|writer| {
+        let cookie = writer.app_schema_cookie().unwrap();
+        writer.app_statements.kept.kept_of(cookie, TITLES)
+    });
+    assert_eq!(kept, Some((1, true)));
+    db.close();
+}
+
 /// A schema change drops the plans kept against the old schema: the next
 /// run builds the statement's plan again, for every reader.
 #[test]
@@ -373,7 +394,7 @@ fn some_plan() -> Arc<ScopePlan> {
 #[test]
 fn the_plans_of_a_schema_share_one_read_of_it() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
-    let plans = ScopePlans::new();
+    let plans = KeptStatements::new();
     let mut reads = 0;
     let mut build = |cookie, sql| {
         let built = plans.plan(cookie, sql, || {
@@ -413,7 +434,7 @@ struct TwoCallers {
 /// as `first` does, and only once the second caller waits for it or builds a
 /// plan of its own.
 fn two_callers(
-    plans: &ScopePlans,
+    plans: &KeptStatements,
     first: impl FnOnce() -> rusqlite::Result<Arc<ScopePlan>> + Send,
 ) -> TwoCallers {
     let (did, second_did) = std::sync::mpsc::channel();
@@ -452,7 +473,7 @@ fn two_callers(
 /// second waits for the first's build and uses it.
 #[test]
 fn two_first_runs_at_once_build_a_plan_once() {
-    let plans = ScopePlans::new();
+    let plans = KeptStatements::new();
     let plan = some_plan();
     let built = Arc::clone(&plan);
     let callers = two_callers(&plans, move || Ok(built));
@@ -465,7 +486,7 @@ fn two_first_runs_at_once_build_a_plan_once() {
 /// waiting for it, which builds the plan itself.
 #[test]
 fn a_failed_build_leaves_the_plan_to_the_waiting_caller() {
-    let plans = ScopePlans::new();
+    let plans = KeptStatements::new();
     let callers = two_callers(&plans, || Err(rusqlite::Error::QueryReturnedNoRows));
     assert_eq!(callers.first.unwrap().map(drop).unwrap_err(), rusqlite::Error::QueryReturnedNoRows);
     assert_eq!((callers.step, callers.second_builds), (Step::Waited, 1));
@@ -477,7 +498,7 @@ fn a_failed_build_leaves_the_plan_to_the_waiting_caller() {
 /// it, too.
 #[test]
 fn a_panicking_build_leaves_the_plan_to_the_waiting_caller() {
-    let plans = ScopePlans::new();
+    let plans = KeptStatements::new();
     let callers = two_callers(&plans, || panic!("the build broke"));
     let panic = callers.first.map(drop).unwrap_err();
     assert_eq!(panic.downcast_ref::<&str>(), Some(&"the build broke"));
@@ -489,7 +510,7 @@ fn a_panicking_build_leaves_the_plan_to_the_waiting_caller() {
 /// A run still on an older schema leaves the newer schema's plans kept.
 #[test]
 fn an_older_schemas_run_leaves_the_newer_plans_kept() {
-    let plans = ScopePlans::new();
+    let plans = KeptStatements::new();
     let newer = plans.plan(2, TITLES, || Ok(some_plan())).unwrap();
     let older = plans.plan(1, TITLES, || Ok(some_plan())).unwrap();
     assert!(!Arc::ptr_eq(&older, &newer));

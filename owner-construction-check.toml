@@ -1380,11 +1380,11 @@ tables = [
 # One order per database, which its connections share, and each value a
 # connection's setup registers, which its transactions take (§4).
 "crates/sqlive/src/snapshot_values.rs" = ["CommitOrder::new", "SnapshotValues::value"]
-# One map of scope plans per database, which its connections share, and the
-# kept statements of one connection, which `HostSql::open_sharing` makes as it
-# opens the connection (§4). A connection opened outside a database makes its
-# own map.
-"crates/sqlive/src/app_statements.rs" = ["ScopePlans::new", "AppStatements::new"]
+# One map of each statement's judgments and scope plan per database, which its
+# connections share, and the statements of one connection, which
+# `HostSql::open_sharing` makes as it opens the connection (§1, §4). A
+# connection opened outside a database makes its own map.
+"crates/sqlive/src/app_statements.rs" = ["KeptStatements::new", "AppStatements::new"]
 "crates/sqlive/src/connection.rs" = ["HostSql::open", "HostSql::open_sharing", "HostSql::judge_host_changes"]
 # Coven's policy for a connection's authorizer, whose state the connection
 # shares with the authorizer: one judging for the handle that holds the

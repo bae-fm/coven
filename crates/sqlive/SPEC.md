@@ -122,7 +122,8 @@ panic.
   that one each time after, since SQLite compiles into each statement every
   trigger it can fire and the views those read. SQLite reports what a statement
   reads, and sqlive refuses what it may not do, only as SQLite prepares it, so
-  the connection keeps what it learned then beside the statement. A one-shot
+  the database keeps what sqlive learns then, under the schema and the SQL, for
+  every connection, since sqlive sets up each connection alike. A one-shot
   read, each run of a live query and a write then run the same prepared
   statement, and a live query's run records the same reads from it. A SELECT
   that a write ran serves a later read. A statement that writes, which a write
@@ -653,8 +654,11 @@ can't read, so that every column of the schema counts as read.
   the statement's *scope plan*.
   The plan depends on the statement's text, the schema, and the SQL functions
   the connection was set up with. sqlive sets up
-  every connection of a database alike, so they share the plans each one reads,
-  and a schema change reads them again. Kept by each connection alone, a plan
+  every connection of a database alike, so the database keeps one entry for
+  each schema and SQL that holds both the plan and what sqlive learns as
+  SQLite prepares the statement (section 1), and every connection reads and
+  fills that entry. A schema change drops every entry, and sqlive reads each
+  plan again. Kept by each connection alone, a plan
   would cost a screen again on each reader the screen first runs on. A music
   app's import pane has 22 statements, which took 2 s to read in a debug build,
   so each of the first switches between candidates would wait 2 s. When two
