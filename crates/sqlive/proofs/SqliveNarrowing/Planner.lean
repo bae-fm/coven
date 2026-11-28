@@ -86,7 +86,8 @@ def received (s : Statement) (st : PState) (waiting : List Nat) (i : Nat) : Bool
 
 /-- Whether item `i` has values to give before any item is placed: it has a
 condition of its own that `counts` takes, or it is a derived item that no
-condition passes into, whose rows nothing around it narrows, or one that reads
+condition passes into, whose rows nothing around it narrows, or one with an
+arm that reads no item, whose row is the values it selects, or one that reads
 an item that has (`Planner::gives_alone`). -/
 def givesAlone (s : Statement) (st : PState) (counts : STerm → Bool) : Nat → Nat → Bool
   | 0, _ => false
@@ -94,7 +95,8 @@ def givesAlone (s : Statement) (st : PState) (counts : STerm → Bool) : Nat →
     (st.items i).term.any counts || match (s.item i).kind with
       | .table _ => false
       | .derived q _ => (PushDown.arms s i == some []) ||
-          (s.query q).arms.any fun k => (s.core k).items.any (givesAlone s st counts fuel)
+          (s.query q).arms.any fun k =>
+            (s.core k).items.isEmpty || (s.core k).items.any (givesAlone s st counts fuel)
 
 /-- The items of `remaining` that items giving values reach by edges, either
 way, with none of `waiting` among them: a giver has values to give on its own

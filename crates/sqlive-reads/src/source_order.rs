@@ -286,9 +286,11 @@ impl Planner<'_, '_> {
     /// condition of its own that `counts` takes, or it is a view read whole
     /// or a table function,
     /// which nothing narrows, or it is a subquery, CTE or view read as its
-    /// own that no condition passes into, or one that reads an item that has.
-    /// A subquery that only passes a table's rows on has none, as the table
-    /// has none. The model states the rule as `givesAlone` in
+    /// own that no condition passes into, or one with an arm that reads no
+    /// FROM item, as a relation of a parameter (`SELECT ?1 AS key`) does,
+    /// whose row is the values it selects, or one that reads an item that
+    /// has. A subquery that only passes a table's rows on has none, as the
+    /// table has none. The model states the rule as `givesAlone` in
     /// `crates/sqlive/proofs`.
     fn gives_alone(&self, item: usize, counts: fn(&ScopeTerm) -> bool) -> bool {
         let found = &self.items[item];
@@ -299,7 +301,8 @@ impl Planner<'_, '_> {
             Some(derived) => {
                 derived.arms.is_empty()
                     || derived.cores.iter().any(|core| {
-                        self.cores[*core].items.iter().any(|item| self.gives_alone(*item, counts))
+                        let items = &self.cores[*core].items;
+                        items.is_empty() || items.iter().any(|item| self.gives_alone(*item, counts))
                     })
             }
             None => found.source.table().is_none(),

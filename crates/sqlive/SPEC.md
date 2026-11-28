@@ -1241,7 +1241,15 @@ FROM, a CTE or a view that conditions pass into goes where its tables would,
 written out: it has a condition of its own only when a table it reads has one.
 So `FROM albums AS a LEFT JOIN (SELECT * FROM releases) AS r ON r.album_id =
 a.id` looks `albums` up first, and a release added to an album the query
-doesn't show doesn't rerun it.
+doesn't show doesn't rerun it. One with a SELECT that reads no table, such as a
+relation of keys `(SELECT ?1 AS path)`, has a condition of its own: its row is
+the values it selects. An import pane that reads a folder's pressing with `WITH
+keys (path) AS (SELECT ?1) SELECT l.release_id FROM keys JOIN (SELECT path,
+hash FROM scans) AS s ON s.path = keys.path JOIN links AS l ON l.hash = s.hash
+AND l.kind = 'pressing'` looks `keys` up first, then the scan, then the link,
+which takes the scan's hash. A pressing linked to another folder doesn't rerun
+the pane. With the link first, for `l.kind = 'pressing'`, it would take no
+values, and any folder's pressing would.
 
 A condition SQLite judges compares no column with a value, so the rows it
 allows can be any folder's or album's. A cover picker reads the covers the

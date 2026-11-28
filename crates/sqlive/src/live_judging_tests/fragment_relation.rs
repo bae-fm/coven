@@ -90,7 +90,9 @@ CREATE TABLE card_list(list INTEGER PRIMARY KEY, verdict_id INTEGER NOT NULL,
 CREATE TABLE listed_card(list INTEGER NOT NULL, card INTEGER NOT NULL, title TEXT NOT NULL,
     PRIMARY KEY (list, card)) STRICT;
 INSERT INTO card_list VALUES (10, 1, 'first'), (20, 2, 'second');
-INSERT INTO listed_card VALUES (10, 0, 'first'), (20, 0, 'second')";
+INSERT INTO listed_card VALUES (10, 0, 'first'), (20, 0, 'second');
+CREATE TABLE link(content_hash TEXT PRIMARY KEY, kind TEXT NOT NULL, release_id TEXT) STRICT;
+INSERT INTO link VALUES ('ha', 'pressing', 'ra')";
 
 /// The owner of the folder at `?1`'s state, as the fragment that hands it to
 /// the cards spreads it: with its keys in a WITH of its own, or narrowed by
@@ -315,4 +317,34 @@ async fn a_lookup_reads_a_subquery_partner_once() {
         .await;
         db.close();
     }
+}
+
+/// The release each folder of the relation `keys` links its pressing to, as a
+/// fragment reads it: the folder's scan by its key, then the link of the
+/// scan's hash, which a term of the link's own narrows to pressings.
+const LINKED: &str = "SELECT linked.* FROM (\
+     WITH m__Linked__keys (candidate_key) AS (SELECT ?1 AS candidate_key) \
+     SELECT scan.candidate_key, link.release_id \
+     FROM m__Linked__keys AS keys \
+     JOIN (SELECT scan.path AS candidate_key, scan.content_hash FROM scan AS scan) AS scan \
+         ON scan.candidate_key = keys.candidate_key \
+     JOIN link AS link ON link.content_hash = scan.content_hash AND link.kind = 'pressing'\
+     ) AS linked";
+
+/// A link of another folder wakes nothing, though the link's own term reads
+/// every pressing, and a link of this folder does.
+#[tokio::test]
+async fn a_key_relation_narrows_a_table_two_joins_away_that_has_a_term_of_its_own() {
+    let db = TestDatabase::open(OWNED);
+    follows(
+        &db,
+        LINKED,
+        vec![Text("/a".into())],
+        &[
+            ("INSERT INTO link VALUES ('hb', 'pressing', 'rb')", false),
+            ("UPDATE link SET release_id = 'rx' WHERE content_hash = 'ha'", true),
+        ],
+    )
+    .await;
+    db.close();
 }
