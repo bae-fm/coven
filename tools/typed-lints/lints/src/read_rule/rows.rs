@@ -5,18 +5,14 @@
 //! `read_shapes.column_values` reads one column's value, such as a number, a
 //! text or a key: the rows of its read are the collections that flow from
 //! what the read returns (`flow.rs`), so a count or a flag elsewhere in read
-//! code is none. Any other mapper's result is a row type, and a value holds
+//! code is none. Any other mapper's result is a row type. A function or
+//! closure of the workspace that takes a row type, through references, and
+//! makes a struct of the workspace or a tuple that is no column's value maps
+//! rows too, so what it makes is a row type: read code that turns a
+//! generated statement's rows into its own type works on rows. A value holds
 //! rows when its type is a slice, collection or iterator whose items are or
 //! hold a row type. Neither one row, one optional value, a range, a text
 //! nor bytes holds rows.
-//!
-//! A function or closure of the workspace that takes a row type or a
-//! converted row type, through references, and makes a struct of the
-//! workspace or a tuple that is no column's value makes a converted row
-//! type: read code that turns a generated statement's rows into a type of
-//! its own makes one. A value of a converted row type holds a read's rows
-//! only where a read's rows reach it (`row_work.rs`), so a caller's input of
-//! the same type holds none.
 
 use clippy_utils::ty::implements_trait_with_env;
 use rustc_attr_ir::LangItem;
@@ -78,15 +74,50 @@ impl<'tcx> Mappers<'_, 'tcx> {
     }
 }
 
-/// Types by definition for structs and enums, and with regions erased for
-/// the others, tuples of columns.
-#[derive(Default)]
-struct Types<'tcx> {
+/// The workspace's row types.
+pub(super) struct RowTypes<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    /// The row types that are structs or enums, by definition.
     adts: FxHashSet<DefId>,
+    /// The other row types, as tuples of columns, with regions erased.
     others: FxHashSet<Ty<'tcx>>,
 }
 
-impl<'tcx> Types<'tcx> {
+impl<'tcx> RowTypes<'tcx> {
+    /// The row types the mappers among `definitions` make: those of a
+    /// statement's row, and then, until no more turn up, those of a row type,
+    /// among the structs `workspace` declares and tuples.
+    pub(super) fn of(
+        mappers: &Mappers<'_, 'tcx>,
+        workspace: &WorkspaceCrates<'_>,
+        definitions: impl Iterator<Item = DefId>,
+    ) -> Self {
+        let tcx = mappers.tcx;
+        let mut rows = Self { tcx, adts: FxHashSet::default(), others: FxHashSet::default() };
+        let mut conversions = Vec::new();
+        for id in definitions {
+            match mappers.made(id) {
+                Some(Made::Row(made)) => rows.insert(made),
+                Some(Made::Column) => {}
+                None => conversions.extend(conversion(mappers, workspace, id)),
+            }
+        }
+        loop {
+            let (found, rest): (Vec<_>, Vec<_>) =
+                conversions.into_iter().partition(|(inputs, _): &(Vec<Ty<'tcx>>, Ty<'tcx>)| {
+                    inputs.iter().any(|input| rows.is_row(input.peel_refs()))
+                });
+            conversions = rest;
+            if found.is_empty() {
+                return rows;
+            }
+            for (_, made) in found {
+                rows.insert(made);
+            }
+        }
+    }
+
+    /// Count `made` as a row type.
     fn insert(&mut self, made: Ty<'tcx>) {
         match made.kind() {
             ty::Adt(adt, _) => {
@@ -98,112 +129,37 @@ impl<'tcx> Types<'tcx> {
         }
     }
 
-    fn contains(&self, tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
-        match ty.kind() {
-            ty::Adt(adt, _) => self.adts.contains(&adt.did()),
-            _ => self.others.contains(&tcx.erase_and_anonymize_regions(ty)),
-        }
-    }
-}
-
-/// The workspace's row types, and the converted row types code makes of
-/// them.
-pub(super) struct RowTypes<'tcx> {
-    tcx: TyCtxt<'tcx>,
-    rows: Types<'tcx>,
-    converted: Types<'tcx>,
-}
-
-impl<'tcx> RowTypes<'tcx> {
-    /// The row types the mappers among `definitions` make, and then, until
-    /// no more turn up, the converted row types made of those or of other
-    /// converted row types, among the structs `workspace` declares and
-    /// tuples.
-    pub(super) fn of(
-        mappers: &Mappers<'_, 'tcx>,
-        workspace: &WorkspaceCrates<'_>,
-        definitions: impl Iterator<Item = DefId>,
-    ) -> Self {
-        let tcx = mappers.tcx;
-        let mut types = Self { tcx, rows: Types::default(), converted: Types::default() };
-        let mut conversions = Vec::new();
-        for id in definitions {
-            match mappers.made(id) {
-                Some(Made::Row(made)) => types.rows.insert(made),
-                Some(Made::Column) => {}
-                None => conversions.extend(conversion(mappers, workspace, id)),
-            }
-        }
-        loop {
-            let (found, rest): (Vec<_>, Vec<_>) =
-                conversions.into_iter().partition(|(inputs, _): &(Vec<Ty<'tcx>>, Ty<'tcx>)| {
-                    inputs.iter().any(|input| {
-                        let input = input.peel_refs();
-                        types.is_row(input) || types.is_converted(input)
-                    })
-                });
-            conversions = rest;
-            if found.is_empty() {
-                return types;
-            }
-            for (_, made) in found {
-                if !types.is_row(made) {
-                    types.converted.insert(made);
-                }
-            }
-        }
-    }
-
     /// Whether `ty` is a row type.
     pub(super) fn is_row(&self, ty: Ty<'tcx>) -> bool {
-        self.rows.contains(self.tcx, ty)
-    }
-
-    /// Whether `ty` is a converted row type.
-    pub(super) fn is_converted(&self, ty: Ty<'tcx>) -> bool {
-        self.converted.contains(self.tcx, ty)
+        match ty.kind() {
+            ty::Adt(adt, _) => self.adts.contains(&adt.did()),
+            _ => self.others.contains(&self.tcx.erase_and_anonymize_regions(ty)),
+        }
     }
 
     /// Whether a value of `ty` holds rows: a slice, collection or iterator
     /// whose items are or hold a row type, behind references.
     pub(super) fn holds_rows(&self, ty: Ty<'tcx>) -> bool {
-        self.holds(ty, &|ty| self.is_row(ty))
-    }
-
-    /// Whether a value of `ty` holds rows where a read's rows reach it: a
-    /// slice, collection or iterator whose items are or hold a converted row
-    /// type, behind references.
-    pub(super) fn holds_converted(&self, ty: Ty<'tcx>) -> bool {
-        self.holds(ty, &|ty| self.is_converted(ty))
-    }
-
-    /// Whether a value of `ty` is or holds a converted row type.
-    pub(super) fn mentions_converted(&self, ty: Ty<'tcx>) -> bool {
         let ty = ty.peel_refs();
-        self.is_converted(ty) || parts_hold(ty, &|ty| self.is_converted(ty))
-    }
-
-    /// Whether a value of `ty` holds values of the types `row` picks.
-    fn holds(&self, ty: Ty<'tcx>, row: &dyn Fn(Ty<'tcx>) -> bool) -> bool {
-        let ty = ty.peel_refs();
-        if row(ty) || is_single(self.tcx, ty) {
+        if self.is_row(ty) || is_single(self.tcx, ty) {
             return false;
         }
-        parts_hold(ty, row)
+        self.parts_hold_row(ty)
     }
-}
 
-/// Whether one of the types `ty` is made of, but `ty` itself, is one `row`
-/// picks or holds one, looking through no callback.
-fn parts_hold<'tcx>(ty: Ty<'tcx>, row: &dyn Fn(Ty<'tcx>) -> bool) -> bool {
-    let part = |inner: Ty<'tcx>| row(inner.peel_refs()) || parts_hold(inner, row);
-    match ty.kind() {
-        ty::Adt(_, args) => args.types().any(part),
-        ty::Ref(_, inner, _) | ty::RawPtr(inner, _) | ty::Slice(inner) | ty::Array(inner, _) => {
-            part(*inner)
+    /// Whether one of the types `ty` is made of, but `ty` itself, is a row
+    /// type or holds one, looking through no callback.
+    fn parts_hold_row(&self, ty: Ty<'tcx>) -> bool {
+        let part = |inner: Ty<'tcx>| self.is_row(inner.peel_refs()) || self.parts_hold_row(inner);
+        match ty.kind() {
+            ty::Adt(_, args) => args.types().any(part),
+            ty::Ref(_, inner, _)
+            | ty::RawPtr(inner, _)
+            | ty::Slice(inner)
+            | ty::Array(inner, _) => part(*inner),
+            ty::Tuple(items) => items.iter().any(part),
+            _ => false,
         }
-        ty::Tuple(items) => items.iter().any(part),
-        _ => false,
     }
 }
 
@@ -247,7 +203,7 @@ fn is_single<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
 }
 
 /// The inputs of the function or closure `id` and what it makes, with regions
-/// erased and `Result` and `Option` taken off, when it would convert a row it
+/// erased and `Result` and `Option` taken off, when it would map a row it
 /// took: what it makes is a struct `workspace` declares or a tuple, and no
 /// column's value.
 fn conversion<'tcx>(

@@ -313,28 +313,3 @@ pub fn read_singles(read: &SqlReadContext) -> Vec<Single> {
     singles.retain(|single| single.id > 0); // read_filter
     singles
 }
-
-/// Keeps the recent singles of what it is given: read code passes it the
-/// singles it made of a read's rows.
-fn recent(mut singles: Vec<Single>) -> Vec<Single> {
-    singles.retain(|single| single.year > 1); // read_filter
-    singles
-}
-
-pub fn read_recent(read: &SqlReadContext) -> Vec<Single> {
-    recent(
-        read.statement(&SinglesParams)
-            .into_iter()
-            .map(|row| Single { id: row.id, year: row.year })
-            .collect(),
-    )
-}
-
-/// Singles a caller asks about, and singles made of other values, are no
-/// read's rows, though singles are made of a read's rows elsewhere.
-pub fn read_known(read: &SqlReadContext, asked: &[Single], ids: &[i64]) -> usize {
-    let _asked = asked.iter().filter(|single| single.year > 0).count();
-    let made: Vec<Single> = ids.iter().map(|id| Single { id: *id, year: 0 }).collect();
-    let _made = made.iter().any(|single| single.id == 1);
-    read.statement(&SinglesParams).capacity()
-}

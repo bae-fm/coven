@@ -24,18 +24,13 @@
 //!   the row it was given.
 //!
 //! A callback argument is a closure or the path of a function.
-//!
-//! A value of a converted row type holds rows where a read's rows reach it:
-//! where it is made of a value that holds rows (`Spread::Made`), in its body
-//! or, through a parameter, in a body of the crate that calls it
-//! (`row_parameters`).
 
 use clippy_utils::higher::ForLoop;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_hir::def::{DefKind, Res};
+use rustc_hir::def::Res;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::{self, Visitor};
-use rustc_hir::{BinOpKind, Expr, ExprKind, HirId, LetStmt, Pat, PatKind};
+use rustc_hir::{BinOpKind, Expr, ExprKind, LetStmt, Pat, PatKind};
 use rustc_lint::Lint;
 use rustc_middle::hir::nested_filter::OnlyBodies;
 use rustc_middle::ty::{self, TyCtxt, TypeckResults, TypingEnv};
@@ -46,7 +41,7 @@ use super::records::Reporter;
 use super::rows::{Made, Mappers, RowTypes, is_collection, peel_result};
 use super::{
     READ_AGGREGATE, READ_DROP_ROW, READ_FILTER, READ_GROUP, READ_JOIN, READ_LENGTH_BRANCH,
-    READ_PICK, READ_SORT, callback, callee, is_library, library_method, resolve_callee,
+    READ_PICK, READ_SORT, callback, callee, is_library, library_method,
 };
 
 const SORT_WITHOUT_ARGUMENTS: [&str; 4] = ["sort", "sort_unstable", "sorted", "reverse"];
@@ -97,7 +92,6 @@ const OPTION_CONSUMERS: [&str; 10] = [
 pub(super) fn check<'tcx>(
     tcx: TyCtxt<'tcx>,
     rows: &RowTypes<'tcx>,
-    row_parameters: &FxHashSet<HirId>,
     mappers: &Mappers<'_, 'tcx>,
     unit: LocalDefId,
     process_only: &FxHashSet<LocalDefId>,
@@ -119,14 +113,11 @@ pub(super) fn check<'tcx>(
         }) && is_collection(tcx, typing_env, peel_result(tcx, typeck.expr_ty(expr)))
     };
     let column_rows = Flow::of(tcx, typeck, body, Spread::Value, &column_read);
-    let read_rows = |expr: &Expr<'tcx>| reads_rows(rows, row_parameters, typeck, expr);
-    let made_rows = Flow::of(tcx, typeck, body, Spread::Made, &read_rows);
     let mut work = RowWork {
         tcx,
         reporter,
         rows,
         column_rows: &column_rows,
-        made_rows: &made_rows,
         typing_env,
         process_only,
         item: tcx.def_path_str(root),
@@ -144,8 +135,6 @@ struct RowWork<'a, 'tcx> {
     rows: &'a RowTypes<'tcx>,
     /// What flows from the body's reads of one column.
     column_rows: &'a Flow<'a, 'tcx>,
-    /// What the body makes of a read's rows.
-    made_rows: &'a Flow<'a, 'tcx>,
     typing_env: TypingEnv<'tcx>,
     process_only: &'a FxHashSet<LocalDefId>,
     /// How findings name the unit: its function's path.
@@ -176,13 +165,11 @@ impl<'tcx> RowWork<'_, 'tcx> {
     }
 
     /// Whether the expression's value holds rows: its type holds a row
-    /// type, it is a collection that flows from a read of one column, or its
-    /// type holds a converted row type and it is made of a read's rows.
+    /// type, or it is a collection that flows from a read of one column.
     fn holds_rows(&self, expr: &'tcx Expr<'tcx>) -> bool {
         let ty = self.typeck.expr_ty(expr);
         self.rows.holds_rows(ty)
             || self.column_rows.carries(expr) && is_collection(self.tcx, self.typing_env, ty)
-            || self.rows.holds_converted(ty) && self.made_rows.carries(expr)
     }
 
     /// Whether an argument is a closure or the path of a function.
@@ -434,124 +421,5 @@ impl<'tcx> Visitor<'tcx> for RowWork<'_, 'tcx> {
             );
         }
         intravisit::walk_pat(self, pat);
-    }
-}
-
-/// Whether the expression's value is a read's rows or one of them: its type
-/// is or holds a row type, or it names a parameter that a call passes rows.
-fn reads_rows<'tcx>(
-    rows: &RowTypes<'tcx>,
-    row_parameters: &FxHashSet<HirId>,
-    typeck: &TypeckResults<'tcx>,
-    expr: &Expr<'tcx>,
-) -> bool {
-    let ty = typeck.expr_ty(expr);
-    rows.is_row(ty.peel_refs())
-        || rows.holds_rows(ty)
-        || matches!(expr.kind, ExprKind::Path(rustc_hir::QPath::Resolved(None, path))
-            if matches!(path.res, Res::Local(local) if row_parameters.contains(&local)))
-}
-
-/// The parameters of the crate's functions among `bodies`, by the locals
-/// they bind, that a call among `bodies` passes a value of a converted row
-/// type made of a read's rows: to a fixed point, so rows reach a function
-/// through the functions between it and the read.
-pub(super) fn row_parameters<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    rows: &RowTypes<'tcx>,
-    bodies: &[LocalDefId],
-) -> FxHashSet<HirId> {
-    let mut found = FxHashSet::default();
-    loop {
-        let known = found.len();
-        for &unit in bodies {
-            let typeck = tcx.typeck(unit);
-            let root = tcx.typeck_root_def_id(unit.to_def_id());
-            let body = tcx.hir_body_owned_by(unit).value;
-            let read_rows = |expr: &Expr<'tcx>| reads_rows(rows, &found, typeck, expr);
-            let made_rows = Flow::of(tcx, typeck, body, Spread::Made, &read_rows);
-            let mut calls = Passed {
-                tcx,
-                rows,
-                typeck,
-                typing_env: TypingEnv::post_analysis(tcx, root),
-                made_rows: &made_rows,
-                passed: Vec::new(),
-            };
-            calls.visit_expr(body);
-            let passed = calls.passed;
-            found.extend(passed);
-        }
-        if found.len() == known {
-            return found;
-        }
-    }
-}
-
-/// Finds the parameters of the crate's functions that a body's calls pass
-/// a converted row type made of a read's rows.
-struct Passed<'a, 'tcx> {
-    tcx: TyCtxt<'tcx>,
-    rows: &'a RowTypes<'tcx>,
-    typeck: &'tcx TypeckResults<'tcx>,
-    typing_env: TypingEnv<'tcx>,
-    made_rows: &'a Flow<'a, 'tcx>,
-    passed: Vec<HirId>,
-}
-
-impl<'tcx> Passed<'_, 'tcx> {
-    /// Notes each parameter of `callee`, a function of the crate, given an
-    /// argument that is made of a read's rows.
-    fn call(&mut self, callee: LocalDefId, arguments: impl Iterator<Item = &'tcx Expr<'tcx>>) {
-        // A trait's method that declares no default has no body.
-        let Some(body) = self.tcx.hir_maybe_body_owned_by(callee) else { return };
-        let parameters = body.params;
-        for (parameter, argument) in parameters.iter().zip(arguments) {
-            if self.rows.mentions_converted(self.typeck.expr_ty(argument))
-                && self.made_rows.carries(argument)
-            {
-                parameter.pat.each_binding(|_, local, _, _| self.passed.push(local));
-            }
-        }
-    }
-}
-
-impl<'tcx> Visitor<'tcx> for Passed<'_, 'tcx> {
-    type NestedFilter = OnlyBodies;
-
-    fn maybe_tcx(&mut self) -> TyCtxt<'tcx> {
-        self.tcx
-    }
-
-    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
-        match expr.kind {
-            ExprKind::MethodCall(_, receiver, arguments, _) => {
-                if let Some(callee) = self.typeck.type_dependent_def_id(expr.hir_id)
-                    && let Some(local) =
-                        resolve_callee(self.tcx, self.typeck, self.typing_env, callee, expr.hir_id)
-                            .as_local()
-                {
-                    self.call(local, std::iter::once(receiver).chain(arguments));
-                }
-            }
-            ExprKind::Call(function, arguments) => {
-                if let ExprKind::Path(ref qpath) = function.kind
-                    && let Res::Def(DefKind::Fn | DefKind::AssocFn, callee) =
-                        self.typeck.qpath_res(qpath, function.hir_id)
-                    && let Some(local) = resolve_callee(
-                        self.tcx,
-                        self.typeck,
-                        self.typing_env,
-                        callee,
-                        function.hir_id,
-                    )
-                    .as_local()
-                {
-                    self.call(local, arguments.iter());
-                }
-            }
-            _ => {}
-        }
-        intravisit::walk_expr(self, expr);
     }
 }
