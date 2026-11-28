@@ -20,6 +20,13 @@ fn bundled_sqlite_keeps_a_statements_journal_in_memory_up_to_124_kib() {
     db.close();
 }
 
+#[test]
+fn bundled_sqlite_has_an_expression_depth_limit_of_4000() {
+    let db = TestDatabase::open("");
+    assert!(db.value::<bool>("SELECT sqlite_compileoption_used('MAX_EXPR_DEPTH=4000')"));
+    db.close();
+}
+
 #[tokio::test]
 async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_queries() {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};

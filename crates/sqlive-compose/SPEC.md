@@ -863,8 +863,11 @@ issues/src/lib.rs:12:1: no such column: i.titel
 ```
 
 SQLite refuses an unknown table, function and collation the same way. SQLite
-also refuses a statement that opens more cursors than its limit, which a read
-that spreads a fragment over views many times can reach.
+also refuses a statement that reads a WITH table after it has opened as many
+tables as its expression depth limit, 4,000 in the SQLite coven builds, and
+the compiler refuses to compile with a SQLite built with another limit. Each
+name of a WITH table or a view, and each spread, opens its tables again,
+MATERIALIZED or not.
 
 **Parameters.** A `:parameter` that the header doesn't declare fails, and so
 does a header field that the SQL doesn't name:

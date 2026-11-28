@@ -371,10 +371,17 @@ pub enum Audience {
   SQLite built without `SQLITE_ENABLE_MEMORY_MANAGEMENT`, which libsqlite3-sys
   no longer sets itself: releasing memory would then free only the releasing
   connection's pages ([sqlive's spec, section
-  10](../crates/sqlive/SPEC.md#memory)). The app's workspace sets coven's
+  10](../crates/sqlive/SPEC.md#memory)). Coven builds SQLite with an
+  expression depth limit of 4,000 (`SQLITE_MAX_EXPR_DEPTH`), not SQLite's
+  1,000: SQLite refuses a statement that reads a WITH table after it has
+  opened as many tables as that limit, and each name of a WITH table or a view
+  opens that table's tables again, so a read composed of many fragments needs
+  more. It refuses to open with a SQLite built with another limit, as the
+  compiler refuses to compile with one (`compiler_setup`): a read the build
+  accepted could then fail in the app. The app's workspace sets coven's
   `LIBSQLITE3_FLAGS`, `SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE
   -DSQLITE_TEMP_STORE=1 -DSQLITE_STMTJRNL_SPILL=126976
-  -DSQLITE_ENABLE_MEMORY_MANAGEMENT`.
+  -DSQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_MAX_EXPR_DEPTH=4000`.
 - *SQLite settings* tune the store's connections.
   `CovenBuilder::sqlite_settings` takes sqlive's `SqliteSettings`, which coven
   re-exports with the types of its fields; [sqlive's spec, section
@@ -4496,7 +4503,10 @@ pub struct SqlFunction {
 /// coven's part itself. The setup names no view to read whole: sqlive decides
 /// that from each view's SQL, in the compiler as in a store. `coven-schema`
 /// defines it with its `compiler` feature, which adds sqlive-compose's
-/// compiler and no async runtime. `coven` doesn't re-export it.
+/// compiler and no async runtime. `coven` doesn't re-export it. The compiler
+/// refuses to compile an app's statements with a SQLite built with another
+/// expression depth limit than coven's, so the build accepts the reads the
+/// app's SQLite prepares.
 #[cfg(feature = "compiler")]
 pub fn compiler_setup() -> sqlive_compose::compiler::Setup;
 

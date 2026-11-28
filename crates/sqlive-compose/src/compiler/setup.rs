@@ -24,7 +24,7 @@ pub struct Setup {
 }
 
 impl Setup {
-    pub(crate) fn probe(&self) -> sqlive_reads::SqliteResult<sqlive_reads::SchemaProbe> {
+    pub(crate) fn probe(&self) -> Result<sqlive_reads::SchemaProbe, sqlive_reads::ProbeOpenError> {
         sqlive_reads::SchemaProbe::open(&self.sql, &self.functions, &self.collations)
     }
 }

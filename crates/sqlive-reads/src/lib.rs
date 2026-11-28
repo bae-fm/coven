@@ -40,6 +40,10 @@ mod select_syntax;
 mod source_order;
 pub mod sql;
 mod sql_value;
+mod sqlite_build;
+pub use sqlite_build::{
+    expression_depth_limit_built, OtherExpressionDepthLimit, EXPRESSION_DEPTH_LIMIT,
+};
 mod sql_walk;
 mod table_keys;
 mod table_places;
@@ -68,7 +72,8 @@ pub use rusqlite;
 pub use rusqlite::{Error as SqliteError, Result as SqliteResult, Row, ToSql};
 pub use schema_objects::{MainSchema, FTS5_CONTENT, MAIN_TABLES};
 pub use schema_probe::{
-    ColumnOrigin, ProbedColumn, ProbedStatement, SchemaProbe, StandInFunction, TableColumn,
+    ColumnOrigin, ProbeOpenError, ProbedColumn, ProbedStatement, SchemaProbe, StandInFunction,
+    TableColumn,
 };
 pub use scope_lookup::{Judging, Lookup, Lookups, NoAnswer, LOOKUP_STEPS};
 pub use scope_order::LastRow;

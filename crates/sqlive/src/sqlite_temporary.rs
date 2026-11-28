@@ -103,6 +103,9 @@ pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirector
 /// memory. It refuses one built without `SQLITE_ENABLE_MEMORY_MANAGEMENT`
 /// too: each connection would keep its unused pages apart, and releasing
 /// memory on one connection would leave every other's (SPEC.md section 10).
+/// It refuses one built with another expression depth limit than coven's:
+/// the compiler checked the app's reads against that limit, and SQLite would
+/// refuse some of them under another.
 pub(crate) fn opening<F: HostError, R: HostError>() -> Result<(), crate::Error<F, R>> {
     // SAFETY: the option is a NUL-terminated string that outlives the call.
     if unsafe { rusqlite::ffi::sqlite3_compileoption_used(c"ENABLE_MEMORY_MANAGEMENT".as_ptr()) }
@@ -119,6 +122,11 @@ pub(crate) fn opening<F: HostError, R: HostError>() -> Result<(), crate::Error<F
                 what: "SQLite keeps temporary tables in files unless a connection asks for memory (SQLITE_TEMP_STORE below 2)",
             });
         }
+    }
+    if sqlive_reads::expression_depth_limit_built().is_err() {
+        return Err(crate::Error::Invariant {
+            what: "SQLite was built with coven's expression depth limit (SQLITE_MAX_EXPR_DEPTH)",
+        });
     }
     lock_unpoisoned(&TEMPORARY).opened = true;
     Ok(())

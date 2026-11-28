@@ -84,6 +84,32 @@ pub struct TableColumn {
     pub not_null: bool,
 }
 
+/// Why a schema probe doesn't open.
+#[derive(Debug)]
+pub enum ProbeOpenError {
+    /// The SQLite this process runs is not the build the app runs.
+    SqliteBuild(crate::OtherExpressionDepthLimit),
+    /// SQLite fails to run the schema or to register a stand-in.
+    Sqlite(rusqlite::Error),
+}
+
+impl std::fmt::Display for ProbeOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SqliteBuild(error) => error.fmt(f),
+            Self::Sqlite(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ProbeOpenError {}
+
+impl From<rusqlite::Error> for ProbeOpenError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(error)
+    }
+}
+
 /// An in-memory database that holds a schema's tables, views and triggers.
 pub struct SchemaProbe {
     connection: Connection,
@@ -97,11 +123,14 @@ impl SchemaProbe {
     /// `functions` and `collations` were registered under the names the
     /// schema uses: SQLite refuses to prepare SQL that names a function or a
     /// collation it doesn't know. A collation compares text byte by byte.
+    /// It refuses a SQLite built with another expression depth limit than the
+    /// app's, so that it prepares what the app's SQLite prepares.
     pub fn open(
         schema: &[String],
         functions: &[StandInFunction],
         collations: &[String],
-    ) -> rusqlite::Result<Self> {
+    ) -> Result<Self, ProbeOpenError> {
+        crate::expression_depth_limit_built().map_err(ProbeOpenError::SqliteBuild)?;
         let connection = Connection::open_in_memory()?;
         for function in functions {
             let mut flags = FunctionFlags::SQLITE_UTF8;

@@ -28,5 +28,14 @@
 # that way itself until 0.39; without it each connection keeps a pool of its
 # own, and only the releasing one's empties.
 #
+# A statement may open up to 4,000 tables before it reads a WITH table, not
+# SQLite's 1,000: SQLite refuses one that reads a WITH table after as many
+# tables as its expression depth limit, and each name of a WITH table or a
+# view opens that table's tables again, MATERIALIZED or not. The release
+# editor's draft, read as one statement, reads its last WITH table after
+# 1,885 tables. The same limit bounds how deep an expression nests. sqlive
+# and the compiler refuse a SQLite built with another limit, so a read the
+# compiler accepts prepares in the app.
+#
 # An app's workspace that builds libsqlite3-sys sets the same.
-LIBSQLITE3_FLAGS = { value = "SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1 -DSQLITE_STMTJRNL_SPILL=126976 -DSQLITE_ENABLE_MEMORY_MANAGEMENT", force = true }
+LIBSQLITE3_FLAGS = { value = "SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1 -DSQLITE_STMTJRNL_SPILL=126976 -DSQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_MAX_EXPR_DEPTH=4000", force = true }

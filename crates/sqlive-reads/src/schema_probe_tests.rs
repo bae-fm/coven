@@ -190,3 +190,12 @@ fn a_column_of_sqlites_own_schema_table_names_its_declared_type() {
     let origin = statement.columns[0].origin.as_ref().unwrap();
     assert_eq!(origin.declared_type.as_deref(), Some("TEXT"));
 }
+
+#[test]
+fn a_statement_reads_a_with_table_after_more_than_1000_tables() {
+    let probe = SchemaProbe::open(&["CREATE TABLE t(x)".to_owned()], &[], &[]).unwrap();
+    let columns = vec!["(SELECT x FROM t)"; 1_100].join(", ");
+    probe
+        .prepare(&format!("WITH w AS (SELECT x FROM t) SELECT {columns}, (SELECT x FROM w)"))
+        .unwrap();
+}

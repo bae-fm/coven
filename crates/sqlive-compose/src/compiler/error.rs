@@ -393,7 +393,7 @@ pub enum Cause {
     ManifestRead(serde_json::Error),
     /// The schema's setup fails.
     #[error("the schema's setup fails: {0}")]
-    Setup(sqlive_reads::SqliteError),
+    Setup(sqlive_reads::ProbeOpenError),
     /// The crate's manifest can't be written as text.
     #[error("can't write the crate's manifest: {0}")]
     Manifest(serde_json::Error),

@@ -1923,7 +1923,7 @@ Every SQLite setting, and who chooses it. Settings marked *host* are fields of
 | `foreign_key_check` | nobody | a call sqlive doesn't offer |
 | `integrity_check`, `quick_check` | nobody | they read every row and index; a statement that meets damage fails with `DamagedDatabase` instead |
 | `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
-| `sqlite3_limit` limits | SQLite's | sqlive sets none |
+| `sqlite3_limit` limits | SQLite's | sqlive sets none at run time; the expression depth limit is the one SQLite is built with, `EXPRESSION_DEPTH_LIMIT`, and sqlive refuses to open a database with a SQLite built with another, because the compiler checked the host's reads against that limit and SQLite would refuse some of them under another |
 | `sqlite3_db_config` options | sqlive | double-quoted string literals off; defensive mode on, so SQL that could damage the database file fails, such as writing a virtual table's own tables directly; the query planner's stability guarantee on, so the plan of every statement, the host's and the app's, never depends on the values bound to it: otherwise each use of a cached statement whose plan read a bound value parses and plans it again, once per row of a write's lookups, and a `LIKE ?` gives up the index range it would take from a bound prefix; the rest at SQLite's defaults, not offered |
 
 ```rust
@@ -2333,6 +2333,7 @@ later call and live query fails with the host's failure built from it.
 | `LOOKUP_STEPS` | 1,000: the most SQLite steps one question about a changed row runs before the query runs again | 7 |
 | `ROWS_PER_TABLE` | 10,000: past this many changed rows of one table, a write keeps only that the table changed | 2 |
 | `CHECKPOINT_PAGES` | 1,000: the WAL size at which sqlive checkpoints where the host leaves it unset | 10 |
+| `EXPRESSION_DEPTH_LIMIT` | 4,000: the expression depth limit SQLite must be built with (`SQLITE_MAX_EXPR_DEPTH`): SQLite refuses a statement that reads a WITH table after it has opened as many tables, or whose expressions nest deeper | 10 |
 
 ### What's proved
 
