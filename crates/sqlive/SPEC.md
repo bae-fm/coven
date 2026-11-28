@@ -1336,9 +1336,10 @@ compares a column of a table before it, other than by `IS`. A statement with
 any other join in parentheses narrows nothing, and so does one whose join in
 parentheses has an alias, starts with another, or joins a table by USING.
 
-A view sqlive reads whole, or a table function, in a join narrows the tables
-beside it, as `json_each(?1)` lists the ids an app passes in: a
-lookup asks the view or the function. The view's own tables are read whole. A
+A view sqlive reads whole, a recursive CTE (section 8), or a table function, in
+a join narrows the tables beside it, as `json_each(?1)` lists the ids an app
+passes in: a lookup asks the view, the CTE or the function. The view's and the
+CTE's own tables are read whole. A
 table function of another table's columns, as `json_each(l.items)` or
 `json_each(l.rowid)`, narrows nothing: it lists rows only beside that table's
 rows, so a lookup can't ask it alone. Nor does one whose arguments read the
@@ -1531,7 +1532,7 @@ any other equality does, so a statement spliced into another as a subquery in
 FROM narrows as its tables written out would: the album grid can read each
 cover through `(SELECT c.id, c.file FROM covers AS c) AS shown WHERE shown.id =
 (SELECT r.id ... LIMIT 1)`, and `covers` narrows to the covers of the albums'
-releases. A view sqlive can't read this way, as one with a recursive CTE, is
+releases. A view sqlive can't read this way, as one with a NATURAL join, is
 read whole; a lookup
 still asks it, so it narrows the tables beside it. SQLite names each read inside
 a view that sqlive reads whole by the innermost view or CTE the read goes
@@ -1583,9 +1584,22 @@ another folder doesn't rerun the pane. A WITH inside a subquery or a CTE can
 declare a CTE under the name of an outer one. Where the inner WITH's SQL
 names it, the name means the inner CTE, as SQLite reads it, and an outer CTE
 whose own SQL names it still reads the outer one. A FROM item that names such a
-CTE narrows the tables of the CTE it reads. A statement with a recursive CTE of
-its own, or with `x IN table`, narrows nothing: it depends on every row of each
-table it read.
+CTE narrows the tables of the CTE it reads. A statement with `x IN table`
+narrows nothing: it depends on every row of each table it read.
+
+A recursive CTE, one whose SQL names itself, is read as a view sqlive can't
+read is: for its values alone, with every table its SQL reads whole, those it
+reads through other CTEs and views too. Each row of such a CTE comes of the rows
+before it, so a condition on one row says nothing of the rows of its tables. A
+library finds every work above a release's works with `WITH RECURSIVE above(id)
+AS (SELECT w.work_id FROM track_works AS w WHERE ... UNION SELECT p.parent_id
+FROM work_parts AS p JOIN above ON p.child_id = above.id)`. A write to any row
+of `track_works` or `work_parts` reruns the read, and the rest of the statement
+narrows as it would without the CTE. SQLite names each read inside the CTE by
+the CTE, or by the innermost CTE or view inside it, so a read through such a
+name narrows no table, as for a view read whole. A lookup asks the CTE alone
+only when every CTE its SQL can name sits in a WITH of no other core, since
+sqlive doesn't read the SQL to see whether it names a row around it.
 
 An OR that narrows the rows of such a query passes into its tables too, once
 sqlive places the query after the tables the OR's equalities join: in each arm,
@@ -1621,16 +1635,16 @@ as a WHERE on `metered` does, and so does every column in the cases where a
 place reads them all (section 4), and each column of a table SQLite reports
 reading through a view or CTE that sqlive didn't read as places of its own.
 
-A view read whole in such a column adds no dependency either: the live query
-doesn't run again when a table that only the view reads changes, and the view
-widens no other table's scope. A music app's storage row counts the folders
-under its library through a view with a recursive CTE, so a statement that
-joins the row and selects none of its counts doesn't rerun when a folder is
-added. SQLite names each read inside such a view as the paragraph
-above says. When a view the statement reads whole elsewhere can name a read
-the same way, sqlive can't tell the two apart, so that name's reads count.
-When sqlive's parser can't read a view the statement reads whole elsewhere,
-every view read whole in an unread column counts.
+A view read whole, or a recursive CTE, in such a column adds no dependency
+either: the live query doesn't run again when a table that only the view or the
+CTE reads changes, and neither widens another table's scope. A music app's
+storage row counts the folders under its library through a recursive CTE, so a
+statement that joins the row and selects none of its counts doesn't rerun when
+a folder is added. SQLite names each read inside such a view or CTE as the
+paragraphs above say. When a view or CTE the statement reads whole elsewhere
+can name a read the same way, sqlive can't tell the two apart, so that name's
+reads count. When sqlive's parser can't read a view the statement reads whole
+elsewhere, every view and CTE read whole in an unread column counts.
 
 ### What is read whole
 
@@ -2195,10 +2209,12 @@ The report takes each parameter that a column is compared with to hold a value
 that isn't NULL and that SQLite compares as it is, and takes each run to return
 as many rows as its LIMIT. The report has one entry for each place the
 statement reads a table, and for each place it reads a view whole: each item of
-a FROM that names one. So a statement that reads one table by its key in one
-place and reads every row of it in another has two entries, and the second says
-which place to change. An entry gives the line and column where the statement's
-SQL writes the name, each from 1, and the column in characters. A name that a
+a FROM that names one. Each table a recursive CTE reads has an entry at each
+item of a FROM that names the CTE, whole for the reason `a recursive CTE`. So a
+statement that reads one table by its key in one place and reads every row of it
+in another has two entries, and the second says which place to change. An entry
+gives the line and column where the statement's SQL writes the name, each from
+1, and the column in characters. A name that a
 view's SQL writes has no such place, so its entry names the view, or the CTE of
 the view's SQL that writes it. Where two items of one view or such a CTE read
 one table by one name, they have one entry. A CTE that several names read gives

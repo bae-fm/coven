@@ -8,7 +8,8 @@ CREATE TABLE picked(id TEXT);
 CREATE VIRTUAL TABLE notes USING fts5(body);
 CREATE VIEW later AS WITH RECURSIVE c(id) AS (
     SELECT min(id) FROM releases UNION SELECT r.id FROM releases r JOIN c ON r.id > c.id
-) SELECT id FROM c;";
+) SELECT id FROM c;
+CREATE VIEW natural_ids AS WITH c(id) AS (SELECT id FROM releases) SELECT id FROM c NATURAL JOIN picked;";
 
 /// A view whose SQL SQLite reads and the parser doesn't: its comment never
 /// ends.
@@ -90,12 +91,30 @@ fn what_the_main_schema_lacks_keeps_the_statement_whole() {
     );
 }
 
+/// A recursive CTE is read whole, as a view sqlive can't read: each table
+/// its SQL reads, through another CTE or a view too, is whole, and the rest
+/// of the statement narrows.
 #[test]
-fn a_recursive_cte_keeps_the_statement_whole() {
-    assert_whole(
-        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3)
-         SELECT x FROM c",
-        "a recursive CTE",
+fn a_recursive_cte_keeps_its_tables_whole_beside_a_narrowed_table() {
+    assert_eq!(
+        report(
+            "WITH RECURSIVE c(id) AS (
+                 SELECT min(id) FROM releases UNION SELECT r.id FROM releases r JOIN c ON r.id > c.id)
+             SELECT t.title FROM tracks t JOIN c ON c.id = t.release_id WHERE t.id = ?1"
+        ),
+        "releases: whole: a recursive CTE\ntracks: keyed by id"
+    );
+    assert_eq!(
+        report(
+            "WITH p AS (SELECT id FROM picked), c(x) AS (
+                 SELECT 1 FROM p UNION ALL SELECT l.id FROM later l JOIN c ON l.id > c.x)
+             SELECT x FROM c"
+        ),
+        "picked: whole: a recursive CTE\nreleases: whole: a recursive CTE"
+    );
+    assert_eq!(
+        report("SELECT t.title FROM tracks t JOIN later l ON l.id = t.release_id WHERE t.id = ?1"),
+        "releases: whole: a recursive CTE\ntracks: keyed by id"
     );
 }
 
@@ -128,8 +147,10 @@ fn a_statement_that_is_no_select_is_whole() {
 #[test]
 fn a_view_sqlive_cannot_read_is_whole_beside_a_narrowed_table() {
     assert_eq!(
-        report("SELECT t.title FROM tracks t JOIN later l ON l.id = t.release_id WHERE t.id = ?1"),
-        "later: whole: a recursive CTE\ntracks: keyed by id"
+        report(
+            "SELECT t.title FROM tracks t JOIN natural_ids n ON n.id = t.release_id WHERE t.id = ?1"
+        ),
+        "natural_ids: whole: a NATURAL or RIGHT join\ntracks: keyed by id"
     );
 }
 
@@ -203,15 +224,25 @@ fn a_subquerys_window_is_looked_up() {
     );
 }
 
+/// A read through a name that a view or a recursive CTE read whole uses
+/// inside it may be the view's or the CTE's.
 #[test]
-fn a_table_read_through_a_name_of_a_view_read_whole_is_whole() {
+fn a_table_read_through_a_name_of_a_view_or_cte_read_whole_is_whole() {
+    assert_eq!(
+        report(
+            "WITH c AS (SELECT id, title FROM tracks WHERE id = ?1)
+             SELECT c.title FROM c JOIN natural_ids n"
+        ),
+        "natural_ids: whole: a NATURAL or RIGHT join\n\
+         tracks: whole: read through `c`, which a view or CTE read whole also names"
+    );
     assert_eq!(
         report(
             "WITH c AS (SELECT id, title FROM tracks WHERE id = ?1)
              SELECT c.title FROM c JOIN later l"
         ),
-        "later: whole: a recursive CTE\n\
-         tracks: whole: read through `c`, which a view read whole also names"
+        "releases: whole: a recursive CTE\n\
+         tracks: whole: read through `c`, which a view or CTE read whole also names"
     );
 }
 

@@ -203,7 +203,7 @@ contentful FTS5 table: the schema lists it as a table, every column of no
 affinity (`Virtual`); `virtual` is any other virtual table, and a hidden
 column of an FTS5 table. -/
 inductive WholeShape where
-  | natural | right | recursive | inTable | virtual
+  | natural | right | inTable | virtual
   deriving DecidableEq, Repr, Inhabited
 
 structure Statement where

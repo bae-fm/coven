@@ -189,6 +189,56 @@ async fn a_view_with_a_recursive_cte_keeps_its_tables_whole() {
     db.close();
 }
 
+/// A statement's own recursive CTE is read as a view read whole: each
+/// table its SQL reads is whole, a write to any row of one reruns the query,
+/// and the rest of the statement narrows.
+#[tokio::test]
+async fn a_recursive_cte_keeps_its_tables_whole_and_the_rest_narrows() {
+    let db = TestDatabase::open(MUSIC);
+    follows(
+        &db,
+        "WITH RECURSIVE c(id) AS (SELECT min(id) FROM releases UNION SELECT r.id FROM releases r JOIN c ON r.id > c.id) SELECT t.title FROM tracks t JOIN c ON c.id = t.release WHERE t.id = 1",
+        vec![],
+        &[
+            ("UPDATE tracks SET title = '.' WHERE id = 4", false),
+            ("UPDATE releases SET id = 'r9' WHERE id = 'r3'", true),
+            ("INSERT INTO releases VALUES ('r0','q',1999)", true),
+            ("UPDATE tracks SET title = 'uno' WHERE id = 1", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// A recursive CTE that reads another CTE of the statement keeps that CTE's
+/// tables whole, though the statement also reads the CTE where it narrows
+/// them; one that only a column nothing reads reads adds no dependency.
+#[tokio::test]
+async fn a_recursive_cte_keeps_whole_what_it_reads_and_counts_for_nothing_unread() {
+    let db = TestDatabase::open(MUSIC);
+    follows(
+        &db,
+        "WITH p AS (SELECT id, album FROM releases), c(id) AS (SELECT min(id) FROM p UNION SELECT p.id FROM p JOIN c ON p.id > c.id) SELECT p.album || ':' || (SELECT count(*) FROM c) FROM p WHERE p.id = 'r1'",
+        vec![],
+        &[
+            ("UPDATE tracks SET title = '.' WHERE id = 4", false),
+            ("UPDATE releases SET id = 'r9' WHERE id = 'r3'", true),
+        ],
+    )
+    .await;
+    follows(
+        &db,
+        "WITH RECURSIVE c(id) AS (SELECT min(id) FROM releases UNION SELECT r.id FROM releases r JOIN c ON r.id > c.id) SELECT w.title FROM (SELECT t.title, (SELECT count(*) FROM c) AS n FROM tracks t WHERE t.id = 1) AS w",
+        vec![],
+        &[
+            ("INSERT INTO releases VALUES ('r0','q',1999)", false),
+            ("UPDATE tracks SET title = 'uno' WHERE id = 1", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
 const SCANS: &str = "CREATE TABLE scan(id INTEGER PRIMARY KEY, path TEXT, root TEXT, hash TEXT);
 CREATE TABLE files(id INTEGER PRIMARY KEY, root TEXT, path TEXT, name TEXT);
 CREATE TABLE covers(id INTEGER PRIMARY KEY, hash TEXT, url TEXT);

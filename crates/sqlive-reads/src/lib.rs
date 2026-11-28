@@ -18,6 +18,7 @@ mod never_null;
 mod read_capture;
 mod read_report;
 mod read_set;
+mod recursive_cte;
 mod reference_columns;
 mod result_nulls;
 mod row_order;

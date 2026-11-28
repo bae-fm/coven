@@ -14,10 +14,10 @@
 //! which makes one row of many, or a window function. The model states the
 //! rule as `Statement.pruned` and proves it in `crates/sqlive/proofs`.
 //!
-//! A view read whole in such a column counts for nothing either, nor do the
-//! reads SQLite reports inside it, which name the view, or a view or CTE
-//! inside it, unless a view the statement reads whole elsewhere can report a
-//! read by the same name.
+//! A view or a recursive CTE read whole in such a column counts for nothing
+//! either, nor do the reads SQLite reports inside it, which name the view or
+//! CTE, or a view or CTE inside it, unless a view or CTE the statement reads
+//! whole elsewhere can report a read by the same name.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -93,8 +93,14 @@ pub(crate) fn unread_reads<T>(sources: &[Source], live: &BTreeMap<String, T>) ->
     let mut live_views = BTreeSet::new();
     let mut live_inside = Some(BTreeSet::new());
     for source in sources.iter().filter(|source| !source.unread) {
-        let Object::View { name, inside, .. } = &source.object else { continue };
-        live_views.insert(name.as_str());
+        let inside = match &source.object {
+            Object::View { name, inside, .. } => {
+                live_views.insert(name.as_str());
+                inside
+            }
+            Object::Recursive { inside, .. } => inside,
+            Object::Table { .. } | Object::Function | Object::Derived => continue,
+        };
         match (inside, &mut live_inside) {
             (Some(inside), Some(names)) => names.extend(inside.iter().cloned()),
             _ => live_inside = None,
@@ -111,6 +117,11 @@ pub(crate) fn unread_reads<T>(sources: &[Source], live: &BTreeMap<String, T>) ->
                 if !live_views.contains(name.as_str()) && !live_inside.contains(name) {
                     found.sources.insert(name.clone());
                 }
+                let inside = inside.iter().flatten().filter(|name| !live_inside.contains(*name));
+                found.inside.extend(inside.cloned());
+            }
+            Object::Recursive { inside, .. } => {
+                let Some(live_inside) = &live_inside else { continue };
                 let inside = inside.iter().flatten().filter(|name| !live_inside.contains(*name));
                 found.inside.extend(inside.cloned());
             }

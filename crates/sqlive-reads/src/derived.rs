@@ -51,6 +51,13 @@ pub(crate) struct Declared<'a> {
     scope: usize,
 }
 
+impl Declared<'_> {
+    /// Its name, lowercase.
+    pub(crate) fn name(&self) -> String {
+        crate::sql::name(self.cte.tbl_name.0).to_ascii_lowercase()
+    }
+}
+
 impl<'a> Ctes<'a> {
     /// These CTEs and `with`'s, which sits in no other core when `alone`,
     /// numbered from `numbered` on, which counts them. A CTE of an outer
@@ -83,6 +90,24 @@ impl<'a> Ctes<'a> {
         Some(Self { visible: self.visible[..declared.scope].to_vec(), reading })
     }
 
+    /// The CTEs visible here, as the CTEs of each WITH, outermost first.
+    pub(crate) fn withs(&self) -> impl Iterator<Item = &[Declared<'a>]> {
+        self.visible.chunk_by(|one, next| one.scope == next.scope)
+    }
+
+    /// `select` after a WITH of every CTE visible here, when every one's WITH
+    /// sits in no other core, so the SQL names no row around it: a SELECT
+    /// that can name any of them reads alone.
+    pub(crate) fn around_every(&self, select: &str) -> Option<String> {
+        let numbers: Vec<usize> = self.numbers().collect();
+        self.visible.iter().all(|declared| declared.alone).then(|| self.around(&numbers, select))?
+    }
+
+    /// The numbers of the CTEs visible here.
+    pub(crate) fn numbers(&self) -> impl Iterator<Item = usize> + '_ {
+        self.visible.iter().map(|declared| declared.number)
+    }
+
     /// `select`, a SELECT that reads the CTEs numbered `numbers`, after a
     /// WITH of those visible here: one WITH for each WITH they are declared
     /// in, each around the next, so each CTE's SQL names what it names where
@@ -108,7 +133,9 @@ impl<'a> Ctes<'a> {
 /// What a FROM item reads rows from, as SQL of its own.
 pub(crate) enum Named<'a, 'v> {
     Subquery(&'a Select<'a>),
-    Cte(Declared<'a>),
+    /// A CTE whose SQL doesn't name itself, with the CTEs its SQL can name
+    /// (`Ctes::reading`).
+    Cte(Declared<'a>, Ctes<'a>),
     /// One of the app's views, by its stored name.
     View(&'v str),
 }
@@ -226,13 +253,9 @@ pub(crate) fn read_derived_item<'a>(
                 },
             )
         }
-        Named::Cte(declared) => {
+        Named::Cte(declared, inner) => {
             let cte = declared.cte;
-            let name = crate::sql::name(cte.tbl_name.0).to_ascii_lowercase();
-            // A CTE naming itself, or one naming it, recurses.
-            let Some(inner) = ctes.reading(&declared) else {
-                return Ok(Err(Unread("a recursive CTE")));
-            };
+            let name = declared.name();
             planner.inlined.push(name.clone());
             let around = planner.within.replace(name.clone());
             let names = cte.columns.map(crate::sql::column_list_names);
@@ -351,9 +374,9 @@ fn read_derived<'a>(
             _ => ColumnValue::Unknown,
         });
         let volatile = arms.iter().any(|(core, columns, _)| {
-            // Every column of a core that reads a view read whole is one
-            // sqlive can't judge.
-            planner.reads_view_whole(*core)
+            // Every column of a core that reads a view or CTE read whole is
+            // one sqlive can't judge.
+            planner.reads_whole(*core)
                 || columns.get(position).is_some_and(|output| match &output.value {
                     OutputValue::Volatile => true,
                     OutputValue::Passed(item, column) => {

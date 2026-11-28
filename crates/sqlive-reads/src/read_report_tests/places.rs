@@ -39,6 +39,20 @@ fn a_cte_that_two_names_read_gives_its_place_one_entry() {
     );
 }
 
+/// Each table a recursive CTE reads has an entry at each place that names
+/// the CTE.
+#[test]
+fn a_recursive_cte_gives_its_tables_an_entry_at_each_place_that_names_it() {
+    assert_report(
+        "WITH c(x) AS (SELECT 1 UNION ALL SELECT t.id FROM tracks t JOIN c ON t.id = c.x + 1)
+SELECT (SELECT count(*) FROM c), (SELECT max(x) FROM c)",
+        &[
+            "tracks at line 2, column 30: whole: a recursive CTE",
+            "tracks at line 2, column 54: whole: a recursive CTE",
+        ],
+    );
+}
+
 /// The parameters the plan numbers, a schema's name, quotes and a column of
 /// the table's name leave each place where the SQL writes it, and a column is
 /// counted in characters.

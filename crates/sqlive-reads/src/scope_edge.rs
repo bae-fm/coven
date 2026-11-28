@@ -300,7 +300,7 @@ impl Planner<'_, '_> {
                     let items = &self.cores[scope].items;
                     items.iter().any(|item| {
                         let item = &self.items[*item];
-                        item.columns.any_volatile() || (views && item.is_view_read_whole())
+                        item.columns.any_volatile() || (views && item.is_read_whole())
                     })
                 }),
             },

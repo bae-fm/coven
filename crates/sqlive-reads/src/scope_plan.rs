@@ -241,7 +241,9 @@ impl Source {
     pub(crate) fn table(&self) -> Option<&str> {
         match &self.object {
             Object::Table { name, .. } => Some(name),
-            Object::View { .. } | Object::Function | Object::Derived => None,
+            Object::View { .. } | Object::Recursive { .. } | Object::Function | Object::Derived => {
+                None
+            }
         }
     }
 }
@@ -260,6 +262,11 @@ pub(crate) enum Object {
     /// SQLite can report a read through inside it (`whole_view_names.rs`),
     /// unless the parser can't read them.
     View { name: String, why: String, inside: Option<BTreeSet<String>> },
+    /// A CTE whose SQL names itself, read whole: the tables, lowercase, its
+    /// SQL reads, through the CTEs and views it reads too, and the names
+    /// SQLite can report a read through while it runs the CTE
+    /// (`recursive_cte.rs`), unless the parser can't read them.
+    Recursive { tables: BTreeSet<String>, inside: Option<BTreeSet<String>> },
     /// A table function.
     Function,
     /// A subquery, CTE or view whose own tables sqlive reads as sources of
@@ -479,16 +486,17 @@ impl Planner<'_, '_> {
     }
 
     /// Note `found`, the names SQLite can report a read through inside a
-    /// view the statement reads whole (`whole_view_names.rs`).
-    pub(crate) fn note_whole_view(&mut self, found: Result<BTreeSet<String>, String>) {
+    /// view the statement reads whole (`whole_view_names.rs`), or a CTE that
+    /// names itself (`recursive_cte.rs`).
+    pub(crate) fn note_read_whole(&mut self, found: Result<BTreeSet<String>, String>) {
         match (found, &mut self.whole_names) {
             (Ok(found), Some(names)) => names.extend(found),
             (Ok(_), None) => {}
             (Err(why), _) => {
                 tracing::debug!(
                     %why,
-                    "sqlive can't read the names inside a view read whole, so no read through \
-                     a view or CTE narrows"
+                    "sqlive can't read the names inside a view or CTE read whole, so no read \
+                     through a view or CTE narrows"
                 );
                 self.whole_names = None;
             }
@@ -585,10 +593,18 @@ impl Planner<'_, '_> {
         self.cores[core].names.extend(names);
     }
 
-    /// Whether `core` reads a view read whole, which can show what the host
-    /// holds in memory as well as its tables.
-    pub(crate) fn reads_view_whole(&self, core: usize) -> bool {
-        self.cores[core].items.iter().any(|item| self.items[*item].is_view_read_whole())
+    /// Whether `core` reads a view or CTE read whole, which can show what
+    /// the host holds in memory as well as its tables, itself or through a
+    /// subquery, CTE or view in its FROM.
+    pub(crate) fn reads_whole(&self, core: usize) -> bool {
+        self.cores[core].items.iter().any(|item| {
+            let item = &self.items[*item];
+            item.is_read_whole()
+                || item
+                    .derived
+                    .as_ref()
+                    .is_some_and(|derived| derived.cores.iter().any(|arm| self.reads_whole(*arm)))
+        })
     }
 
     /// Whether `select`, which the planner has read, is volatile: its cores'
@@ -607,18 +623,22 @@ impl Planner<'_, '_> {
     /// Whether a FROM subquery or CTE read in a core that sits in `parent`,
     /// as the items from `items` on and the cores from `cores` on, can be
     /// read alone: its core sits in no other, or every name in its cores'
-    /// clauses names one of its own items, so it returns the same rows
-    /// wherever the statement reads it.
+    /// clauses names one of its own items and each CTE it reads whole reads
+    /// alone, so it returns the same rows wherever the statement reads it.
     pub(crate) fn alone(&self, parent: Option<usize>, items: usize, cores: usize) -> bool {
         parent.is_none()
-            || self.cores[cores..]
+            || (self.cores[cores..]
                 .iter()
                 .all(|core| core.names.iter().all(|item| item.is_some_and(|item| item >= items)))
+                && self.items[items..].iter().all(|item| {
+                    !matches!(item.source.object, Object::Recursive { .. })
+                        || item.source.from.is_some()
+                }))
     }
 
     /// The numbers of the CTEs that the items from `items` on read.
     pub(crate) fn ctes_read(&self, items: usize) -> Vec<usize> {
-        self.items[items..].iter().filter_map(|item| item.cte).collect()
+        self.items[items..].iter().flat_map(|item| item.ctes.iter().copied()).collect()
     }
 }
 
@@ -817,7 +837,7 @@ fn read_core<'a>(
         Ok(subqueries) => subqueries,
         Err(unread) => return Ok(Err(unread)),
     };
-    planner.cores[core].volatile = planner.volatile(core, &found) || planner.reads_view_whole(core);
+    planner.cores[core].volatile = planner.volatile(core, &found) || planner.reads_whole(core);
     // A `*` over columns sqlive doesn't know reads whatever it spans, and
     // every result column reads what it names then.
     let (clause_parts, outputs) = match crate::derived::arm_columns(planner, core, select) {

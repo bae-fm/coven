@@ -12,8 +12,8 @@ use crate::schema_objects::SchemaLookups;
 use crate::select_syntax::{parts, window_parts, Part};
 use crate::view_trees::ViewTrees;
 use sqlite3_parser::ast::{
-    Expr, FromClause, JoinConstraint, OneSelect, QualifiedName, ResultColumn, Select, SelectTable,
-    SortedColumn,
+    CommonTableExpr, Expr, FromClause, JoinConstraint, OneSelect, QualifiedName, ResultColumn,
+    Select, SelectTable, SortedColumn,
 };
 
 /// The CTE or view whose SQL the walk is reading, the innermost one.
@@ -140,6 +140,14 @@ impl<'c> Scope<'c, '_> {
             .collect()
     }
 
+    /// The name, lowercase, of the CTE or view `within`.
+    pub(crate) fn name_of<'s>(&'s self, within: &'s Within) -> &'s str {
+        match within {
+            Within::Cte(place) => &self.defined[*place].0,
+            Within::View(name) => name,
+        }
+    }
+
     /// The place of the CTE that `name` names where the walk is, the
     /// innermost of that name.
     fn cte(&self, name: &QualifiedName<'_>) -> Option<usize> {
@@ -233,6 +241,37 @@ impl<'c, 'v, V: Visit> Walk<'c, 'v, V> {
         }
     }
 
+    /// Make `names` the names of CTEs a FROM item can name, whose SQL the
+    /// walk doesn't read: their places.
+    pub(crate) fn name_ctes(&mut self, names: impl IntoIterator<Item = String>) -> Vec<usize> {
+        let mut places = Vec::new();
+        for name in names {
+            places.push(self.scope.defined.len());
+            self.scope.ctes.push((name.clone(), self.scope.defined.len()));
+            self.scope.defined.push((name, Reads::default()));
+        }
+        places
+    }
+
+    /// Make `ctes`, the CTEs of one WITH, names a FROM item can name, then
+    /// read the SQL of each, which can name them too: their places.
+    pub(crate) fn declare<'s>(
+        &mut self,
+        ctes: impl IntoIterator<Item = &'s CommonTableExpr<'s>>,
+    ) -> rusqlite::Result<Vec<usize>> {
+        let ctes: Vec<&CommonTableExpr<'_>> = ctes.into_iter().collect();
+        let places = self.name_ctes(
+            ctes.iter().map(|cte| crate::sql::name(cte.tbl_name.0).to_ascii_lowercase()),
+        );
+        for (cte, place) in ctes.iter().zip(&places) {
+            let around = self.scope.within.replace(Within::Cte(*place));
+            let reads = self.select(cte.select, false);
+            self.scope.within = around;
+            self.scope.defined[*place].1 = reads?;
+        }
+        Ok(places)
+    }
+
     /// Read `select`, a subquery whose first row an expression takes when
     /// `first_row`.
     pub(crate) fn select(
@@ -241,19 +280,7 @@ impl<'c, 'v, V: Visit> Walk<'c, 'v, V> {
         first_row: bool,
     ) -> rusqlite::Result<Reads> {
         let outer = self.scope.ctes.len();
-        let ctes = select.with.iter().flat_map(|with| with.ctes.iter());
-        for cte in ctes.clone() {
-            let name = crate::sql::name(cte.tbl_name.0).to_ascii_lowercase();
-            self.scope.ctes.push((name.clone(), self.scope.defined.len()));
-            self.scope.defined.push((name, Reads::default()));
-        }
-        for (position, cte) in ctes.enumerate() {
-            let place = self.scope.ctes[outer + position].1;
-            let around = self.scope.within.replace(Within::Cte(place));
-            let reads = self.select(cte.select, false);
-            self.scope.within = around;
-            self.scope.defined[place].1 = reads?;
-        }
+        self.declare(select.with.iter().flat_map(|with| with.ctes.iter()))?;
         let mut reads = Reads::default();
         // A compound's ORDER BY sorts by its result columns; a single
         // SELECT's can name its core's columns too.

@@ -40,7 +40,7 @@ CREATE VIRTUAL TABLE docs USING fts5(body);
 CREATE TABLE verdicts (verdict_id INTEGER PRIMARY KEY, kind TEXT NOT NULL) STRICT;
 CREATE VIEW assignees AS SELECT i.id AS issue_id, p.name FROM issues AS i LEFT JOIN people AS p ON p.id = i.assignee_id;
 CREATE VIEW weird AS SELECT i.title FROM issues AS i RIGHT JOIN people AS p ON p.id = i.author_id;
-CREATE VIEW counting AS WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c;";
+CREATE VIEW counting AS WITH RECURSIVE c(n) AS (SELECT min(number) FROM issues UNION SELECT i.number FROM issues AS i JOIN c ON i.number = c.n + 1) SELECT n FROM c;";
 
 /// The tracker's setup step.
 pub(crate) fn setup() -> Setup {

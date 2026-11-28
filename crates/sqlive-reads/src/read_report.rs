@@ -16,7 +16,9 @@ use crate::table_places::SqlPosition;
 
 /// What a live query's statement depends on, as its plan narrows what it
 /// reads. It also depends on every row of each table a view read whole reads,
-/// whatever that table's own entry says.
+/// whatever that table's own entry says, and so of each table a recursive
+/// CTE reads, which has an entry of its own at each place that names the
+/// CTE.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadReport {
     /// The planner can't read the statement, so it depends on every row of
@@ -26,7 +28,8 @@ pub enum ReadReport {
         why: String,
     },
     /// One entry for each place the statement reads a table or a view it
-    /// reads whole, by the object's name and then the place.
+    /// reads whole, and for each table of a recursive CTE at each place that
+    /// names the CTE, by the object's name and then the place.
     Entries(Vec<ReadEntry>),
 }
 
@@ -74,6 +77,9 @@ pub enum ReadRows {
     },
 }
 
+/// Why a CTE whose SQL names itself reads each of its tables whole.
+const RECURSIVE: &str = "a recursive CTE";
+
 /// A table or view, a place that reads it and the name the place reads it
 /// by, which tells apart two places within one view.
 type PlaceKey<'a> = (&'a str, Option<&'a ReadPlace>, &'a str);
@@ -105,20 +111,25 @@ impl ReadReport {
             if source.unread {
                 continue;
             }
-            let (object, why) = match &source.object {
+            let read: Vec<(&String, Option<String>)> = match &source.object {
                 Object::Table { name, within } => {
-                    (name, why_whole(sources, source, within.as_ref(), &scope))
+                    vec![(name, why_whole(sources, source, within.as_ref(), &scope))]
                 }
-                Object::View { name, why, .. } => (name, Some(why.clone())),
+                Object::View { name, why, .. } => vec![(name, Some(why.clone()))],
+                Object::Recursive { tables, .. } => {
+                    tables.iter().map(|table| (table, Some(RECURSIVE.to_owned()))).collect()
+                }
                 Object::Function | Object::Derived => continue,
             };
-            let key = (object.as_str(), source.place.as_ref(), source.qualifier.as_str());
-            let reads = places.entry(key).or_default();
-            reads.why.extend(why.filter(|why| !reads.why.contains(why)));
-            reads.scope = Some(match reads.scope.take() {
-                Some(other) => other.or(scope),
-                None => scope,
-            });
+            for (object, why) in read {
+                let key = (object.as_str(), source.place.as_ref(), source.qualifier.as_str());
+                let reads = places.entry(key).or_default();
+                reads.why.extend(why.filter(|why| !reads.why.contains(why)));
+                reads.scope = Some(match reads.scope.take() {
+                    Some(other) => other.or(scope.clone()),
+                    None => scope.clone(),
+                });
+            }
         }
         let entries = places.into_iter().map(|((object, place, _), PlaceReads { why, scope })| {
             let rows = if why.is_empty() {
@@ -207,7 +218,9 @@ fn why_whole(
         match &sources.inlined {
             None => return Some("a view read whole that the parser can't read".to_owned()),
             Some(inlined) if !inlined.contains(name) => {
-                return Some(format!("read through `{name}`, which a view read whole also names"))
+                return Some(format!(
+                    "read through `{name}`, which a view or CTE read whole also names"
+                ))
             }
             Some(_) => {}
         }

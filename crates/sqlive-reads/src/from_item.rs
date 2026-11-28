@@ -162,27 +162,30 @@ pub(crate) struct FromItem {
     /// The columns, lowercase, a USING join compares with an item to its
     /// left, which a bare name and a `*` take from that item instead.
     pub(crate) using: Vec<String>,
-    /// The CTE it reads, by its number (`derived::Declared`).
-    pub(crate) cte: Option<usize>,
+    /// The CTEs a lookup that asks it runs, by their numbers
+    /// (`derived::Declared`): the CTE it names, or for one that names itself,
+    /// every CTE its SQL can name.
+    pub(crate) ctes: Vec<usize>,
     /// The sides of each OR that narrows it (`scope_or.rs`).
     pub(crate) ors: Vec<Vec<crate::scope_or::Side>>,
-    /// The address of the text of the table's or view's name in the syntax
-    /// tree its FROM was read from (`table_places.rs`).
+    /// The address of the text of the name of its table, of its view, or of
+    /// its CTE that names itself, in the syntax tree its FROM was read from
+    /// (`table_places.rs`).
     pub(crate) named: Option<usize>,
 }
 
 impl FromItem {
     /// Whether sqlive can't tell that a lookup that reads its column `column`
     /// again at a write gets the query's answer: the column is volatile, or
-    /// the item is a view read whole, which can show what the host's memory
-    /// holds, or a clock, as well as its tables.
+    /// the item is a view or CTE read whole, which can show what the host's
+    /// memory holds, or a clock, as well as its tables.
     pub(crate) fn column_unjudged(&self, column: &str) -> bool {
-        self.columns.volatile(column) || self.is_view_read_whole()
+        self.columns.volatile(column) || self.is_read_whole()
     }
 
-    /// Whether it is a view read whole.
-    pub(crate) fn is_view_read_whole(&self) -> bool {
-        matches!(self.source.object, Object::View { .. })
+    /// Whether it is a view or CTE read whole.
+    pub(crate) fn is_read_whole(&self) -> bool {
+        matches!(self.source.object, Object::View { .. } | Object::Recursive { .. })
     }
 
     /// Whether every binding of its core holds a row of it: no LEFT JOIN
@@ -216,7 +219,7 @@ pub(crate) fn read_item<'a>(
         core,
         derived,
         using: Vec::new(),
-        cte: None,
+        ctes: Vec::new(),
         ors: Vec::new(),
         grouped: false,
         named: None,
@@ -226,17 +229,37 @@ pub(crate) fn read_item<'a>(
             let qualifier = qualifier(alias, &name.name);
             if name.db_name.is_none() {
                 if let Some(declared) = ctes.named(&name.name) {
+                    // The planner reads a CTE's SQL only when it doesn't
+                    // name itself, and SQLite refuses any other cycle of
+                    // CTEs.
+                    let inner =
+                        ctes.reading(&declared).expect("a CTE is read inside its own SQL only");
+                    if let Some((source, columns)) = crate::recursive_cte::read_recursive_item(
+                        connection,
+                        planner,
+                        &declared,
+                        &inner,
+                        qualifier.clone(),
+                    )? {
+                        // A lookup that asks it runs every CTE its SQL can
+                        // name.
+                        return Ok(Ok(FromItem {
+                            ctes: inner.numbers().collect(),
+                            named: Some(name.name.0.as_ptr() as usize),
+                            ..item(source, columns, None)
+                        }));
+                    }
                     return read_derived_item(
                         connection,
                         planner,
-                        crate::derived::Named::Cte(declared),
+                        crate::derived::Named::Cte(declared, inner),
                         qualifier,
                         parent,
                         ctes,
                     )
                     .map(|found| {
                         found.map(|(source, columns, derived)| FromItem {
-                            cte: Some(declared.number),
+                            ctes: vec![declared.number],
                             ..item(source, columns, Some(derived))
                         })
                     });
@@ -291,7 +314,7 @@ pub(crate) fn read_item<'a>(
                 // CTEs and views may share.
                 let found = crate::whole_view_names::whole_view_names(schema, &stored)?;
                 let inside = found.as_ref().ok().cloned();
-                planner.note_whole_view(found);
+                planner.note_read_whole(found);
                 Object::View { name, why: why.0.to_owned(), inside }
             } else {
                 Object::Table { name, within: planner.within.clone() }

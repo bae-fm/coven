@@ -947,8 +947,8 @@ no generated columns: sqlive sorts by a generated
 column's expression, which the model states as an expression term. The
 differential's tables hold no generated column: sqlive records no value of
 one for a write and counts it as changed by every write that changes a stored
-column of its row, which the model doesn't state. The model also leaves out bound parameters, table functions, the views sqlive
-reads whole as a join's partner, and the terms that compare a NULL test's truth or
+column of its row, which the model doesn't state. The model also leaves out bound parameters, table functions, the views and
+the CTEs that name themselves that sqlive reads whole as a join's partner, and the terms that compare a NULL test's truth or
 a column `IS` a parameter. The model's index holds only integers, so it doesn't
 state that sqlive files an integer and a real that compare equal under one
 value. Every changed row in the model holds a value in each column, so the

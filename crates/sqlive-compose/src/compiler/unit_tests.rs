@@ -94,12 +94,6 @@ fn shape_messages(header: &str, sql: &str) -> Vec<String> {
 fn each_shape_sqlive_cannot_analyze_fails_the_build_in_fragments_and_reads() {
     let shapes: &[(&str, &str, &str)] = &[
         (
-            "n: i64",
-            "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) \
-             SELECT n + 0 AS n FROM c",
-            "a recursive CTE",
-        ),
-        (
             "t: String",
             "SELECT i.title AS t FROM issues AS i NATURAL JOIN people AS p",
             "a NATURAL or RIGHT join",
@@ -159,6 +153,27 @@ fn each_shape_sqlive_cannot_analyze_fails_the_build_in_fragments_and_reads() {
     }
 }
 
+/// A recursive CTE is read whole, as a view sqlive can't analyze is: a read
+/// warns once for each table the CTE reads, at the place that names the CTE,
+/// and the rest of its SQL narrows. A fragment compiles with no warning.
+#[test]
+fn a_recursive_cte_is_a_warning_for_each_table_it_reads() {
+    let sql = "
+    WITH RECURSIVE later(number) AS (
+        SELECT i.number FROM issues AS i WHERE i.id = :issue
+        UNION SELECT n.number FROM issues AS n JOIN later ON n.number = later.number + 1)
+    SELECT p.name, (SELECT count(*) FROM later) AS later FROM people AS p WHERE p.id = :person";
+    let output = compile_lib(&format!(
+        "sqlive_compose::fragment!(F(issue: String, person: String) {{ later: i64 }}, r#\"{sql}\"#);\n\
+         sqlive_compose::read!(R(issue: String, person: String) {{ later: i64 }}, r#\"{sql}\"#);\n"
+    ))
+    .unwrap();
+    assert_eq!(
+        output.warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["src/lib.rs:6:1: R reads every row of issues at line 5, column 42 of its SQL: a recursive CTE"]
+    );
+}
+
 #[test]
 fn sqlite_refuses_a_cte_column_list_of_the_wrong_length_and_a_second_statement() {
     assert_eq!(
@@ -177,8 +192,10 @@ fn sqlite_refuses_a_cte_column_list_of_the_wrong_length_and_a_second_statement()
     );
 }
 
+/// A view sqlive can't analyze is a warning that names the view, and a view
+/// with a recursive CTE one for each table the CTE reads, in the view.
 #[test]
-fn a_view_with_such_a_shape_is_a_warning_naming_the_view() {
+fn a_view_with_such_a_shape_or_a_recursive_cte_is_a_warning() {
     let output = compile_lib(
         r##"
 sqlive_compose::read!(Weird { t: Option<String> }, r#"SELECT w.title AS t FROM weird AS w"#);
@@ -190,7 +207,7 @@ sqlive_compose::read!(Counting { n: Option<i64> }, r#"SELECT w.n AS n FROM count
         output.warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
         [
             "src/lib.rs:2:1: Weird reads every row of weird at line 1, column 26 of its SQL: a NATURAL or RIGHT join",
-            "src/lib.rs:3:1: Counting reads every row of counting at line 1, column 22 of its SQL: a recursive CTE",
+            "src/lib.rs:3:1: Counting reads every row of issues in `counting`: a recursive CTE",
         ]
     );
 }

@@ -1174,6 +1174,24 @@ counts characters. The warning says where a place is in one of three ways:
 A CTE of the SQL that a read runs gives one warning for each place it reads a
 table whole, however many names read the CTE.
 
+A recursive CTE, one whose SQL names itself, reads every row of each table its
+SQL reads, through other CTEs and views too (sqlive's SPEC.md, section 8). The
+compiler gives one warning for each such table at each place that names the
+CTE, and the rest of the read narrows as it would without the CTE. A read that
+counts the issues after one issue in its project's numbering warns once, at the
+`later` that its count reads:
+
+```sql
+WITH RECURSIVE later(number) AS (
+    SELECT i.number FROM issues AS i WHERE i.id = :issue
+    UNION SELECT n.number FROM issues AS n JOIN later ON n.number = later.number + 1)
+SELECT p.name, (SELECT count(*) FROM later) AS later FROM people AS p WHERE p.id = :person
+```
+
+```text
+warning: tracker/src/later_issues.rs:3:1: LaterIssues reads every row of issues at line 4, column 38 of its SQL: a recursive CTE
+```
+
 The warning names what sqlive reruns the read for, not what SQLite reads on
 each run. A fragment that groups its rows and joins as a table can read every
 row of its tables while sqlive narrows it (section 3).
@@ -1625,7 +1643,7 @@ this order:
    the table the statement changes.
 
 The compiler doesn't ask sqlive what a write depends on, so a write's own SQL
-may hold a shape that section 12 lists, such as a recursive CTE. The compiler
+may hold a shape that section 12 lists, such as a `NATURAL` join. The compiler
 checked the fragments it spreads when their crate compiled. It renames a write's
 CTEs to `<crate>__<write>__<cte>`, as it does a read's.
 
@@ -1718,7 +1736,6 @@ The compiler gives a column that comes unchanged from a table this Rust type:
 A read that holds one of these in a place sqlive reads fails the build. A
 write's own SQL may hold them, since sqlive reads none of it:
 
-- a recursive CTE;
 - a `NATURAL` or `RIGHT` join;
 - a parenthesized join that has an alias, starts with another parenthesized
   join, or joins by `USING`, and one whose rows aren't its tables joined in turn;

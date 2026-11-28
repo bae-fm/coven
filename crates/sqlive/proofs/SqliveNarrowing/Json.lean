@@ -78,7 +78,7 @@ def combineOp : String → Except String Combine
 
 def wholeShape : String → Except String WholeShape
   | "natural" => pure .natural | "right" => pure .right
-  | "recursive" => pure .recursive | "in_table" => pure .inTable | "virtual" => pure .virtual
+  | "in_table" => pure .inTable | "virtual" => pure .virtual
   | other => throw s!"unknown whole shape {other}"
 
 def lift {α : Type} (e : Except String α) : M α := StateT.lift e

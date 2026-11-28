@@ -151,11 +151,7 @@ fn a_read_report_says_what_the_statement_depends_on() {
     };
     assert!(matches!(entries[0].rows, ReadRows::Whole { .. }));
     assert!(matches!(
-        probe
-            .read_report(
-                "WITH RECURSIVE c(n) AS (SELECT 1 UNION SELECT n + 1 FROM c) SELECT n FROM c"
-            )
-            .unwrap(),
+        probe.read_report("SELECT p.name FROM people AS p NATURAL JOIN people AS q").unwrap(),
         ReadReport::Whole { .. }
     ));
 }
