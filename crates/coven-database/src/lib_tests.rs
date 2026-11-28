@@ -231,8 +231,7 @@ where
 }
 
 /// A place where a test's live query stops as it reads a row, until the test
-/// lets it go on. A test keeps one in a `static`, because a live query's row
-/// reader is a function that captures nothing (`LiveSql`).
+/// lets it go on. The test and the query's row reader share it.
 pub(crate) struct Gate(std::sync::Mutex<Option<Stop>>);
 
 /// The channels of one stop at a `Gate`: the query says it stopped on the
@@ -240,8 +239,8 @@ pub(crate) struct Gate(std::sync::Mutex<Option<Stop>>);
 type Stop = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
 
 impl Gate {
-    pub(crate) const fn new() -> Self {
-        Self(std::sync::Mutex::new(None))
+    pub(crate) fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self(std::sync::Mutex::new(None)))
     }
 
     /// Make the next row read stop at the gate. The query stops once and

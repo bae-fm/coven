@@ -233,12 +233,12 @@ impl<S: LiveReads> LiveReads for Maybe<S> {
 pub struct LiveSql<T, U = Vec<T>> {
     statement: TestStatement,
     values: Values,
-    row: fn(&Row<'_>) -> sqlive::rusqlite::Result<T>,
-    finish: fn(Vec<T>) -> Result<U, DbError>,
+    row: RowReader<T>,
+    finish: Box<dyn Fn(Vec<T>) -> Result<U, DbError> + Send + Sync>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl<T> LiveSql<T> {
+impl<T: 'static> LiveSql<T> {
     /// `sql`, bound to `values` by position, whose rows `row` reads.
     ///
     /// # Panics
@@ -247,31 +247,37 @@ impl<T> LiveSql<T> {
     pub fn new(
         sql: impl Into<String>,
         values: &[&dyn sqlive::rusqlite::ToSql],
-        row: fn(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+        row: impl Fn(&Row<'_>) -> sqlive::rusqlite::Result<T> + Send + Sync + 'static,
     ) -> Self {
         let values = Values::positional(values).expect("a test's values bind");
-        Self { statement: TestStatement::App(sql.into()), values, row, finish: Ok }
+        let statement = TestStatement::App(sql.into());
+        Self { statement, values, row: Box::new(row), finish: Box::new(Ok) }
     }
 
     /// `statement`, which a build compiled and binds no value, whose rows
     /// `row` reads.
     pub fn compiled(
         statement: sqlive::CompiledStatement<Writer>,
-        row: fn(&Row<'_>) -> sqlive::rusqlite::Result<T>,
+        row: impl Fn(&Row<'_>) -> sqlive::rusqlite::Result<T> + Send + Sync + 'static,
     ) -> Self {
         let values = Values::Positional(Vec::new());
-        Self { statement: TestStatement::Compiled(statement), values, row, finish: Ok }
+        let statement = TestStatement::Compiled(statement);
+        Self { statement, values, row: Box::new(row), finish: Box::new(Ok) }
     }
 
     /// `sql`, which binds no value, whose rows `row` reads.
-    pub fn of(sql: impl Into<String>, row: fn(&Row<'_>) -> sqlive::rusqlite::Result<T>) -> Self {
+    pub fn of(
+        sql: impl Into<String>,
+        row: impl Fn(&Row<'_>) -> sqlive::rusqlite::Result<T> + Send + Sync + 'static,
+    ) -> Self {
         Self::new(sql, &[], row)
     }
 
     /// The read of the first row alone, which fails with `QueryReturnedNoRows`
     /// when there is none, as `query_row` does.
     pub fn one(self) -> LiveSql<T, T> {
-        LiveSql { statement: self.statement, values: self.values, row: self.row, finish: first }
+        let finish = Box::new(first);
+        LiveSql { statement: self.statement, values: self.values, row: self.row, finish }
     }
 }
 

@@ -10,10 +10,10 @@ use std::sync::{mpsc, Arc, Mutex};
 async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
     let store = TestStore::new();
     let database = store.builder(vec![], vec![]).open().await.unwrap();
-    static GATE: Gate = Gate::new();
-    let (entry, release) = GATE.close();
-    let query = database.subscribe(LiveSql::of("SELECT 17", |r| {
-        GATE.pass();
+    let gate = Gate::new();
+    let (entry, release) = gate.close();
+    let query = database.subscribe(LiveSql::of("SELECT 17", move |r| {
+        gate.pass();
         r.get::<_, i64>(0)
     }));
     let answer = crate::next_result(query);
@@ -283,15 +283,16 @@ async fn a_write_outside_the_scope_during_a_rerun_does_not_run_it_again() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
-    static GATE: Gate = Gate::new();
+    let gate = Gate::new();
+    let reader = std::sync::Arc::clone(&gate);
     let sql = "SELECT id FROM notes WHERE title = 'Plan' ORDER BY id";
-    let mut query: LiveQuery<_, DbError> = db.subscribe(LiveSql::of(sql, |r| {
-        GATE.pass();
+    let mut query: LiveQuery<_, DbError> = db.subscribe(LiveSql::of(sql, move |r| {
+        reader.pass();
         r.get::<_, String>(0)
     }));
     assert_eq!(next_result(&mut query).await.unwrap(), ["a"]);
     for (round, id) in ["b", "c", "d"].into_iter().enumerate() {
-        let (entry, release) = GATE.close();
+        let (entry, release) = gate.close();
         db.commit_writer(|sql, _| {
             sql.batch(&format!("INSERT INTO notes VALUES ('{id}','Plan','')")).unwrap()
         });
@@ -385,12 +386,13 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
 async fn requests_set_during_a_run_wait_for_it_and_the_latest_answers_next() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    static GATE: Gate = Gate::new();
-    let (entry, release) = GATE.close();
+    let gate = Gate::new();
+    let (entry, release) = gate.close();
     let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
-        db.subscribe_reconfigurable(5, |request| {
-            Ok(LiveSql::new("SELECT ?1", &[request], |r| {
-                GATE.pass();
+        db.subscribe_reconfigurable(5, move |request| {
+            let gate = std::sync::Arc::clone(&gate);
+            Ok(LiveSql::new("SELECT ?1", &[request], move |r| {
+                gate.pass();
                 r.get::<_, i32>(0)
             }))
         });

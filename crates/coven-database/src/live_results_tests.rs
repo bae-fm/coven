@@ -19,16 +19,17 @@ fn next_result_after_a_skipped_write_waits_without_holding_a_pool_thread() {
         let store = TestStore::new();
         let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
         db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
-        static GATE: crate::tests::Gate = crate::tests::Gate::new();
+        let gate = crate::tests::Gate::new();
+        let reader = std::sync::Arc::clone(&gate);
         let sql = "SELECT count(*) > 0 FROM notes";
         let query: crate::LiveQuery<_, DbError> =
-            db.subscribe(crate::test_utils::LiveSql::of(sql, |r| {
-                GATE.pass();
+            db.subscribe(crate::test_utils::LiveSql::of(sql, move |r| {
+                reader.pass();
                 r.get::<_, bool>(0)
             }));
         let (query, first) = crate::next_result(query).await;
         assert_eq!(first.unwrap().unwrap(), [true]);
-        let (entry, release) = GATE.close();
+        let (entry, release) = gate.close();
         let answer = tokio::spawn(crate::next_result(query));
         db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
         // The run that finds an equal result has started, and goes on.

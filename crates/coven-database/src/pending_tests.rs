@@ -289,13 +289,15 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     db.inspect_writer(|sql, _| {
         sql.batch("CREATE TEMP TRIGGER fail_pending BEFORE INSERT ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;").unwrap();
     });
-    static GATE: crate::tests::Gate = crate::tests::Gate::new();
-    let (entry, release) = GATE.close();
-    let live: crate::LiveQuery<_, DbError> =
-        db.subscribe(crate::test_utils::LiveSql::of("SELECT count(*) FROM coven_pending", |r| {
-            GATE.pass();
+    let gate = crate::tests::Gate::new();
+    let (entry, release) = gate.close();
+    let live: crate::LiveQuery<_, DbError> = db.subscribe(crate::test_utils::LiveSql::of(
+        "SELECT count(*) FROM coven_pending",
+        move |r| {
+            gate.pass();
             r.get::<_, i64>(0)
-        }));
+        },
+    ));
     // The query's run holds a thread of tokio's blocking pool until the test
     // releases it, so the test's own thread stays free to record the update.
     let mut held = tokio::spawn(crate::next_result(live));
