@@ -4,11 +4,13 @@
 //! parameters of a closure given to a library method called on such a value,
 //! as `head.cover.map(|cover| ..)` binds `cover`: to a fixed point over the
 //! body and its closures. How a value carries it is the flow's `Spread`.
+//! The sources may include the locals a body's parameters bind, so a value
+//! a caller passed in can carry what the caller read.
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def::Res;
 use rustc_hir::intravisit::{self, Visitor};
-use rustc_hir::{Expr, ExprKind, HirId, LetStmt, Pat, QPath};
+use rustc_hir::{Expr, ExprKind, HirId, LetStmt, Pat, QPath, StructTailExpr};
 use rustc_middle::hir::nested_filter::OnlyBodies;
 use rustc_middle::ty::{TyCtxt, TypeckResults};
 
@@ -27,6 +29,10 @@ pub(super) enum Spread {
     /// The expression names a source or a local holding what one returned,
     /// anywhere outside a closure: a value computed from it.
     Mention,
+    /// The value is made of the source's: as for `Value`, and what any
+    /// function or method given it as an argument returns, and a struct,
+    /// tuple or array literal with a part made of it.
+    Made,
 }
 
 /// The locals of one body that hold what flows from its sources.
@@ -63,6 +69,7 @@ impl<'s, 'tcx> Flow<'s, 'tcx> {
     pub(super) fn carries(&self, expr: &'tcx Expr<'tcx>) -> bool {
         match self.spread {
             Spread::Value => self.carries_value(expr),
+            Spread::Made => self.carries_made(expr),
             Spread::Mention => {
                 let mut mention = Mention { flow: self, found: false };
                 mention.visit_expr(expr);
@@ -96,6 +103,36 @@ impl<'s, 'tcx> Flow<'s, 'tcx> {
                     _ => false,
                 };
                 library && arguments.iter().any(carries)
+            }
+            ExprKind::Match(_, arms, _) => arms.iter().any(|arm| carries(arm.body)),
+            ExprKind::If(_, then, otherwise) => carries(then) || otherwise.is_some_and(carries),
+            ExprKind::Block(block, _) => block.expr.is_some_and(carries),
+            ExprKind::AddrOf(_, _, inner)
+            | ExprKind::DropTemps(inner)
+            | ExprKind::Field(inner, _)
+            | ExprKind::Index(inner, _, _)
+            | ExprKind::Unary(_, inner)
+            | ExprKind::Cast(inner, _)
+            | ExprKind::Type(inner, _) => carries(inner),
+            _ => false,
+        }
+    }
+
+    fn carries_made(&self, expr: &Expr<'tcx>) -> bool {
+        if self.names(expr) {
+            return true;
+        }
+        let carries = |inner| self.carries_made(inner);
+        match expr.kind {
+            ExprKind::MethodCall(_, receiver, arguments, _) => {
+                carries(receiver) || arguments.iter().any(carries)
+            }
+            ExprKind::Call(_, arguments)
+            | ExprKind::Tup(arguments)
+            | ExprKind::Array(arguments) => arguments.iter().any(carries),
+            ExprKind::Struct(_, fields, tail) => {
+                fields.iter().any(|field| carries(field.expr))
+                    || matches!(tail, StructTailExpr::Base(base) if carries(base))
             }
             ExprKind::Match(_, arms, _) => arms.iter().any(|arm| carries(arm.body)),
             ExprKind::If(_, then, otherwise) => carries(then) || otherwise.is_some_and(carries),
