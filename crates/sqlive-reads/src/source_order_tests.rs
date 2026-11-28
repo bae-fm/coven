@@ -19,11 +19,12 @@ fn order(sql: &str) -> Vec<String> {
 
 #[test]
 fn an_item_that_waited_goes_as_soon_as_it_stops() {
-    // Once c is placed, a takes values from a placed source and b doesn't,
-    // but both waited and b comes first in the FROM.
+    // Once c is placed, a and b both stop waiting, and a goes first, though
+    // b comes first in the FROM: a takes values from c, which is placed, so
+    // b can take values from a.
     assert_eq!(
         order("SELECT * FROM b JOIN a ON b.x = a.x WHERE a.y = (SELECT c.y FROM c WHERE c.id = 1)"),
-        ["c", "b", "a"]
+        ["c", "a", "b"]
     );
 }
 
@@ -36,10 +37,12 @@ fn an_item_waits_for_the_partner_of_an_or() {
 }
 
 #[test]
-fn a_core_goes_before_the_cores_inside_it() {
+fn an_item_of_a_core_inside_goes_as_soon_as_the_row_around_it_is_placed() {
+    // c waits for a, the row of the query around its own, and once a is
+    // placed, c takes values from it and goes before b.
     assert_eq!(
         order("SELECT * FROM a, b WHERE a.id = 1 AND EXISTS (SELECT 1 FROM c WHERE c.x = a.x)"),
-        ["a", "b", "c"]
+        ["a", "c", "b"]
     );
 }
 
@@ -94,14 +97,15 @@ fn an_edge_passed_into_a_subquery_orders_its_items() {
 
 #[test]
 fn an_item_with_every_partner_waiting_waits_in_turn() {
-    // b takes values only from a, which waits for c, and d only from b.
+    // b takes values only from a, which waits for c, and d only from b, so
+    // each goes after the item it takes values from.
     assert_eq!(
         order(
             "SELECT * FROM b JOIN a ON b.x = a.x
              WHERE EXISTS (SELECT 1 FROM d WHERE d.y = b.y)
              AND a.y = (SELECT c.y FROM c WHERE c.id = 1)"
         ),
-        ["c", "b", "a", "d"]
+        ["c", "a", "b", "d"]
     );
 }
 
